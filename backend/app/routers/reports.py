@@ -28,7 +28,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
-from sqlalchemy import and_, func, cast, Date
+from sqlalchemy import and_, func, cast, Date, case
 from sqlalchemy.orm import Session, aliased
 
 import openpyxl
@@ -445,79 +445,63 @@ def _build_claim_summary(db, facility_id, payer_id, encounter_type,
     # fac_map: id → (facility_name, license_id)  — used for receiver fallback
     fac_map = {f.id: (f.facility_name, f.license_id) for f in db.query(Facility).all()}
 
-    latest_rem_sq = (
+    # ── Ranked remittances per claim ────────────────────────────────────────────
+    # ra_rank=1 → 1st adjudication (initial submission)
+    # ra_rank=2 → 2nd adjudication (after resubmission)
+    rem_ranked_sq = (
         db.query(
             Remittance.facility_id,
             Remittance.claim_id,
-            func.max(Remittance.id).label("max_id"),
-        )
-        .group_by(Remittance.facility_id, Remittance.claim_id)
-        .subquery()
+            Remittance.id.label("rem_id"),
+            func.row_number().over(
+                partition_by=[Remittance.facility_id, Remittance.claim_id],
+                order_by=Remittance.id,
+            ).label("ra_rank"),
+        ).subquery()
     )
-    latest_rem = aliased(Remittance)
+    row_rem = aliased(Remittance)
 
-    # Resubmission subquery: for each original claim, find total net of
-    # resubmission claims with same facility + member + encounter date
-    resub_sq = (
+    # ── Resubmission net per (facility_id, claim_id) ────────────────────────────
+    # Lets initial rows show "Resubmitted Amt" column without a separate lookup.
+    resub_net_sq = (
         db.query(
             Claim.facility_id.label("fid"),
-            Claim.member_id.label("mid"),
-            cast(Claim.encounter_start, Date).label("enc_date"),
-            func.sum(Claim.net_amount).label("resub_amt"),
+            Claim.claim_id.label("cid"),
+            Claim.net_amount.label("resub_net"),
         )
-        .filter(Claim.resubmission_type.isnot(None))
-        .group_by(
-            Claim.facility_id,
-            Claim.member_id,
-            cast(Claim.encounter_start, Date),
-        )
+        .filter(Claim.resubmission_key != "")
         .subquery()
     )
 
-    # 2nd-RA subquery: resubmission claims that have ALSO received their own RA.
-    # resub_net > resub_paid → still has receivable after 2nd adjudication → "Reconcilable"
-    resub_ra_sq = (
-        db.query(
-            Claim.facility_id.label("fid"),
-            Claim.member_id.label("mid"),
-            cast(Claim.encounter_start, Date).label("enc_date"),
-            func.sum(Claim.net_amount).label("resub_net"),
-            func.sum(Remittance.paid_amount).label("resub_paid"),
-        )
-        .join(Remittance, Remittance.claim_id == Claim.claim_id)
-        .filter(Claim.resubmission_type.isnot(None))
-        .group_by(
-            Claim.facility_id,
-            Claim.member_id,
-            cast(Claim.encounter_start, Date),
-        )
-        .subquery()
-    )
-
+    # ── Main query: ALL claim rows (initial + resubmissions) ───────────────────
+    # Each row joins to its "correct" RA:
+    #   initial row (resubmission_key='')  → ra_rank 1 (first RA)
+    #   resub row   (resubmission_key!='') → ra_rank 2 (second RA)
     q = (
-        db.query(Claim, latest_rem, resub_sq.c.resub_amt,
-                 resub_ra_sq.c.resub_net, resub_ra_sq.c.resub_paid)
-        .outerjoin(latest_rem_sq, and_(
-            Claim.facility_id == latest_rem_sq.c.facility_id,
-            Claim.claim_id    == latest_rem_sq.c.claim_id,
+        db.query(Claim, row_rem, resub_net_sq.c.resub_net)
+        .outerjoin(rem_ranked_sq, and_(
+            Claim.facility_id  == rem_ranked_sq.c.facility_id,
+            Claim.claim_id     == rem_ranked_sq.c.claim_id,
+            rem_ranked_sq.c.ra_rank == case(
+                (Claim.resubmission_key == "", 1),
+                else_=2,
+            ),
         ))
-        .outerjoin(latest_rem, latest_rem.id == latest_rem_sq.c.max_id)
-        .outerjoin(resub_sq, and_(
-            Claim.facility_id == resub_sq.c.fid,
-            Claim.member_id   == resub_sq.c.mid,
-            cast(Claim.encounter_start, Date) == resub_sq.c.enc_date,
-            Claim.resubmission_type.is_(None),   # only attach to original claims
-        ))
-        .outerjoin(resub_ra_sq, and_(
-            Claim.facility_id == resub_ra_sq.c.fid,
-            Claim.member_id   == resub_ra_sq.c.mid,
-            cast(Claim.encounter_start, Date) == resub_ra_sq.c.enc_date,
-            Claim.resubmission_type.is_(None),
+        .outerjoin(row_rem, row_rem.id == rem_ranked_sq.c.rem_id)
+        .outerjoin(resub_net_sq, and_(
+            Claim.facility_id      == resub_net_sq.c.fid,
+            Claim.claim_id         == resub_net_sq.c.cid,
+            Claim.resubmission_key == "",  # only attach resub_net to initial rows
         ))
     )
     q = _apply_filters(q, facility_id, payer_id, encounter_type,
-                       date_from, date_to, date_field, rem_model=latest_rem)
-    rows = q.order_by(Claim.submission_date.desc()).all()
+                       date_from, date_to, date_field, rem_model=row_rem)
+    # Order: by claim_id so initial+resub rows appear together; initial first
+    rows = q.order_by(
+        Claim.submission_date.desc(),
+        Claim.claim_id,
+        Claim.resubmission_key,
+    ).all()
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -525,49 +509,57 @@ def _build_claim_summary(db, facility_id, payer_id, encounter_type,
     ws.freeze_panes = "A2"
     _write_headers(ws, CLAIM_SUMMARY_COLS)
 
-    for row_idx, (claim, rem, resub_amt, resub_net, resub_paid) in enumerate(rows, start=2):
+    for row_idx, (claim, rem, resub_net) in enumerate(rows, start=2):
         fac_name, fac_license = fac_map.get(claim.facility_id, ("", ""))
         sub_level = _submission_level(claim.resubmission_type)
+        is_resub  = claim.resubmission_key != ""
 
-        # --- Financial calculations ---
-        net_sub  = float(claim.net_amount) if claim.net_amount is not None else None
-        ra_net   = float(rem.net_amount)   if rem and rem.net_amount   is not None else ""
-        paid     = float(rem.paid_amount)  if rem and rem.paid_amount  is not None else None
+        # ── Financial calculations ─────────────────────────────────────────────
+        # net_sub: for initial row = claim amount; for resub row = 0 in "Initial Sub" col
+        claim_net = float(claim.net_amount) if claim.net_amount is not None else None
+        net_sub   = 0.0 if is_resub else claim_net   # "Net Amt - Initial Sub" column
 
-        approved  = _f(paid) if paid is not None else ""
-        unsettled = ""
-        rejected  = ""
+        ra_net  = float(rem.net_amount)  if rem and rem.net_amount  is not None else ""
+        paid    = float(rem.paid_amount) if rem and rem.paid_amount is not None else None
+
+        approved   = _f(paid) if paid is not None else ""
+        unsettled  = ""
+        rejected   = ""
         pay_status = ""
 
-        if net_sub is not None and paid is not None:
-            rejected  = round(max(0.0, net_sub - paid), 2)
-            has_resub          = resub_amt  is not None and float(resub_amt)  > 0
-            resub_has_ra       = resub_net  is not None   # 2nd RA received
-            resub_receivable   = resub_has_ra and float(resub_net or 0) > float(resub_paid or 0)
-            if paid >= net_sub:
+        # Resubmitted Amt column:
+        #   initial row → resub_net (amount that was resubmitted)
+        #   resub row   → claim.net_amount (the resubmission amount itself)
+        if is_resub:
+            resub_col = _f(claim_net) if claim_net is not None else ""
+        else:
+            resub_col = _f(float(resub_net)) if resub_net is not None else ""
+
+        # Use claim_net (actual net of THIS submission level) for rejected/unsettled calc
+        this_net = claim_net  # resub row uses resub claim net; initial uses initial net
+
+        if this_net is not None and paid is not None:
+            rejected = round(max(0.0, this_net - paid), 2)
+            if paid >= this_net:
                 pay_status = "Fully Paid"
-            elif rejected > 0 and resub_has_ra and resub_receivable:
-                pay_status = "Reconcilable"
-            elif rejected > 0 and has_resub:
-                pay_status = "Resub Awaiting Adjudication"
-            elif paid == 0.0 and not has_resub:
+            elif paid == 0.0:
                 pay_status = "Fully Rejected"
             else:
                 pay_status = "Partially Paid"
         elif rem:
-            # RA exists but claim net missing
             pay_status = rem.claim_status_ra or ""
+        elif is_resub:
+            pay_status = "Awaiting Adjudication"
         else:
-            # No RA received yet
-            pay_status = "Unpaid"
+            # Initial submission, no RA yet — check if resubmission exists
+            has_resub  = resub_net is not None
+            pay_status = "Resub Awaiting Adjudication" if has_resub else "Unpaid"
 
-        # Unsettled = full claim amount for everything except Fully Paid
-        if pay_status != "Fully Paid":
-            if net_sub is not None and paid is not None:
-                unsettled = round(net_sub - paid, 2)
-            elif net_sub is not None:
-                # No RA yet (Unpaid) — entire claim is unsettled
-                unsettled = net_sub
+        if pay_status not in ("Fully Paid",):
+            if this_net is not None and paid is not None:
+                unsettled = round(max(0.0, this_net - paid), 2)
+            elif this_net is not None:
+                unsettled = this_net
 
         den_code  = rem.denial_code        or "" if rem else ""
         den_desc  = rem.denial_description or "" if rem else ""
@@ -595,7 +587,7 @@ def _build_claim_summary(db, facility_id, payer_id, encounter_type,
             _f(net_sub) if net_sub is not None else "",
             ra_net,
             approved, rejected,
-            _f(resub_amt) if resub_amt is not None else "",
+            resub_col,
             unsettled,
             pay_status, den_code, den_desc, ra_date, tat,
         ], alt=(row_idx % 2 == 0))

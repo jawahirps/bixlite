@@ -246,6 +246,9 @@ class Claim(Base):
     # Resubmission type from <Resubmission><Type> in claim XML
     # Values: NULL = initial, 'Correction', 'InternalComplaint', 'Reconciliation'
     resubmission_type: Mapped[Optional[str]] = mapped_column(String(50))
+    # resubmission_key = '' for initial, resubmission_type value for resubmissions.
+    # Used in unique constraint so initial + resubmission rows coexist per claim_id.
+    resubmission_key : Mapped[str]           = mapped_column(String(50), nullable=False, default="")
 
     # Internal
     created_at       : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now())
@@ -256,7 +259,7 @@ class Claim(Base):
     activities       : Mapped[List["ClaimActivity"]]  = relationship(back_populates="claim", cascade="all, delete-orphan")
 
     __table_args__ = (
-        UniqueConstraint("facility_id", "claim_id", name="uq_claims_facility_claim_id"),
+        UniqueConstraint("facility_id", "claim_id", "resubmission_key", name="uq_claims_facility_claim_resub"),
         CheckConstraint("source_channel IN ('API', 'EXCEL_HISTORICAL')", name="ck_claim_source_channel"),
         Index("idx_claims_encounter_start", "encounter_start"),
         Index("idx_claims_payer", "payer_id"),

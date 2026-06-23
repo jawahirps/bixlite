@@ -203,6 +203,7 @@ class DHPOXmlParser:
                 submission_date=record.submission_date or datetime.utcnow().date(),
                 claim_status="submitted",
                 resubmission_type=elem.findtext("Resubmission/Type"),
+                resubmission_key=elem.findtext("Resubmission/Type") or "",
             )
 
             # 1. Nested Diagnoses
@@ -247,11 +248,15 @@ class DHPOXmlParser:
                     )
                 db_claim.activities.append(db_act)
 
-            # Upsert: avoid duplicates if the same XML is re-synced
+            # Upsert: match on (facility_id, claim_id, resubmission_key) so that
+            # initial submissions and resubmissions are stored as SEPARATE rows.
+            # Only replace if the SAME submission level is re-synced (true duplicate).
+            resub_key = db_claim.resubmission_key  # '' for initial, type for resub
             existing = self.db.scalar(
                 select(Claim).where(
-                    Claim.facility_id == record.facility_id,
-                    Claim.claim_id == claim_id,
+                    Claim.facility_id    == record.facility_id,
+                    Claim.claim_id       == claim_id,
+                    Claim.resubmission_key == resub_key,
                 )
             )
             if existing:

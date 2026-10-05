@@ -177,7 +177,7 @@ for chunk_start in range(0, len(xml_records), BATCH):
                             receiver_id,
                             gross_amount, net_amount, patient_share_total,
                             submission_date, claim_status,
-                            resubmission_type, resubmission_key,
+                            resubmission_type, resubmission_key, resubmission_count,
                             created_at, updated_at
                         ) VALUES (
                             :facility_id, :raw_xml_id, 'API', :claim_id,
@@ -188,7 +188,7 @@ for chunk_start in range(0, len(xml_records), BATCH):
                             :receiver_id,
                             :gross_amount, :net_amount, :patient_share_total,
                             :submission_date, 'submitted',
-                            NULL, '',
+                            NULL, '', 0,
                             now(), now()
                         )
                         ON CONFLICT (facility_id, claim_id, resubmission_key) DO NOTHING

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import apiClient from "../api/client";
 
 const selectClass =
@@ -6,6 +6,117 @@ const selectClass =
 
 const labelClass = "mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500";
 
+// ── Multi-select facility dropdown ────────────────────────────────────────
+function FacilityMultiSelect({ facilities, selectedIds, onChange }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  // Close on outside click
+  useEffect(() => {
+    function handle(e) {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener("mousedown", handle);
+    return () => document.removeEventListener("mousedown", handle);
+  }, []);
+
+  const toggle = (id) => {
+    const next = selectedIds.includes(id)
+      ? selectedIds.filter((x) => x !== id)
+      : [...selectedIds, id];
+    onChange(next);
+  };
+
+  const selectAll = () => onChange([]);
+  const label =
+    selectedIds.length === 0
+      ? "All Facilities"
+      : selectedIds.length === 1
+      ? facilities.find((f) => f.id === selectedIds[0])?.name || "1 facility"
+      : `${selectedIds.length} facilities`;
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm focus:border-ghaf-400 focus:outline-none focus:ring-1 focus:ring-ghaf-400 flex items-center justify-between gap-2"
+      >
+        <span className={selectedIds.length === 0 ? "text-slate-400" : "text-slate-700"}>
+          {label}
+        </span>
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          className={`h-4 w-4 text-slate-400 transition-transform ${open ? "rotate-180" : ""}`}
+          viewBox="0 0 20 20" fill="currentColor"
+        >
+          <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
+        </svg>
+      </button>
+
+      {open && (
+        <div className="absolute z-30 mt-1 w-full min-w-[260px] rounded-xl border border-slate-200 bg-white shadow-xl">
+          {/* All Facilities option */}
+          <button
+            type="button"
+            onClick={selectAll}
+            className={`w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-slate-50 border-b border-slate-100 ${selectedIds.length === 0 ? "font-semibold text-ghaf-700" : "text-slate-600"}`}
+          >
+            <span className={`w-4 h-4 rounded border flex items-center justify-center flex-shrink-0 ${selectedIds.length === 0 ? "bg-ghaf-600 border-ghaf-600" : "border-slate-300"}`}>
+              {selectedIds.length === 0 && (
+                <svg className="w-3 h-3 text-white" viewBox="0 0 12 12" fill="none">
+                  <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              )}
+            </span>
+            All Facilities
+          </button>
+
+          {/* Individual facilities */}
+          <div className="max-h-64 overflow-y-auto py-1">
+            {facilities.map((f) => {
+              const checked = selectedIds.includes(f.id);
+              return (
+                <button
+                  key={f.id}
+                  type="button"
+                  onClick={() => toggle(f.id)}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-slate-50 text-left"
+                >
+                  <span className={`w-4 h-4 rounded border flex items-center justify-center flex-shrink-0 ${checked ? "bg-ghaf-600 border-ghaf-600" : "border-slate-300"}`}>
+                    {checked && (
+                      <svg className="w-3 h-3 text-white" viewBox="0 0 12 12" fill="none">
+                        <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                      </svg>
+                    )}
+                  </span>
+                  <span className={checked ? "text-slate-900 font-medium" : "text-slate-600"}>
+                    {f.name}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          {selectedIds.length > 0 && (
+            <div className="border-t border-slate-100 px-3 py-2 flex justify-between items-center">
+              <span className="text-xs text-slate-400">{selectedIds.length} selected</span>
+              <button
+                type="button"
+                onClick={selectAll}
+                className="text-xs text-ghaf-600 hover:underline"
+              >
+                Clear
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Main FilterBar ─────────────────────────────────────────────────────────
 export default function FilterBar({ filters, onChange }) {
   const [options, setOptions] = useState({
     facilities: [],
@@ -26,9 +137,23 @@ export default function FilterBar({ filters, onChange }) {
     onChange({ ...filters, [key]: value || undefined });
   };
 
-  const reset = () => {
-    onChange({});
+  // facility_ids is stored as an array of ints in state, sent as comma-string to API
+  const selectedFacilityIds = filters.facility_ids
+    ? filters.facility_ids.split(",").map(Number).filter(Boolean)
+    : [];
+
+  const handleFacilityChange = (ids) => {
+    if (ids.length === 0) {
+      // Remove both facility keys
+      const { facility_id, facility_ids, ...rest } = filters;
+      onChange(rest);
+    } else {
+      const { facility_id, ...rest } = filters;
+      onChange({ ...rest, facility_ids: ids.join(",") });
+    }
   };
+
+  const reset = () => onChange({});
 
   return (
     <div className="rounded-xl bg-white p-4 shadow-sm">
@@ -36,18 +161,11 @@ export default function FilterBar({ filters, onChange }) {
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
         <div>
           <label className={labelClass}>Facility</label>
-          <select
-            className={selectClass}
-            value={filters.facility_id || ""}
-            onChange={(e) => update("facility_id", e.target.value)}
-          >
-            <option value="">All Facilities</option>
-            {options.facilities.map((f) => (
-              <option key={f.id} value={f.id}>
-                {f.name}
-              </option>
-            ))}
-          </select>
+          <FacilityMultiSelect
+            facilities={options.facilities}
+            selectedIds={selectedFacilityIds}
+            onChange={handleFacilityChange}
+          />
         </div>
 
         <div>
@@ -117,7 +235,6 @@ export default function FilterBar({ filters, onChange }) {
 
       {/* Row 2: Date filters */}
       <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
-        {/* Date search criteria */}
         <div>
           <label className={labelClass}>Search Criteria</label>
           <select
@@ -132,9 +249,7 @@ export default function FilterBar({ filters, onChange }) {
 
         <div>
           <label className={labelClass}>
-            {filters.date_field === "remittance_date"
-              ? "Remittance Date From"
-              : "Treatment Date From"}
+            {filters.date_field === "remittance_date" ? "Remittance Date From" : "Treatment Date From"}
           </label>
           <input
             type="date"
@@ -146,9 +261,7 @@ export default function FilterBar({ filters, onChange }) {
 
         <div>
           <label className={labelClass}>
-            {filters.date_field === "remittance_date"
-              ? "Remittance Date To"
-              : "Treatment Date To"}
+            {filters.date_field === "remittance_date" ? "Remittance Date To" : "Treatment Date To"}
           </label>
           <input
             type="date"
@@ -160,11 +273,15 @@ export default function FilterBar({ filters, onChange }) {
       </div>
 
       <div className="mt-3 flex items-center justify-between">
-        {/* Active filter summary */}
         <p className="text-xs text-slate-400">
           {filters.date_field === "remittance_date"
             ? "📅 Filtering by Remittance Transaction Date"
             : "📅 Filtering by Treatment Date"}
+          {selectedFacilityIds.length > 0 && (
+            <span className="ml-2 text-ghaf-600 font-medium">
+              · {selectedFacilityIds.length} {selectedFacilityIds.length === 1 ? "facility" : "facilities"} selected
+            </span>
+          )}
         </p>
         <button
           type="button"

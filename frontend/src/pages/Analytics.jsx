@@ -58,6 +58,36 @@ const REPORTS = [
     description: "Denied claims with CPT code and RA info",
     icon: "🔍",
   },
+  {
+    key: "claim-summary-v2",
+    label: "Claim Summary V2",
+    description: "Enhanced: Emirates ID, allowed amt, variance, TPA comments, activity counts",
+    icon: "📋",
+  },
+  {
+    key: "claim-activity-v2",
+    label: "Claim Activity V2",
+    description: "Enhanced: submitted net, allowed amt, activity variance & status, TPA comments",
+    icon: "🔬",
+  },
+  {
+    key: "claim-cycle-v2",
+    label: "Claim Cycle V2",
+    description: "One row per claim — Sub Rank, RA Rank, lifecycle status across full DHA eClaimLink cycle",
+    icon: "🔄",
+  },
+  {
+    key: "remittance-activity-v2",
+    label: "Remittance Activity V2",
+    description: "Enhanced: days to settlement, submitted net, activity variance, TPA comments",
+    icon: "💳",
+  },
+  {
+    key: "denial-scrub-action",
+    label: "Denial Scrub Action",
+    description: "Denied claims only — scrub rule findings + auto-generated resubmission action comment. Run after each DHPO fetch.",
+    icon: "⚡",
+  },
 ];
 
 function buildQueryString(filters, extra = {}) {
@@ -96,11 +126,12 @@ function fmtFilterSummary(filters = {}) {
 // ---------------------------------------------------------------------------
 // Report Queue Row
 // ---------------------------------------------------------------------------
-function JobRow({ job, onDownload }) {
+function JobRow({ job, onDownload, onCancel }) {
   const statusColor =
     job.status === "completed" ? "text-green-700 bg-green-50"
-    : job.status === "error"    ? "text-red-700 bg-red-50"
-    :                             "text-slate-600 bg-slate-100";
+    : job.status === "error"   ? "text-red-700 bg-red-50"
+    : job.status === "failed"  ? "text-red-700 bg-red-50"
+    :                            "text-slate-600 bg-slate-100";
 
   return (
     <tr className="border-t border-slate-100 hover:bg-slate-50">
@@ -109,6 +140,9 @@ function JobRow({ job, onDownload }) {
       </td>
       <td className="px-3 py-2.5">
         <span className="text-sm font-medium text-slate-800">{job.report_label}</span>
+      </td>
+      <td className="px-3 py-2.5 text-xs text-slate-600 whitespace-nowrap">
+        {job.facility_name || "All Facilities"}
       </td>
       <td className="px-3 py-2.5 text-xs text-slate-500">
         {fmtFilterSummary(job.filters)}
@@ -139,9 +173,20 @@ function JobRow({ job, onDownload }) {
             </svg>
             Download
           </button>
+        ) : (job.status === "pending" || job.status === "running") ? (
+          <button
+            onClick={() => onCancel(job)}
+            title="Cancel this job"
+            className="inline-flex items-center gap-1 rounded-lg bg-red-100 px-2.5 py-1 text-xs font-semibold text-red-700 hover:bg-red-200 transition"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" viewBox="0 0 20 20" fill="currentColor">
+              <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+            </svg>
+            Cancel
+          </button>
         ) : (
           <span className="text-xs text-slate-400 italic">
-            {job.error ? "Error" : "No file"}
+            {job.status === "failed" ? "Cancelled" : job.error ? "Error" : "No file"}
           </span>
         )}
       </td>
@@ -172,6 +217,7 @@ export default function Analytics() {
       .get("/reports/jobs")
       .then((res) => {
         setReportJobs(res.data);
+        return res.data;
       })
       .catch((err) => {
         const detail = err.response?.data?.detail || err.message || "Unknown error";
@@ -180,6 +226,7 @@ export default function Analytics() {
             ? "The report_jobs table does not exist yet. Please run the migration SQL in your psql terminal."
             : `Could not load report queue: ${detail}`
         );
+        return [];
       })
       .finally(() => setJobsLoading(false));
   }, []);
@@ -187,6 +234,20 @@ export default function Analytics() {
   useEffect(() => {
     loadJobs();
   }, [loadJobs]);
+
+  // Auto-poll every 3s while any job is "pending" or "running"
+  // Guard: ignore jobs older than 15 min (likely stuck from a server restart)
+  useEffect(() => {
+    const fifteenMinAgo = Date.now() - 15 * 60 * 1000;
+    const hasActive = reportJobs.some(
+      (j) =>
+        (j.status === "pending" || j.status === "running") &&
+        new Date(j.created_at).getTime() > fifteenMinAgo
+    );
+    if (!hasActive) return;
+    const timer = setTimeout(() => loadJobs(), 3000);
+    return () => clearTimeout(timer);
+  }, [reportJobs, loadJobs]);
 
   // Generate a report — POSTs to /generate/{type}, saves to queue
   const generateReport = async (reportKey) => {
@@ -204,6 +265,27 @@ export default function Analytics() {
       alert(`Report generation failed:\n${firstLine}`);
     } finally {
       setGenerating(null);
+    }
+  };
+
+  // Cancel a pending/running job
+  const cancelJob = async (job) => {
+    if (!window.confirm(`Cancel job #${String(job.id).padStart(4, "0")} — ${job.report_label}?`)) return;
+    try {
+      const token = localStorage.getItem("ghaf_token");
+      const res = await fetch(`/api/reports/jobs/${job.id}/cancel`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(`Cancel failed: ${err.detail || res.status}`);
+        return;
+      }
+      // Refresh queue
+      loadJobs();
+    } catch (err) {
+      alert(`Cancel failed: ${err.message}`);
     }
   };
 
@@ -361,11 +443,12 @@ export default function Analytics() {
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[700px] text-sm">
+              <table className="w-full min-w-[800px] text-sm">
                 <thead>
                   <tr className="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
                     <th className="px-3 py-2 text-left w-16">ID</th>
                     <th className="px-3 py-2 text-left">Report</th>
+                    <th className="px-3 py-2 text-left">Facility</th>
                     <th className="px-3 py-2 text-left">Date Filter</th>
                     <th className="px-3 py-2 text-right w-24">Rows</th>
                     <th className="px-3 py-2 text-left w-24">Status</th>
@@ -376,7 +459,7 @@ export default function Analytics() {
                 </thead>
                 <tbody>
                   {reportJobs.map((job) => (
-                    <JobRow key={job.id} job={job} onDownload={downloadJob} />
+                    <JobRow key={job.id} job={job} onDownload={downloadJob} onCancel={cancelJob} />
                   ))}
                 </tbody>
               </table>

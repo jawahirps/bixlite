@@ -1,0 +1,57 @@
+{
+  "rule_pack_id": "UAE-2025-STUB",
+  "version": "0.1.0-stub",
+  "effective_from": "2025-01-01",
+  "authority": "DoH / DHA / MoHAP — populate with licensed rule tables",
+  "sources": [
+    "https://www.doh.gov.ae/-/media/Feature/shafifya/Prices/Adjudication-Rules/DOH-Claims-and-Adjudication-Rules-V2025.ashx",
+    "https://www.doh.gov.ae/-/media/Feature/shafifya/standards/coding/DOH-Coding-Manual-CSv2021.ashx",
+    "https://www.isahd.ae/content/docs/eClaimLink%20General%20Circular%20GC06%202018%20-%20Denial%20Code%20Updates.pdf"
+  ],
+  "cpt_icd": {
+    "excludes1_pairs": []
+  },
+  "bundling": {
+    "mue": [
+      {
+        "rule_id": "MUE-44970",
+        "code": "44970",
+        "max_units": 1,
+        "per": "beneficiary_date",
+        "severity": "WARN",
+        "source_ids": ["DoH-MUE-2025"]
+      }
+    ],
+    "mutually_exclusive_pairs": []
+  },
+  "service_frequency": [
+    {
+      "rule_id": "FREQ-EM-7D",
+      "codes": ["99211", "99212", "99213", "99214", "99215"],
+      "window_days": 7,
+      "min_days": 1,
+      "max_count": 1,
+      "action": "follow-up review",
+      "required_modifier": null,
+      "source_ids": ["DoH-Coding-2025"]
+    },
+    {
+      "rule_id": "FREQ-EM-14D",
+      "codes": ["99211", "99212", "99213", "99214", "99215"],
+      "window_days": 14,
+      "min_days": 8,
+      "max_count": 1,
+      "action": "modifier-52 review",
+      "required_modifier": "52",
+      "source_ids": ["DoH-Coding-2025"]
+    }
+  ],
+  "denial_impact": {
+    "rules": [
+      {"code": "CODE-001", "description": "Missing/invalid diagnosis", "weight": 20},
+      {"code": "CODE-006", "description": "CPT–ICD linkage / procedure inconsistency", "weight": 15},
+      {"code": "CODE-016", "description": "Frequency / MUE / modifier violation", "weight": 25},
+      {"code": "MNEC-007", "description": "Bundling / component code / MNEC", "weight": 30}
+    ]
+  }
+}

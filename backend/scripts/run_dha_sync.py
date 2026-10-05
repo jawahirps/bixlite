@@ -41,7 +41,7 @@ def main() -> None:
     parser.add_argument("--to", dest="date_to", type=parse_date, required=True, help="YYYY-MM-DD")
     args = parser.parse_args()
 
-    with DHASyncService(db_url=settings.DATABASE_URL, eclaimlink_api_base="https://eclaimlink.ae/api/v1") as worker:
+    with DHASyncService(db_url=settings.DATABASE_URL) as worker:
         fetch_log = worker.run_sync_pipeline(
             facility_id=args.facility_id,
             date_from=args.date_from,

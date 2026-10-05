@@ -1,0 +1,48 @@
+{
+  "guideline_pack_id": "NAS-2026",
+  "version": "1.0.0",
+  "scope": "NAS Administration Services LLC — opt-in TPA/payer layer only",
+  "source": {
+    "url": "https://www.nas.ae/clinical-guidelines/",
+    "captured": "2026-09-22"
+  },
+  "rules": [
+    {
+      "rule_id": "NAS_VITD_REPEAT_90D",
+      "codes": ["82306", "82652"],
+      "window_days": 90,
+      "severity": "WARN",
+      "guideline": "Vitamin D repeat testing within 90 days",
+      "message": "Vitamin D test (82306/82652) repeated within 90 days for the same member. NAS guideline requires clinical indication documentation for repeat testing within 90 days."
+    },
+    {
+      "rule_id": "NAS_VITD_82652_COMPLEX_INDICATION",
+      "codes": ["82652"],
+      "severity": "WARN",
+      "guideline": "1,25-dihydroxy Vitamin D complex indication",
+      "message": "CPT 82652 (1,25-dihydroxy Vitamin D) requires complex clinical indication per NAS guideline. Verify documentation."
+    },
+    {
+      "rule_id": "NAS_VITD_COMBINATION_REVIEW",
+      "codes": ["82306", "82652"],
+      "severity": "WARN",
+      "guideline": "Combined 82306 + 82652 Vitamin D testing",
+      "message": "Both 82306 and 82652 appear in the same claim. NAS guideline flags simultaneous 25-OH and 1,25-dihydroxy Vitamin D testing for clinical indication review."
+    },
+    {
+      "rule_id": "NAS_ECHO_DOPPLER_BUNDLE_REVIEW",
+      "parent_code": "93306",
+      "component_codes": ["93320", "93321", "93325"],
+      "severity": "WARN",
+      "guideline": "Echocardiography with Doppler bundling",
+      "message": "93306 (complete echocardiography) with Doppler add-on codes may require bundling review per NAS guideline."
+    },
+    {
+      "rule_id": "NAS_INFUSION_96376_30MIN_REVIEW",
+      "codes": ["96376"],
+      "severity": "WARN",
+      "guideline": "96376 timing and same-drug relationship",
+      "message": "CPT 96376 (each additional sequential IV push) requires: same drug as prior push, minimum 30-minute interval, and cannot be first push. Verify timing and drug identity per NAS guideline."
+    }
+  ]
+}

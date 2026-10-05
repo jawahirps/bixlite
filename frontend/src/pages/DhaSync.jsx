@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import apiClient from "../api/client";
 import { useAuth } from "../context/AuthContext";
 
@@ -20,25 +20,77 @@ function StatusBadge({ status }) {
   );
 }
 
+// Layer 2: scrub quality badge fetched lazily per ClaimSubmission row
+const scrubCache = {};  // raw_xml_id → summary
+
+function ScrubBadge({ rawId }) {
+  const [summary, setSummary] = useState(scrubCache[rawId] ?? null);
+  const mounted = useRef(true);
+
+  useEffect(() => {
+    mounted.current = true;
+    if (scrubCache[rawId] !== undefined) { setSummary(scrubCache[rawId]); return; }
+    apiClient.get(`/dha-sync/raw-xml/${rawId}/xml-scrub-summary`)
+      .then(r => {
+        scrubCache[rawId] = r.data;
+        if (mounted.current) setSummary(r.data);
+      })
+      .catch(() => { scrubCache[rawId] = null; });
+    return () => { mounted.current = false; };
+  }, [rawId]);
+
+  if (!summary) return <span className="text-slate-300 text-xs">—</span>;
+  if (!summary.scrubbed) return <span className="text-slate-400 text-xs">not scrubbed</span>;
+
+  const { status, blocks, warnings, risk_level } = summary;
+  if (status === "BLOCK") {
+    return (
+      <span title={`${blocks} block(s) · risk: ${risk_level}`}
+            className="inline-flex items-center gap-1 rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700">
+        ✗ {blocks} block{blocks !== 1 ? "s" : ""}
+      </span>
+    );
+  }
+  if (status === "WARN") {
+    return (
+      <span title={`${warnings} warning(s) · risk: ${risk_level}`}
+            className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700">
+        ⚠ {warnings} warn{warnings !== 1 ? "s" : ""}
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">
+      ✓ Pass
+    </span>
+  );
+}
+
 export default function DhaSync() {
   const { user } = useAuth();
-  const [xmlType, setXmlType] = useState("ClaimSubmission");
-  const [submissionDate, setSubmissionDate] = useState("");
-  const [file, setFile] = useState(null);
-  const [uploading, setUploading] = useState(false);
-  const [triggering, setTriggering] = useState(false);
-  const [message, setMessage] = useState(null);
-  const [error, setError] = useState(null);
 
   const [rawXml, setRawXml] = useState([]);
   const [fetchLogs, setFetchLogs] = useState([]);
+  const [scrubFilter, setScrubFilter] = useState("all");
+  const [expandedRaw, setExpandedRaw] = useState(null);
+  const [findings, setFindings] = useState({});
+  const [batchScrubbing, setBatchScrubbing] = useState(false);
+  const [batchResult, setBatchResult] = useState(null);
+  const [loadingTables, setLoadingTables] = useState(false);
+  const [error, setError] = useState(null);
+  // scrubSummaryVersion increments when scrubCache is updated, triggering re-render of filters
+  const [scrubSummaryVersion, setScrubSummaryVersion] = useState(0);
 
+  // Date filter
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
-  const [fetching, setFetching] = useState(false);
-  const [loadingTables, setLoadingTables] = useState(false);
 
-  // Facility selector — admins can pick any facility; persisted across refreshes
+  // Row selection for bulk export
+  const [selectedRows, setSelectedRows] = useState(new Set());
+  const [downloadingId, setDownloadingId] = useState(null);
+  const [bulkDownloading, setBulkDownloading] = useState(false);
+
+  // Facility selector
   const [facilities, setFacilities] = useState([]);
   const [selectedFacilityId, setSelectedFacilityId] = useState(() => {
     const saved = localStorage.getItem("ghaf_dha_facility_id");
@@ -46,8 +98,23 @@ export default function DhaSync() {
   });
   const [facilitiesError, setFacilitiesError] = useState(null);
 
-  // Resolved facility_id: user selection takes priority, then user's own facility
   const activeFacilityId = selectedFacilityId || user?.facility_id;
+
+  // Pre-load all scrub summaries for a facility so filters work immediately
+  const loadScrubSummaries = async (facilityId) => {
+    const fid = facilityId ?? activeFacilityId;
+    if (!fid) return;
+    try {
+      const r = await apiClient.get("/dha-sync/scrub-summaries", { params: { facility_id: fid } });
+      // Merge into module-level cache
+      Object.entries(r.data).forEach(([id, summary]) => {
+        scrubCache[Number(id)] = summary;
+      });
+      setScrubSummaryVersion(v => v + 1);
+    } catch {
+      // Non-fatal — badges will still load individually
+    }
+  };
 
   const loadTables = async (facilityId) => {
     const fid = facilityId ?? activeFacilityId;
@@ -56,11 +123,13 @@ export default function DhaSync() {
     try {
       const params = fid ? { facility_id: fid } : {};
       const [rawRes, logRes] = await Promise.all([
-        apiClient.get("/dha-sync/raw-xml", { params }),
+        apiClient.get("/dha-sync/raw-xml", { params: { ...params, limit: 500 } }),
         apiClient.get("/dha-sync/fetch-logs", { params }),
+        loadScrubSummaries(fid),  // fire in parallel
       ]);
       setRawXml(rawRes.data);
       setFetchLogs(logRes.data);
+      setSelectedRows(new Set());
     } catch (err) {
       setError(err.response?.data?.detail || "Failed to load DHA sync history");
     } finally {
@@ -74,120 +143,154 @@ export default function DhaSync() {
   };
 
   useEffect(() => {
-    // Load facility list for the selector
     fetch("/api/facilities", {
       headers: { Authorization: `Bearer ${localStorage.getItem("ghaf_token")}` },
     })
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      })
-      .then((data) => {
-        setFacilities(Array.isArray(data) ? data : []);
-      })
-      .catch((err) => {
-        setFacilitiesError(err.message);
-        console.error("Facilities fetch failed:", err);
-      });
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(data => setFacilities(Array.isArray(data) ? data : []))
+      .catch(err => { setFacilitiesError(err.message); });
     loadTables(selectedFacilityId);
   }, []);
 
-  const handleUpload = async (e) => {
-    e.preventDefault();
-    if (!file) {
-      setError("Choose an XML file to upload first");
-      return;
-    }
-    setUploading(true);
-    setError(null);
-    setMessage(null);
+  async function runBatchScrub() {
+    if (!activeFacilityId) return;
+    setBatchScrubbing(true); setBatchResult(null);
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-      const params = { facility_id: activeFacilityId, xml_type: xmlType };
-      if (submissionDate) params.submission_date = submissionDate;
-
-      const { data } = await apiClient.post("/dha-sync/upload", formData, {
-        params,
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-      setMessage(`Staged ${data.source_filename} as ${data.xml_type} (status: ${data.parse_status}).`);
-      setFile(null);
+      const r = await apiClient.post(`/dha-sync/batch-scrub?facility_id=${activeFacilityId}&limit=500`);
+      const d = r.data;
+      setBatchResult(`✅ Scrubbed ${d.scrubbed} file(s).${d.failed > 0 ? ` ⚠ ${d.failed} failed.` : ""}${d.total === 0 ? " All files already scrubbed." : ""}`);
+      Object.keys(scrubCache).forEach(k => delete scrubCache[k]);
       await loadTables();
-    } catch (err) {
-      setError(err.response?.data?.detail || "Upload failed");
-    } finally {
-      setUploading(false);
-    }
-  };
+    } catch (e) {
+      setBatchResult("❌ Batch scrub failed: " + (e.response?.data?.detail || e.message));
+    } finally { setBatchScrubbing(false); }
+  }
 
-  const handleTrigger = async () => {
-    setTriggering(true);
-    setError(null);
-    setMessage(null);
+  async function toggleFindings(rawId) {
+    if (expandedRaw === rawId) { setExpandedRaw(null); return; }
+    setExpandedRaw(rawId);
+    if (findings[rawId]) return;
     try {
-      const { data } = await apiClient.post("/dha-sync/trigger", null, {
-        params: { facility_id: activeFacilityId },
-      });
-      setMessage(data.message);
-      await loadTables();
-    } catch (err) {
-      setError(err.response?.data?.detail || "DHA sync trigger failed");
-    } finally {
-      setTriggering(false);
+      const r = await apiClient.get(`/dha-sync/raw-xml/${rawId}/xml-findings`);
+      setFindings(prev => ({ ...prev, [rawId]: r.data }));
+    } catch {
+      setFindings(prev => ({ ...prev, [rawId]: [] }));
     }
-  };
+  }
 
-  const handleFetch = async (e) => {
-    e.preventDefault();
-    if (!dateFrom || !dateTo) {
-      setError("Choose a from and to date for the eClaimLink fetch");
-      return;
-    }
-    setFetching(true);
-    setError(null);
-    setMessage(null);
+  // ── Excel export helpers ────────────────────────────────────────────────────
+  function triggerBlobDownload(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  }
+
+  async function downloadSingleExcel(rawId, filename) {
+    setDownloadingId(rawId);
     try {
-      const { data } = await apiClient.post("/dha-sync/fetch", {
-        facility_id: activeFacilityId,
-        date_from: dateFrom,
-        date_to: dateTo,
-      });
-      setMessage(
-        `eClaimLink fetch run #${data.id}: ${data.status} — fetched ${data.records_fetched}, ` +
-          `parsed ${data.records_parsed}, failed ${data.records_failed}.`
+      const r = await apiClient.get(`/dha-sync/raw-xml/${rawId}/export-excel`, { responseType: "blob" });
+      const safe = (filename || `raw_${rawId}`).replace(".xml", "");
+      triggerBlobDownload(r.data, `scrub_${safe}.xlsx`);
+    } catch (e) {
+      setError("Excel export failed: " + (e.response?.data?.detail || e.message));
+    } finally { setDownloadingId(null); }
+  }
+
+  async function downloadBulkExcel() {
+    if (selectedRows.size === 0) return;
+    setBulkDownloading(true);
+    try {
+      const r = await apiClient.post("/dha-sync/export-excel-bulk",
+        { raw_xml_ids: [...selectedRows] },
+        { responseType: "blob" },
       );
-      await loadTables();
-    } catch (err) {
-      setError(err.response?.data?.detail || "eClaimLink fetch failed");
-    } finally {
-      setFetching(false);
+      triggerBlobDownload(r.data, "scrub_findings_export.xlsx");
+    } catch (e) {
+      setError("Bulk export failed: " + (e.response?.data?.detail || e.message));
+    } finally { setBulkDownloading(false); }
+  }
+
+  // ── Filtering ───────────────────────────────────────────────────────────────
+  const claimRows = rawXml.filter(r => r.xml_type === "ClaimSubmission" || r.xml_type === "RiayatiClaimSubmission");
+
+  // Apply date filter then scrub filter
+  // scrubSummaryVersion in the dep chain ensures re-evaluation when cache fills
+  const filteredRaw = rawXml.filter(r => {
+    // Date range filter on submission_date
+    if (dateFrom && r.submission_date && r.submission_date < dateFrom) return false;
+    if (dateTo   && r.submission_date && r.submission_date > dateTo)   return false;
+    // Scrub status filter
+    if (scrubFilter === "scrubbed")     return scrubCache[r.id]?.scrubbed;
+    if (scrubFilter === "not_scrubbed") return (r.xml_type === "ClaimSubmission" || r.xml_type === "RiayatiClaimSubmission") && !scrubCache[r.id]?.scrubbed;
+    if (scrubFilter === "block")  return scrubCache[r.id]?.status === "BLOCK";
+    if (scrubFilter === "warn")   return scrubCache[r.id]?.status === "WARN";
+    if (scrubFilter === "pass")   return scrubCache[r.id]?.status === "PASS";
+    return true;
+  });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  void scrubSummaryVersion; // consumed so React re-renders when cache updates
+
+  const visibleClaimIds = filteredRaw
+    .filter(r => r.xml_type === "ClaimSubmission" || r.xml_type === "RiayatiClaimSubmission")
+    .map(r => r.id);
+  const allVisibleSelected = visibleClaimIds.length > 0 && visibleClaimIds.every(id => selectedRows.has(id));
+
+  function toggleSelectAll() {
+    if (allVisibleSelected) {
+      setSelectedRows(prev => {
+        const next = new Set(prev);
+        visibleClaimIds.forEach(id => next.delete(id));
+        return next;
+      });
+    } else {
+      setSelectedRows(prev => new Set([...prev, ...visibleClaimIds]));
     }
+  }
+
+  function toggleRow(id) {
+    setSelectedRows(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+
+  // Scrub stat counts
+  const scrubbedRows = claimRows.filter(r => scrubCache[r.id]?.scrubbed);
+  const blockCount   = scrubbedRows.filter(r => scrubCache[r.id]?.status === "BLOCK").length;
+  const warnCount    = scrubbedRows.filter(r => scrubCache[r.id]?.status === "WARN").length;
+  const passCount    = scrubbedRows.filter(r => scrubCache[r.id]?.status === "PASS").length;
+
+  const SEVERITY_STYLE = {
+    BLOCK: "bg-red-100 text-red-700",
+    WARN:  "bg-amber-100 text-amber-700",
+    PASS:  "bg-emerald-100 text-emerald-700",
   };
 
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-slate-900">DHA XML Sync</h1>
+        <h1 className="text-2xl font-bold text-slate-900">XML Scrub Monitor</h1>
         <p className="text-sm text-slate-500">
-          Stage ClaimSubmission / RemittanceAdvice XML (DHA Shafafiya / eClaimLink format) and run the sync pipeline.
+          Quality check on fetched ClaimSubmission files — click any row to see per-claim findings.
         </p>
       </div>
 
-      {/* Facility selector */}
+      {/* Facility selector + actions */}
       <div className="rounded-xl bg-white p-4 shadow-sm">
         <label className="mb-1 block text-xs font-medium text-slate-600">Facility</label>
         {facilitiesError && (
-          <p className="mb-2 text-xs text-red-600">Could not load facilities list: {facilitiesError} — enter facility ID manually below.</p>
+          <p className="mb-2 text-xs text-red-600">Could not load facilities: {facilitiesError}</p>
         )}
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {facilities.length > 0 ? (
             <select
               value={selectedFacilityId}
-              onChange={(e) => handleFacilityChange(Number(e.target.value))}
+              onChange={e => handleFacilityChange(Number(e.target.value))}
               className="w-full max-w-sm rounded-lg border border-slate-300 px-3 py-1.5 text-sm focus:border-ghaf-500 focus:outline-none focus:ring-1 focus:ring-ghaf-500"
             >
-              {facilities.map((f) => (
+              {facilities.map(f => (
                 <option key={f.id} value={f.id}>
                   {f.facility_name} ({f.dhpo_provider_id || "no provider ID"})
                 </option>
@@ -196,10 +299,10 @@ export default function DhaSync() {
           ) : (
             <input
               type="number"
-              placeholder="Facility ID (e.g. 13 for Apollo Clinics)"
+              placeholder="Facility ID"
               value={selectedFacilityId}
-              onChange={(e) => handleFacilityChange(Number(e.target.value))}
-              className="w-full max-w-sm rounded-lg border border-slate-300 px-3 py-1.5 text-sm focus:border-ghaf-500 focus:outline-none focus:ring-1 focus:ring-ghaf-500"
+              onChange={e => handleFacilityChange(Number(e.target.value))}
+              className="w-full max-w-xs rounded-lg border border-slate-300 px-3 py-1.5 text-sm focus:border-ghaf-500 focus:outline-none focus:ring-1 focus:ring-ghaf-500"
             />
           )}
           <button
@@ -207,150 +310,268 @@ export default function DhaSync() {
             disabled={loadingTables}
             className="rounded-lg bg-ghaf-600 px-4 py-1.5 text-sm font-semibold text-white hover:bg-ghaf-700 disabled:opacity-60"
           >
-            {loadingTables ? "Loading…" : "Load Data"}
+            {loadingTables ? "Loading…" : "Refresh"}
           </button>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <div className="rounded-xl bg-white p-5 shadow-sm">
-          <h2 className="mb-3 font-semibold text-slate-900">1. Upload XML</h2>
-          <form onSubmit={handleUpload} className="space-y-3">
-            <div>
-              <label className="mb-1 block text-xs font-medium text-slate-600">XML Type</label>
-              <select
-                value={xmlType}
-                onChange={(e) => setXmlType(e.target.value)}
-                className="w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm focus:border-ghaf-500 focus:outline-none focus:ring-1 focus:ring-ghaf-500"
-              >
-                <option value="ClaimSubmission">ClaimSubmission</option>
-                <option value="RemittanceAdvice">RemittanceAdvice</option>
-              </select>
-            </div>
-            <div>
-              <label className="mb-1 block text-xs font-medium text-slate-600">Submission Date</label>
-              <input
-                type="date"
-                value={submissionDate}
-                onChange={(e) => setSubmissionDate(e.target.value)}
-                className="w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm focus:border-ghaf-500 focus:outline-none focus:ring-1 focus:ring-ghaf-500"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs font-medium text-slate-600">XML File</label>
-              <input
-                type="file"
-                accept=".xml"
-                onChange={(e) => setFile(e.target.files?.[0] || null)}
-                className="w-full text-sm"
-              />
-            </div>
-            <button
-              type="submit"
-              disabled={uploading}
-              className="rounded-lg bg-ghaf-600 px-4 py-2 text-sm font-semibold text-white hover:bg-ghaf-700 disabled:opacity-60"
-            >
-              {uploading ? "Uploading…" : "Upload to Raw XML Store"}
-            </button>
-          </form>
-        </div>
-
-        <div className="rounded-xl bg-white p-5 shadow-sm">
-          <h2 className="mb-3 font-semibold text-slate-900">2. Trigger Sync Pipeline</h2>
-          <p className="mb-4 text-sm text-slate-500">
-            Parses all <span className="font-medium">pending</span> raw XML records into normalized claims and
-            remittances, recording a fetch log entry.
-          </p>
           <button
-            onClick={handleTrigger}
-            disabled={triggering}
-            className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-60"
+            onClick={runBatchScrub}
+            disabled={batchScrubbing}
+            title="Scrub all ClaimSubmission files that haven't been checked yet"
+            className="rounded-lg border border-ghaf-600 px-4 py-1.5 text-sm font-semibold text-ghaf-700 hover:bg-ghaf-50 disabled:opacity-60"
           >
-            {triggering ? "Running pipeline…" : "Trigger DHA XML Sync"}
+            {batchScrubbing ? "Scrubbing…" : "Re-scrub All"}
           </button>
-        </div>
-
-        <div className="rounded-xl bg-white p-5 shadow-sm lg:col-span-2">
-          <h2 className="mb-3 font-semibold text-slate-900">3. Live eClaimLink Fetch</h2>
-          <p className="mb-4 text-sm text-slate-500">
-            Pull ClaimSubmission / RemittanceAdvice transactions directly from eClaimLink (DHPO) for a date range,
-            stage them, and run the sync pipeline in one step.
-          </p>
-          <form onSubmit={handleFetch} className="flex flex-wrap items-end gap-3">
-            <div>
-              <label className="mb-1 block text-xs font-medium text-slate-600">From</label>
-              <input
-                type="date"
-                value={dateFrom}
-                onChange={(e) => setDateFrom(e.target.value)}
-                className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm focus:border-ghaf-500 focus:outline-none focus:ring-1 focus:ring-ghaf-500"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs font-medium text-slate-600">To</label>
-              <input
-                type="date"
-                value={dateTo}
-                onChange={(e) => setDateTo(e.target.value)}
-                className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm focus:border-ghaf-500 focus:outline-none focus:ring-1 focus:ring-ghaf-500"
-              />
-            </div>
+          {selectedRows.size > 0 && (
             <button
-              type="submit"
-              disabled={fetching}
-              className="rounded-lg bg-ghaf-600 px-4 py-2 text-sm font-semibold text-white hover:bg-ghaf-700 disabled:opacity-60"
+              onClick={downloadBulkExcel}
+              disabled={bulkDownloading}
+              className="rounded-lg bg-emerald-600 px-4 py-1.5 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-60 flex items-center gap-1.5"
             >
-              {fetching ? "Fetching…" : "Fetch from eClaimLink"}
+              {bulkDownloading ? "Exporting…" : `⬇ Export ${selectedRows.size} file${selectedRows.size !== 1 ? "s" : ""} (.xlsx)`}
             </button>
-          </form>
+          )}
+        </div>
+        {batchResult && <p className="mt-2 text-xs text-slate-600">{batchResult}</p>}
+      </div>
+
+      {/* Scrub summary stats */}
+      {claimRows.length > 0 && (
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          {[
+            { label: "Total Files", value: claimRows.length, color: "bg-slate-50 text-slate-800" },
+            { label: "Blocks", value: blockCount, color: blockCount > 0 ? "bg-red-50 text-red-700" : "bg-slate-50 text-slate-400" },
+            { label: "Warnings", value: warnCount, color: warnCount > 0 ? "bg-amber-50 text-amber-700" : "bg-slate-50 text-slate-400" },
+            { label: "Pass", value: passCount, color: passCount > 0 ? "bg-emerald-50 text-emerald-700" : "bg-slate-50 text-slate-400" },
+          ].map(s => (
+            <div key={s.label} className={`rounded-xl p-4 shadow-sm ${s.color}`}>
+              <p className="text-2xl font-bold">{s.value}</p>
+              <p className="text-xs font-medium mt-0.5 opacity-70">{s.label}</p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {error && <div className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</div>}
+
+      {/* Date filter */}
+      <div className="rounded-xl bg-white p-4 shadow-sm">
+        <p className="mb-2 text-xs font-semibold text-slate-600 uppercase tracking-wide">Filter by Submission Date</p>
+        <div className="flex flex-wrap items-end gap-3">
+          <div>
+            <label className="mb-1 block text-xs text-slate-500">From</label>
+            <input
+              type="date"
+              value={dateFrom}
+              onChange={e => setDateFrom(e.target.value)}
+              className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm focus:border-ghaf-500 focus:outline-none focus:ring-1 focus:ring-ghaf-500"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs text-slate-500">To</label>
+            <input
+              type="date"
+              value={dateTo}
+              onChange={e => setDateTo(e.target.value)}
+              className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm focus:border-ghaf-500 focus:outline-none focus:ring-1 focus:ring-ghaf-500"
+            />
+          </div>
+          {(dateFrom || dateTo) && (
+            <button
+              onClick={() => { setDateFrom(""); setDateTo(""); }}
+              className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs text-slate-500 hover:bg-slate-50"
+            >
+              Clear dates
+            </button>
+          )}
+          <p className="text-xs text-slate-400 self-end pb-1.5">
+            Showing {filteredRaw.length} of {rawXml.length} files
+            {scrubFilter !== "all" && ` (${scrubFilter.replace("_", " ")} filter active)`}
+          </p>
         </div>
       </div>
 
-      {message && <p className="text-sm text-emerald-700">{message}</p>}
-      {error && <p className="text-sm text-red-600">{error}</p>}
+      {/* Filter chips */}
+      <div className="flex flex-wrap gap-2">
+        {[
+          { key: "all", label: "All Files" },
+          { key: "block", label: "✗ Blocks" },
+          { key: "warn", label: "⚠ Warnings" },
+          { key: "pass", label: "✓ Pass" },
+          { key: "not_scrubbed", label: "Not scrubbed" },
+        ].map(f => (
+          <button key={f.key} onClick={() => setScrubFilter(f.key)}
+            className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+              scrubFilter === f.key ? "bg-ghaf-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+            }`}>
+            {f.label}
+          </button>
+        ))}
+      </div>
 
-      <div className="rounded-xl bg-white p-5 shadow-sm">
-        <h2 className="mb-3 font-semibold text-slate-900">Raw XML Store</h2>
+      {/* Main table */}
+      <div className="rounded-xl bg-white shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-slate-200 text-sm">
             <thead className="bg-slate-50">
               <tr>
+                {/* Select-all checkbox */}
+                <th className="w-8 px-2 py-2">
+                  <input
+                    type="checkbox"
+                    checked={allVisibleSelected}
+                    onChange={toggleSelectAll}
+                    title="Select all visible ClaimSubmission rows"
+                    className="rounded border-slate-300 text-ghaf-600 focus:ring-ghaf-500"
+                  />
+                </th>
+                <th className="w-6" />
                 <th className="px-3 py-2 text-left font-semibold text-slate-600">File</th>
                 <th className="px-3 py-2 text-left font-semibold text-slate-600">Type</th>
                 <th className="px-3 py-2 text-left font-semibold text-slate-600">Submission Date</th>
                 <th className="px-3 py-2 text-left font-semibold text-slate-600">Fetched</th>
                 <th className="px-3 py-2 text-left font-semibold text-slate-600">Status</th>
-                <th className="px-3 py-2 text-left font-semibold text-slate-600">Records Parsed</th>
+                <th className="px-3 py-2 text-right font-semibold text-slate-600">Records</th>
+                <th className="px-3 py-2 text-left font-semibold text-slate-600">Scrub</th>
+                <th className="px-3 py-2 text-left font-semibold text-slate-600">Export</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {rawXml.length === 0 && (
+              {filteredRaw.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="px-3 py-4 text-center text-slate-400">No XML files staged yet.</td>
+                  <td colSpan={10} className="px-3 py-6 text-center text-slate-400">
+                    {loadingTables ? "Loading…" : "No files match the current filter."}
+                  </td>
                 </tr>
               )}
-              {rawXml.map((r) => (
-                <tr key={r.id} className="hover:bg-slate-50">
-                  <td className="px-3 py-2 text-slate-800">{r.source_filename || "—"}</td>
-                  <td className="px-3 py-2 text-slate-600">{r.xml_type}</td>
-                  <td className="px-3 py-2 text-slate-600">{r.submission_date || "—"}</td>
-                  <td className="px-3 py-2 text-slate-600">{new Date(r.fetched_at).toLocaleString()}</td>
-                  <td className="px-3 py-2"><StatusBadge status={r.parse_status} /></td>
-                  <td className="px-3 py-2 text-slate-600">{r.records_parsed ?? "—"}</td>
-                </tr>
-              ))}
+              {filteredRaw.map(r => {
+                const isExpanded = expandedRaw === r.id;
+                const isClaimSub = r.xml_type === "ClaimSubmission" || r.xml_type === "RiayatiClaimSubmission";
+                const rowFindings = findings[r.id] || [];
+                const isSelected = selectedRows.has(r.id);
+                return (
+                  <>
+                    <tr key={r.id}
+                      className={`transition-colors ${isClaimSub ? "hover:bg-ghaf-50" : "hover:bg-slate-50"} ${isExpanded ? "bg-ghaf-50" : ""} ${isSelected ? "bg-ghaf-50/60" : ""}`}
+                    >
+                      {/* Checkbox */}
+                      <td className="px-2 py-2 text-center" onClick={e => e.stopPropagation()}>
+                        {isClaimSub ? (
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => toggleRow(r.id)}
+                            className="rounded border-slate-300 text-ghaf-600 focus:ring-ghaf-500"
+                          />
+                        ) : null}
+                      </td>
+                      {/* Expand toggle */}
+                      <td className="pl-1 text-slate-400 text-xs cursor-pointer"
+                          onClick={() => isClaimSub && toggleFindings(r.id)}>
+                        {isClaimSub ? (isExpanded ? "▾" : "▸") : ""}
+                      </td>
+                      <td className="px-3 py-2 text-slate-800 max-w-xs truncate cursor-pointer"
+                          title={r.source_filename}
+                          onClick={() => isClaimSub && toggleFindings(r.id)}>
+                        {r.source_filename || "—"}
+                      </td>
+                      <td className="px-3 py-2 text-slate-500 text-xs">{r.xml_type}</td>
+                      <td className="px-3 py-2 text-slate-600">{r.submission_date || "—"}</td>
+                      <td className="px-3 py-2 text-slate-500 text-xs">{new Date(r.fetched_at).toLocaleString()}</td>
+                      <td className="px-3 py-2"><StatusBadge status={r.parse_status} /></td>
+                      <td className="px-3 py-2 text-right text-slate-600">{r.records_parsed ?? "—"}</td>
+                      <td className="px-3 py-2">
+                        {isClaimSub ? <ScrubBadge rawId={r.id} /> : <span className="text-slate-300 text-xs">—</span>}
+                      </td>
+                      {/* Per-row Excel download */}
+                      <td className="px-3 py-2">
+                        {isClaimSub ? (
+                          <button
+                            onClick={e => { e.stopPropagation(); downloadSingleExcel(r.id, r.source_filename); }}
+                            disabled={downloadingId === r.id}
+                            title="Download findings as Excel"
+                            className="rounded px-2 py-0.5 text-xs font-medium text-emerald-700 border border-emerald-300 hover:bg-emerald-50 disabled:opacity-50"
+                          >
+                            {downloadingId === r.id ? "…" : "⬇ xlsx"}
+                          </button>
+                        ) : <span className="text-slate-300 text-xs">—</span>}
+                      </td>
+                    </tr>
+                    {isExpanded && (
+                      <tr key={`${r.id}-findings`} className="bg-slate-50">
+                        <td colSpan={10} className="px-6 py-3">
+                          {rowFindings.length === 0 ? (
+                            <p className="text-xs text-slate-400 italic">Loading findings…</p>
+                          ) : rowFindings.length === 0 ? (
+                            <p className="text-xs text-slate-400 italic">No findings (file passed scrub).</p>
+                          ) : (
+                            <table className="w-full text-xs">
+                              <thead>
+                                <tr className="text-slate-500 border-b border-slate-200">
+                                  <th className="pb-1 text-left font-semibold">Severity</th>
+                                  <th className="pb-1 text-left font-semibold">Rule</th>
+                                  <th className="pb-1 text-left font-semibold">Claim ID</th>
+                                  <th className="pb-1 text-left font-semibold">Enc. Date</th>
+                                  <th className="pb-1 text-left font-semibold">Activity</th>
+                                  <th className="pb-1 text-left font-semibold w-1/2">Message</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-slate-100">
+                                {rowFindings.map(f => (
+                                  <tr key={f.id}>
+                                    <td className="py-1 pr-3">
+                                      <span className={`rounded-full px-2 py-0.5 font-medium ${SEVERITY_STYLE[f.severity] || "bg-slate-100 text-slate-600"}`}>
+                                        {f.severity}
+                                      </span>
+                                    </td>
+                                    <td className="py-1 pr-3 font-mono text-slate-700">{f.rule_id}</td>
+                                    <td className="py-1 pr-3 text-slate-600">{f.claim_id || "—"}</td>
+                                    <td className="py-1 pr-3 text-slate-500">{f.encounter_date || "—"}</td>
+                                    <td className="py-1 pr-3 text-slate-600">{f.activity_id || "—"}</td>
+                                    <td className="py-1 text-slate-700">{f.message}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          )}
+                        </td>
+                      </tr>
+                    )}
+                  </>
+                );
+              })}
             </tbody>
           </table>
         </div>
+        {/* Bulk export bar — shows when rows are selected */}
+        {selectedRows.size > 0 && (
+          <div className="flex items-center justify-between border-t border-slate-200 bg-ghaf-50 px-4 py-2">
+            <span className="text-xs text-slate-600">
+              {selectedRows.size} file{selectedRows.size !== 1 ? "s" : ""} selected
+            </span>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setSelectedRows(new Set())}
+                className="rounded px-3 py-1 text-xs text-slate-500 hover:text-slate-700"
+              >
+                Clear
+              </button>
+              <button
+                onClick={downloadBulkExcel}
+                disabled={bulkDownloading}
+                className="rounded-lg bg-emerald-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-60"
+              >
+                {bulkDownloading ? "Exporting…" : `⬇ Download ${selectedRows.size} file${selectedRows.size !== 1 ? "s" : ""} as Excel`}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* Coverage Summary */}
+      {/* Fetch Coverage */}
       {fetchLogs.length > 0 && (
         <div className="rounded-xl bg-white p-5 shadow-sm">
           <h2 className="mb-1 font-semibold text-slate-900">Fetch Coverage</h2>
           <p className="mb-3 text-xs text-slate-500">
             Each row = one fetch run. Green = success, amber = partial, red = failed.
-            Use this to verify every requested date window was fully captured.
           </p>
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-slate-200 text-sm">
@@ -366,29 +587,23 @@ export default function DhaSync() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {fetchLogs.map((f) => {
+                {fetchLogs.map(f => {
                   const rowBg =
                     f.status === "success" ? "bg-emerald-50" :
                     f.status === "partial" ? "bg-amber-50" :
                     f.status === "failed"  ? "bg-red-50" : "";
                   const icon =
-                    f.status === "success" ? "✅" :
-                    f.status === "partial" ? "⚠️" :
-                    f.status === "failed"  ? "❌" :
-                    f.status === "running" ? "⏳" : "—";
+                    f.status === "success" ? "✅" : f.status === "partial" ? "⚠️" :
+                    f.status === "failed"  ? "❌" : f.status === "running" ? "⏳" : "—";
                   const duration = f.completed_at
                     ? Math.round((new Date(f.completed_at) - new Date(f.started_at)) / 1000)
                     : null;
                   return (
                     <tr key={f.id} className={`${rowBg} hover:brightness-95`}>
                       <td className="px-3 py-2 text-slate-500 text-xs">#{f.id}</td>
-                      <td className="px-3 py-2 font-mono text-slate-800">
-                        {f.date_from} → {f.date_to}
-                      </td>
+                      <td className="px-3 py-2 font-mono text-slate-800">{f.date_from} → {f.date_to}</td>
                       <td className="px-3 py-2">
-                        <span className="flex items-center gap-1">
-                          {icon} <StatusBadge status={f.status} />
-                        </span>
+                        <span className="flex items-center gap-1">{icon} <StatusBadge status={f.status} /></span>
                       </td>
                       <td className="px-3 py-2 text-right text-slate-700">{f.records_fetched ?? "—"}</td>
                       <td className="px-3 py-2 text-right text-slate-700">{f.records_parsed ?? "—"}</td>
@@ -398,9 +613,7 @@ export default function DhaSync() {
                           : <span className="text-slate-400">0</span>}
                       </td>
                       <td className="px-3 py-2 text-slate-500 text-xs">
-                        {f.completed_at
-                          ? `${new Date(f.completed_at).toLocaleString()} (${duration}s)`
-                          : "—"}
+                        {f.completed_at ? `${new Date(f.completed_at).toLocaleString()} (${duration}s)` : "—"}
                       </td>
                     </tr>
                   );
@@ -411,7 +624,7 @@ export default function DhaSync() {
         </div>
       )}
 
-      {/* Full Sync Run History */}
+      {/* Sync Run History */}
       <div className="rounded-xl bg-white p-5 shadow-sm">
         <h2 className="mb-3 font-semibold text-slate-900">Sync Run History</h2>
         <div className="overflow-x-auto">
@@ -434,7 +647,7 @@ export default function DhaSync() {
                   <td colSpan={8} className="px-3 py-4 text-center text-slate-400">No sync runs yet.</td>
                 </tr>
               )}
-              {fetchLogs.map((f) => (
+              {fetchLogs.map(f => (
                 <tr key={f.id} className="hover:bg-slate-50">
                   <td className="px-3 py-2 text-slate-400 text-xs">#{f.id}</td>
                   <td className="px-3 py-2 font-mono text-slate-700">{f.date_from}</td>

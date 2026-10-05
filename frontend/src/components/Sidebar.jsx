@@ -3,10 +3,13 @@ import { NavLink } from "react-router-dom";
 const navItems = [
   { to: "/", label: "Dashboard", end: true },
   { to: "/clinical-profiles", label: "Clinical Profiles" },
-  { to: "/dha-sync", label: "DHA XML Sync" },
+  { to: "/dha-sync", label: "XML Scrub Monitor" },
   { to: "/analytics", label: "Analytics & Financial Insights" },
   { to: "/facility-settings", label: "Facility Settings" },
   { to: "/login-activity", label: "Login Activity" },
+  { to: "/jobs", label: "Background Jobs" },
+  { to: "/scrubber", label: "Claim Scrubber" },
+  { to: "/calibration", label: "Denial Intelligence" },
 ];
 
 const linkClasses = ({ isActive }) =>

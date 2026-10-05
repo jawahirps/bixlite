@@ -35,7 +35,7 @@ import zipfile
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..models import Facility, FetchLog, RawXmlStore
@@ -69,6 +69,9 @@ DHPO_SEARCH_CAP = 500
 # XML types handled
 XML_TYPES = ("ClaimSubmission", "RemittanceAdvice")
 
+# Read timeout (seconds) for the raw-HTTP retry of a large file download
+LARGE_DOWNLOAD_READ_TIMEOUT = 600
+
 
 # ----------------------------------------------------------------------------
 # DHPO SOAP client wrapper
@@ -80,11 +83,12 @@ class DHPOSoapClient:
     All calls normalise DHPO return codes and raise RuntimeError on failure.
     """
 
-    def __init__(self, wsdl_url: str, timeout: int = 60):
+    def __init__(self, wsdl_url: str, timeout: int = 30):
         try:
-            from zeep import Client
+            from zeep import Client, Settings
             from zeep.transports import Transport
             import requests as _requests
+            from requests.adapters import HTTPAdapter
         except ImportError as exc:
             raise ImportError(
                 "zeep is required for DHPO SOAP calls. "
@@ -93,9 +97,22 @@ class DHPOSoapClient:
 
         session = _requests.Session()
         session.verify = True  # enforce TLS verification
+        # Hard timeout on all requests including WSDL fetch + schema imports.
+        # max_retries=0 prevents silent retry loops that multiply the timeout.
+        adapter = HTTPAdapter(max_retries=0)
+        session.mount("https://", adapter)
+        session.mount("http://",  adapter)
         transport = Transport(session=session, timeout=timeout, operation_timeout=timeout)
-        self._client = Client(wsdl_url, transport=transport)
+        log.warning("DHPOSoapClient: fetching WSDL from %s (timeout=%ds)", wsdl_url, timeout)
+        # xml_huge_tree: large monthly batch files arrive as one base64 text node
+        # bigger than lxml's default limit ("huge text node") — accept them here
+        # rather than relying on the raw-HTTP fallback.
+        self._client = Client(wsdl_url, transport=transport,
+                              settings=Settings(xml_huge_tree=True))
+        log.warning("DHPOSoapClient: WSDL loaded OK — %s", wsdl_url)
         self._wsdl_url = wsdl_url
+        self._session  = session          # kept for raw-HTTP fallback on huge responses
+        self._timeout  = timeout
 
     # ------------------------------------------------------------------
     # GetNewTransactions — returns list of undownloaded transactions
@@ -140,24 +157,53 @@ class DHPOSoapClient:
         """
         Returns list of file descriptor dicts matching search criteria.
         Max 500 records per call per spec.
+
+        Wraps the SOAP call in a concurrent.futures thread with a hard 120 s
+        timeout because zeep's operation_timeout is not always respected by the
+        DHPO server (connection can hang indefinitely otherwise).
         """
+        import concurrent.futures
+
         from_str = date_from.strftime("%d/%m/%Y 00:00:00")
         to_str   = date_to.strftime("%d/%m/%Y 23:59:59")
 
-        result = self._client.service.SearchTransactions(
-            login=login,
-            pwd=pwd,
-            direction=direction,
-            callerLicense=caller_license,
-            ePartner=None,
-            transactionID=transaction_id,
-            TransactionStatus=transaction_status,
-            transactionFileName=None,
-            transactionFromDate=from_str,
-            transactionToDate=to_str,
-            minRecordCount=-1,
-            maxRecordCount=-1,
+        SEARCH_TIMEOUT = 120  # seconds — hard cap per SearchTransactions call
+
+        def _do_search():
+            return self._client.service.SearchTransactions(
+                login=login,
+                pwd=pwd,
+                direction=direction,
+                callerLicense=caller_license,
+                ePartner=None,
+                transactionID=transaction_id,
+                TransactionStatus=transaction_status,
+                transactionFileName=None,
+                transactionFromDate=from_str,
+                transactionToDate=to_str,
+                minRecordCount=-1,
+                maxRecordCount=-1,
+            )
+
+        log.warning(
+            "SearchTransactions CALL: tx_id=%d status=%d %s→%s (timeout=%ds)",
+            transaction_id, transaction_status, date_from, date_to, SEARCH_TIMEOUT,
         )
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+            _future = _pool.submit(_do_search)
+            try:
+                result = _future.result(timeout=SEARCH_TIMEOUT)
+            except concurrent.futures.TimeoutError:
+                raise RuntimeError(
+                    f"SearchTransactions timed out after {SEARCH_TIMEOUT}s "
+                    f"(tx_id={transaction_id} status={transaction_status} "
+                    f"{date_from}→{date_to})"
+                )
+        log.warning(
+            "SearchTransactions OK: tx_id=%d status=%d %s→%s",
+            transaction_id, transaction_status, date_from, date_to,
+        )
+
         return_code   = (result.searchTransactionsResult
                          if hasattr(result, "searchTransactionsResult")
                          else result.SearchTransactionsResult)
@@ -182,12 +228,63 @@ class DHPOSoapClient:
         """
         Downloads the file content for *file_id*.
         Returns raw bytes (may be XML or ZIP containing XML).
+
+        Falls back to a raw-HTTP path when zeep/lxml fails due to a huge
+        base64 text node (lxml SAX parser rejects nodes > ~10 MB).
+
+        Wraps the zeep call in a concurrent.futures thread with a hard 90 s
+        timeout because zeep's operation_timeout is not always respected.
         """
-        result = self._client.service.DownloadTransactionFile(
-            login=login,
-            pwd=pwd,
-            fileId=file_id,
-        )
+        import concurrent.futures
+
+        DOWNLOAD_TIMEOUT = 90  # seconds per file download
+
+        def _do_download():
+            return self._client.service.DownloadTransactionFile(
+                login=login,
+                pwd=pwd,
+                fileId=file_id,
+            )
+
+        log.warning("DownloadTransactionFile START: FileID=%s (timeout=%ds)", file_id, DOWNLOAD_TIMEOUT)
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+                _future = _pool.submit(_do_download)
+                try:
+                    result = _future.result(timeout=DOWNLOAD_TIMEOUT)
+                except concurrent.futures.TimeoutError:
+                    raise RuntimeError(
+                        f"DownloadTransactionFile timed out after {DOWNLOAD_TIMEOUT}s "
+                        f"for FileID={file_id}"
+                    )
+        except Exception as exc:
+            exc_str = str(exc)
+            if "huge text node" in exc_str or "xmlSAX2Characters" in exc_str:
+                log.warning(
+                    "Zeep parse failed (huge text node) for FileID=%s — retrying via raw HTTP",
+                    file_id,
+                )
+                return self._download_raw_http(login, pwd, file_id,
+                                               timeout=(30, LARGE_DOWNLOAD_READ_TIMEOUT))
+            if "timed out after" not in exc_str:
+                raise
+            # Large files (e.g. a TPA's whole monthly batch) can take longer
+            # than 90 s. Retry once through zeep with a long limit instead of
+            # dropping the file (the raw-HTTP path gets HTTP 500 from DHPO).
+            log.warning(
+                "DownloadTransactionFile timed out for FileID=%s — retrying with %ds limit",
+                file_id, LARGE_DOWNLOAD_READ_TIMEOUT,
+            )
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+                _future = _pool.submit(_do_download)
+                try:
+                    result = _future.result(timeout=LARGE_DOWNLOAD_READ_TIMEOUT)
+                except concurrent.futures.TimeoutError:
+                    raise RuntimeError(
+                        f"DownloadTransactionFile timed out after {LARGE_DOWNLOAD_READ_TIMEOUT}s "
+                        f"(retry) for FileID={file_id}"
+                    )
+
         return_code = (result.downloadTransactionFileResult
                        if hasattr(result, "downloadTransactionFileResult")
                        else getattr(result, "DownloadTransactionFileResult", 0))
@@ -209,6 +306,70 @@ class DHPOSoapClient:
             raise RuntimeError(f"DownloadTransactionFile({file_id}) returned no data")
 
         return bytes(file_bytes)
+
+    def _download_raw_http(self, login: str, pwd: str, file_id: str, timeout=None) -> bytes:
+        """
+        Raw HTTP SOAP call for DownloadTransactionFile with lxml huge_tree=True.
+        Used as a fallback when the response contains a base64 text node too
+        large for zeep's SAX parser.
+        """
+        import base64
+        import lxml.etree as etree
+
+        soap_envelope = (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"'
+            ' xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"'
+            ' xmlns:xsd="http://www.w3.org/2001/XMLSchema">'
+            "<soap:Body>"
+            '<DownloadTransactionFile xmlns="https://www.eClaimLink.ae/">'
+            f"<login>{login}</login>"
+            f"<pwd>{pwd}</pwd>"
+            f"<fileId>{file_id}</fileId>"
+            "</DownloadTransactionFile>"
+            "</soap:Body>"
+            "</soap:Envelope>"
+        )
+        endpoint = self._wsdl_url.replace("?wsdl", "")
+        resp = self._session.post(
+            endpoint,
+            data=soap_envelope.encode("utf-8"),
+            headers={
+                "Content-Type": "text/xml; charset=utf-8",
+                "SOAPAction":   '"https://www.eClaimLink.ae/DownloadTransactionFile"',
+            },
+            timeout=timeout or self._timeout,
+        )
+        resp.raise_for_status()
+
+        # Parse with huge_tree=True so the large base64 text node is accepted
+        parser = etree.XMLParser(huge_tree=True, recover=True)
+        root   = etree.fromstring(resp.content, parser=parser)
+        ns     = {
+            "soap": "http://schemas.xmlsoap.org/soap/envelope/",
+            "ec":   "https://www.eClaimLink.ae/",
+        }
+
+        result_el   = root.find(".//ec:DownloadTransactionFileResult", ns)
+        return_code = int(result_el.text) if result_el is not None else -1
+
+        error_el  = root.find(".//ec:errorMessage", ns)
+        error_msg = (error_el.text or "") if error_el is not None else ""
+
+        file_el  = root.find(".//ec:file", ns)
+        file_b64 = (file_el.text or "").strip() if file_el is not None else ""
+
+        if return_code not in DHPO_OK_CODES:
+            raise RuntimeError(
+                f"DownloadTransactionFile({file_id}) failed via raw HTTP "
+                f"(code {return_code}): {error_msg}"
+            )
+        if not file_b64:
+            raise RuntimeError(
+                f"DownloadTransactionFile({file_id}) returned no file data via raw HTTP"
+            )
+
+        return base64.b64decode(file_b64)
 
     # ------------------------------------------------------------------
     # SetTransactionDownloaded — mark file as downloaded
@@ -488,6 +649,8 @@ class DHASyncService:
         records_fetched = 0
         http_errors = 0
         error_detail: Dict[str, Any] = {}
+        # Track (raw_xml_id, xml_bytes, facility_id) for ClaimSubmission records to auto-scrub
+        new_raw_ids: List[Dict] = []
 
         try:
             for xml_type in XML_TYPES:
@@ -503,20 +666,49 @@ class DHASyncService:
                     error_detail[xml_type] = str(exc)
                     continue
 
+                # Files that could not be downloaded must not be dropped silently
+                if self._download_failures:
+                    http_errors += len(self._download_failures)
+                    error_detail[f"{xml_type} download failures"] = self._download_failures
+
                 for payload in payloads:
+                    src_filename = payload.get("filename")
+                    # Dedup: skip files already stored in raw_xml_store by filename
+                    if src_filename:
+                        already_stored = self.db.execute(
+                            text(
+                                "SELECT 1 FROM raw_xml_store "
+                                "WHERE facility_id = :fid AND source_filename = :fn LIMIT 1"
+                            ),
+                            {"fid": facility_id, "fn": src_filename},
+                        ).fetchone()
+                        if already_stored:
+                            continue  # file already in DB — skip download+parse
+
                     raw = RawXmlStore(
                         facility_id=facility_id,
                         xml_type=xml_type,
-                        source_filename=payload.get("filename"),
+                        source_filename=src_filename,
                         submission_date=payload.get("submission_date") or date_to,
                         file_size_bytes=len(payload["xml"].encode("utf-8")),
                         xml_content=payload["xml"],
                         parse_status="pending",
                     )
                     self.db.add(raw)
+                    self.db.flush()  # get raw.id before commit
                     records_fetched += 1
 
+                    # Queue ClaimSubmission records for auto-scrub (Layer 2)
+                    if xml_type == "ClaimSubmission":
+                        new_raw_ids.append({
+                            "id": raw.id,
+                            "xml_bytes": payload["xml"].encode("utf-8"),
+                        })
+
             self.db.commit()
+
+            # Layer 2: auto-scrub newly fetched ClaimSubmission XMLs
+            self._auto_scrub_new_claims(facility_id, new_raw_ids)
 
             # Parse everything pending (newly fetched + any manually uploaded)
             parser = DHPOXmlParser(self.db)
@@ -564,6 +756,7 @@ class DHASyncService:
 
         Returns a list of {"xml": str, "filename": str, "submission_date": date}.
         """
+        self._download_failures: List[str] = []
         login = facility.eclaimlink_username
         pwd   = facility.credential_key
         caller_license = facility.dhpo_provider_id  # may be None
@@ -596,10 +789,14 @@ class DHASyncService:
         else:
             wsdl = DHPO_LIVE_WSDL
 
+        log.warning(
+            "_fetch_transactions START: facility=%s xml_type=%s from=%s to=%s wsdl=%s",
+            facility.facility_code, xml_type, date_from, date_to, wsdl,
+        )
         client = DHPOSoapClient(wsdl)
 
-        log.info(
-            "SearchTransactions: facility=%s xml_type=%s from=%s to=%s direction=%d tx_id=%d",
+        log.warning(
+            "SearchTransactions START: facility=%s xml_type=%s from=%s to=%s direction=%d tx_id=%d",
             facility.facility_code, xml_type, date_from, date_to, direction, tx_id,
         )
 
@@ -644,6 +841,18 @@ class DHASyncService:
         for desc in file_descriptors:
             file_id   = desc["file_id"]
             file_name = desc["file_name"] or f"file_{file_id}.xml"
+
+            # ── Dedup: skip download entirely if this filename is already stored ──
+            if file_name and self.db.execute(
+                text(
+                    "SELECT 1 FROM raw_xml_store "
+                    "WHERE facility_id = :fid AND source_filename = :fn LIMIT 1"
+                ),
+                {"fid": facility.id, "fn": file_name},
+            ).fetchone():
+                log.info("Skipping already-stored file: %s", file_name)
+                continue
+
             tx_date   = _parse_tx_date(desc.get("transaction_date", ""))
             if tx_date is None:
                 tx_date = _parse_date_from_filename(file_name)
@@ -664,7 +873,9 @@ class DHASyncService:
             try:
                 raw_bytes = client.download_transaction_file(login, pwd, file_id)
             except Exception as exc:
-                log.error("DownloadTransactionFile(%s) failed: %s", file_id, exc)
+                log.error("DownloadTransactionFile(%s) failed: %s", file_id, str(exc)[:300])
+                # Recorded so the fetch job shows 'partial' instead of 'success'
+                self._download_failures.append(f"{file_name}: {str(exc)[:200]}")
                 continue
 
             # Decompress ZIP or decode plain XML
@@ -685,3 +896,44 @@ class DHASyncService:
             # client.set_transaction_downloaded(login, pwd, file_id)
 
         return payloads
+
+    # ------------------------------------------------------------------
+    # Layer 2: auto-scrub newly fetched ClaimSubmission XMLs
+    # ------------------------------------------------------------------
+    def _auto_scrub_new_claims(self, facility_id: int, new_raw_ids: List[Dict]) -> None:
+        """
+        Run the Strawberry XML scrubber on each freshly fetched ClaimSubmission
+        and persist findings to scrub_xml_findings (raw_xml_id-linked).
+        Non-fatal — a scrub failure never blocks the fetch pipeline.
+        """
+        if not new_raw_ids:
+            return
+
+        try:
+            from .scrub_xml_service import ScrubXmlService
+        except ImportError:
+            log.warning("ScrubXmlService not available — skipping Layer 2 auto-scrub")
+            return
+
+        svc = ScrubXmlService(self.db)
+        scrubbed = 0
+        for item in new_raw_ids:
+            try:
+                result = svc.run_for_raw(
+                    raw_xml_id=item["id"],
+                    xml_bytes=item["xml_bytes"],
+                    facility_id=facility_id,
+                )
+                self.db.commit()
+                scrubbed += 1
+                log.info(
+                    "Layer2 auto-scrub: raw_xml_id=%d → %s blocks=%d warns=%d risk=%s",
+                    item["id"], result["status"], result["blocks"],
+                    result["warnings"], result["risk_level"],
+                )
+            except Exception as exc:
+                self.db.rollback()
+                log.warning("Layer2 auto-scrub failed for raw_xml_id=%d: %s", item["id"], exc)
+
+        log.info("Layer2 auto-scrub complete: %d/%d ClaimSubmission(s) scrubbed for facility_id=%d",
+                 scrubbed, len(new_raw_ids), facility_id)

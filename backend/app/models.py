@@ -42,6 +42,9 @@ class Facility(Base):
     eclaimlink_username: Mapped[str]         = mapped_column(String(100), nullable=False)
     credential_key   : Mapped[str]           = mapped_column(String(100), nullable=False)
     dhpo_provider_id : Mapped[Optional[str]] = mapped_column(String(50))
+    # Riayati (MOH Post Office) credentials — nullable, only set for MOH-connected facilities
+    riayati_username : Mapped[Optional[str]] = mapped_column(String(100))
+    riayati_password : Mapped[Optional[str]] = mapped_column(String(100))
     is_active        : Mapped[bool]          = mapped_column(Boolean, nullable=False, default=True)
     created_at       : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now())
     updated_at       : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now(), onupdate=func.now())
@@ -53,6 +56,8 @@ class Facility(Base):
     raw_xml_store    : Mapped[List["RawXmlStore"]]    = relationship(back_populates="facility")
     users            : Mapped[List["User"]]           = relationship(back_populates="facility")
     clinical_profiles: Mapped[List["ClinicalProfile"]] = relationship(back_populates="facility")
+    daily_receipts   : Mapped[List["DailyReceipt"]]  = relationship(back_populates="facility")
+    payer_mappings   : Mapped[List["ReceiptPayerMapping"]] = relationship(back_populates="facility")
 
     def __repr__(self) -> str:
         return f"<Facility {self.facility_code} — {self.facility_name}>"
@@ -169,7 +174,7 @@ class RawXmlStore(Base):
 
     id               : Mapped[int]           = mapped_column(BigInteger, primary_key=True)
     facility_id      : Mapped[int]           = mapped_column(Integer, ForeignKey("facilities.id"), nullable=False)
-    xml_type         : Mapped[str]           = mapped_column(String(20), nullable=False)
+    xml_type         : Mapped[str]           = mapped_column(String(30), nullable=False)
     source_filename  : Mapped[Optional[str]] = mapped_column(String(500))
     submission_date  : Mapped[Optional[date]]= mapped_column(Date)
     fetched_at       : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now())
@@ -183,7 +188,10 @@ class RawXmlStore(Base):
     facility         : Mapped["Facility"]    = relationship(back_populates="raw_xml_store")
 
     __table_args__ = (
-        CheckConstraint("xml_type IN ('ClaimSubmission', 'RemittanceAdvice')", name="ck_raw_xml_type"),
+        CheckConstraint(
+            "xml_type IN ('ClaimSubmission','RemittanceAdvice','RiayatiClaimSubmission','RiayatiRemittanceAdvice')",
+            name="ck_raw_xml_type",
+        ),
         CheckConstraint("parse_status IN ('pending','parsed','failed','quarantined')", name="ck_parse_status"),
         Index("idx_raw_xml_facility_type", "facility_id", "xml_type"),
         Index("idx_raw_xml_parse_status", "parse_status"),
@@ -220,6 +228,7 @@ class Claim(Base):
 
     # Patient identifiers
     member_id        : Mapped[str]           = mapped_column(String(100), nullable=False)
+    patient_id       : Mapped[Optional[str]] = mapped_column(String(100))   # Encounter/PatientID from claim XML
     emirates_id      : Mapped[Optional[str]] = mapped_column(String(50))
     emirates_id_type : Mapped[Optional[str]] = mapped_column(String(20))
 
@@ -249,6 +258,8 @@ class Claim(Base):
     # resubmission_key = '' for initial, resubmission_type value for resubmissions.
     # Used in unique constraint so initial + resubmission rows coexist per claim_id.
     resubmission_key : Mapped[str]           = mapped_column(String(50), nullable=False, default="")
+    # Free-text provider justification from <Resubmission><Comment> in CS XML
+    resubmission_comment: Mapped[Optional[str]] = mapped_column(Text)
 
     # Internal
     created_at       : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now())
@@ -260,7 +271,7 @@ class Claim(Base):
 
     __table_args__ = (
         UniqueConstraint("facility_id", "claim_id", "resubmission_key", name="uq_claims_facility_claim_resub"),
-        CheckConstraint("source_channel IN ('API', 'EXCEL_HISTORICAL')", name="ck_claim_source_channel"),
+        CheckConstraint("source_channel IN ('API', 'FILE', 'EXCEL_HISTORICAL')", name="ck_claim_source_channel"),
         Index("idx_claims_encounter_start", "encounter_start"),
         Index("idx_claims_payer", "payer_id"),
         Index("idx_claims_member", "member_id"),
@@ -379,6 +390,8 @@ class Remittance(Base):
     claim_status_ra    : Mapped[Optional[str]]  = mapped_column(String(50))
     denial_code        : Mapped[Optional[str]]  = mapped_column(String(50))
     denial_description : Mapped[Optional[str]]  = mapped_column(String(500))
+    # TPA free-text comments from RA.Claim/Comments (separate from denial_description)
+    tpa_comments       : Mapped[Optional[str]]  = mapped_column(Text)
     created_at         : Mapped[datetime]       = mapped_column(TIMESTAMPTZ, server_default=func.now())
     updated_at         : Mapped[datetime]       = mapped_column(TIMESTAMPTZ, server_default=func.now(), onupdate=func.now())
 
@@ -389,10 +402,13 @@ class Remittance(Base):
 
     __table_args__ = (
         UniqueConstraint("facility_id", "claim_id", "remittance_date", name="uq_remittance_claim_date"),
-        CheckConstraint("source_channel IN ('API', 'EXCEL_HISTORICAL')", name="ck_remittance_source_channel"),
+        CheckConstraint("source_channel IN ('API', 'FILE', 'EXCEL_HISTORICAL')", name="ck_remittance_source_channel"),
         Index("idx_remittances_claim_id", "claim_id"),
         Index("idx_remittances_remittance_date", "remittance_date"),
         Index("idx_remittances_channel", "source_channel"),
+        # Composite index for ClaimCycleV2 CTEs: ra_all_agg, latest_ra, first_ra
+        # Covers WHERE facility_id = :fid + GROUP/ORDER BY (facility_id, claim_id, id)
+        Index("idx_remittances_fac_claim_id", "facility_id", "claim_id", "id"),
     )
 
 
@@ -481,9 +497,29 @@ class FetchLog(Base):
     facility           : Mapped["Facility"]     = relationship(back_populates="fetch_logs")
 
     __table_args__ = (
-        CheckConstraint("fetch_type IN ('ClaimSubmission','RemittanceAdvice','Backfill')", name="ck_fetch_type"),
+        CheckConstraint("fetch_type IN ('ClaimSubmission','RemittanceAdvice','Backfill','Riayati')", name="ck_fetch_type"),
         CheckConstraint("status IN ('running','success','partial','failed')", name="ck_fetch_status"),
         Index("idx_fetch_log_started", "started_at"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# PortalToken — public client portal access
+# ---------------------------------------------------------------------------
+class PortalToken(Base):
+    __tablename__ = "portal_tokens"
+
+    id            : Mapped[int]           = mapped_column(Integer, primary_key=True)
+    token         : Mapped[str]           = mapped_column(String(64), unique=True, nullable=False)
+    client_name   : Mapped[str]           = mapped_column(String(200), nullable=False)
+    facility_ids  : Mapped[str]           = mapped_column(Text, nullable=False)  # JSON array e.g. "[1,2]"
+    expires_at    : Mapped[Optional[date]]= mapped_column(Date, nullable=True)   # NULL = never expires
+    is_active     : Mapped[bool]          = mapped_column(Boolean, nullable=False, default=True)
+    created_at    : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now())
+    last_used_at  : Mapped[Optional[datetime]] = mapped_column(TIMESTAMPTZ, nullable=True)
+
+    __table_args__ = (
+        Index("idx_portal_tokens_token", "token"),
     )
 
 
@@ -509,3 +545,317 @@ class ReportJob(Base):
     __table_args__ = (
         Index("idx_report_jobs_created_at", "created_at"),
     )
+
+
+# ---------------------------------------------------------------------------
+# ReceiptPayerMapping — payer → GL account / cost-centre mapping per facility
+# ---------------------------------------------------------------------------
+class ReceiptPayerMapping(Base):
+    __tablename__ = "receipt_payer_mapping"
+
+    id              : Mapped[int]           = mapped_column(Integer, primary_key=True)
+    facility_id     : Mapped[int]           = mapped_column(Integer, ForeignKey("facilities.id"), nullable=False)
+    payer_id        : Mapped[str]           = mapped_column(String(50), nullable=False)
+    payer_name      : Mapped[Optional[str]] = mapped_column(String(150))
+    # 'DHPO' | 'Riayati' | 'ALL' (matches both channels)
+    channel         : Mapped[str]           = mapped_column(String(10), nullable=False, default="ALL")
+    gl_account_code : Mapped[Optional[str]] = mapped_column(String(50))
+    cost_centre     : Mapped[Optional[str]] = mapped_column(String(50))
+    # tolerance below which a short-pay is NOT flagged (AED)
+    tolerance_aed   : Mapped[Decimal]       = mapped_column(Numeric(10, 2), nullable=False, default=0)
+    is_active       : Mapped[bool]          = mapped_column(Boolean, nullable=False, default=True)
+    created_at      : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now())
+
+    facility        : Mapped["Facility"]    = relationship(back_populates="payer_mappings")
+
+    __table_args__ = (
+        UniqueConstraint("facility_id", "payer_id", "channel", name="uq_payer_mapping_facility_payer_channel"),
+        CheckConstraint("channel IN ('DHPO','Riayati','ALL')", name="ck_payer_mapping_channel"),
+        Index("idx_payer_mapping_facility", "facility_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ReceiptPayerMapping fac={self.facility_id} payer={self.payer_id} ch={self.channel}>"
+
+
+# ---------------------------------------------------------------------------
+# DailyReceipt — daily aggregate receipt per (facility, date, payer, channel)
+# ---------------------------------------------------------------------------
+class DailyReceipt(Base):
+    __tablename__ = "daily_receipts"
+
+    id                  : Mapped[int]           = mapped_column(BigInteger, primary_key=True)
+    facility_id         : Mapped[int]           = mapped_column(Integer, ForeignKey("facilities.id"), nullable=False)
+    # Filtered by raw_xml_store.submission_date (RA posting date), consistent with existing reports
+    receipt_date        : Mapped[date]          = mapped_column(Date, nullable=False)
+    payer_id            : Mapped[str]           = mapped_column(String(50), nullable=False)
+    payer_name          : Mapped[Optional[str]] = mapped_column(String(150))
+    channel             : Mapped[str]           = mapped_column(String(10), nullable=False)  # 'DHPO' | 'Riayati'
+
+    # Financial aggregates (AED)
+    expected_aed        : Mapped[Decimal]       = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    received_aed        : Mapped[Decimal]       = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    denied_aed          : Mapped[Decimal]       = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    patient_share_aed   : Mapped[Decimal]       = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    claim_count         : Mapped[int]           = mapped_column(Integer, nullable=False, default=0)
+
+    # Payment references from RA files (JSON array of ra_file_id / source_filename strings)
+    payment_references  : Mapped[Optional[str]] = mapped_column(Text)
+
+    # reconciled = paid matches expected within tolerance
+    # partial    = some claims paid, some denied
+    # denied     = all claims denied
+    # unmatched  = RA has no matching submission claim
+    status              : Mapped[str]           = mapped_column(String(20), nullable=False, default="reconciled")
+
+    # Accounting push
+    posted_to_accounting: Mapped[bool]          = mapped_column(Boolean, nullable=False, default=False)
+    posted_at           : Mapped[Optional[datetime]] = mapped_column(TIMESTAMPTZ)
+    gl_account_code     : Mapped[Optional[str]] = mapped_column(String(50))   # from ReceiptPayerMapping
+
+    created_at          : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now())
+    updated_at          : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now(), onupdate=func.now())
+
+    facility            : Mapped["Facility"]    = relationship(back_populates="daily_receipts")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "facility_id", "receipt_date", "payer_id", "channel",
+            name="uq_daily_receipt_facility_date_payer_channel",
+        ),
+        CheckConstraint("channel IN ('DHPO','Riayati')", name="ck_daily_receipt_channel"),
+        CheckConstraint(
+            "status IN ('reconciled','partial','denied','unmatched')",
+            name="ck_daily_receipt_status",
+        ),
+        Index("idx_daily_receipts_date", "receipt_date"),
+        Index("idx_daily_receipts_facility_date", "facility_id", "receipt_date"),
+        Index("idx_daily_receipts_status", "status"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DailyReceipt fac={self.facility_id} {self.receipt_date} "
+            f"{self.channel}/{self.payer_id} received={self.received_aed}>"
+        )
+
+
+# ---------------------------------------------------------------------------
+# ExclusionCode — DHA standard Exclude 1 & 2 reference codes
+# ---------------------------------------------------------------------------
+class ExclusionCode(Base):
+    __tablename__ = "exclusion_codes"
+
+    id               : Mapped[int]           = mapped_column(Integer, primary_key=True)
+    # 1 = Exclude 1 (absolute, ERROR); 2 = Exclude 2 (conditional, WARN)
+    exclusion_type   : Mapped[int]           = mapped_column(SmallInteger, nullable=False)
+    # 'diagnosis' for ICD codes; 'activity' for CPT/HCPCS/Service codes
+    code_type        : Mapped[str]           = mapped_column(String(20), nullable=False)
+    code             : Mapped[str]           = mapped_column(String(50), nullable=False)
+    description      : Mapped[Optional[str]] = mapped_column(Text)
+    is_active        : Mapped[bool]          = mapped_column(Boolean, nullable=False, default=True)
+    created_at       : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("exclusion_type", "code_type", "code", name="uq_exclusion_type_code"),
+        CheckConstraint("exclusion_type IN (1, 2)", name="ck_exclusion_type"),
+        CheckConstraint("code_type IN ('diagnosis','activity')", name="ck_exclusion_code_type"),
+        Index("idx_exclusion_codes_type_code", "exclusion_type", "code_type", "code"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ExclusionCode E{self.exclusion_type} {self.code_type}:{self.code}>"
+
+
+# ---------------------------------------------------------------------------
+# ScrubSession — one upload/run of a CS XML file through the scrubber
+# ---------------------------------------------------------------------------
+class ScrubSession(Base):
+    __tablename__ = "scrub_sessions"
+
+    id               : Mapped[int]           = mapped_column(BigInteger, primary_key=True)
+    facility_id      : Mapped[int]           = mapped_column(Integer, ForeignKey("facilities.id"), nullable=False)
+    uploaded_by      : Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    uploaded_filename: Mapped[str]           = mapped_column(String(500), nullable=False)
+    # 'uploaded' → 'parsed' → 'running' → 'completed' | 'failed'
+    status           : Mapped[str]           = mapped_column(String(20), nullable=False, default="uploaded")
+    claims_count     : Mapped[Optional[int]] = mapped_column(Integer)
+    parse_error      : Mapped[Optional[str]] = mapped_column(Text)
+    uploaded_at      : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now())
+    run_completed_at : Mapped[Optional[datetime]] = mapped_column(TIMESTAMPTZ)
+
+    facility         : Mapped["Facility"]        = relationship("Facility")
+    uploader         : Mapped[Optional["User"]]  = relationship("User")
+    scrub_claims     : Mapped[List["ScrubClaim"]] = relationship(back_populates="session", cascade="all, delete-orphan")
+    scrub_results    : Mapped[List["ScrubResult"]] = relationship(back_populates="session", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('uploaded','parsed','running','completed','failed')",
+            name="ck_scrub_session_status",
+        ),
+        Index("idx_scrub_sessions_facility", "facility_id"),
+        Index("idx_scrub_sessions_uploaded_at", "uploaded_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ScrubSession {self.id} fac={self.facility_id} {self.status}>"
+
+
+# ---------------------------------------------------------------------------
+# ScrubClaim — claim extracted from the staging XML (not production claims)
+# ---------------------------------------------------------------------------
+class ScrubClaim(Base):
+    __tablename__ = "scrub_claims"
+
+    id               : Mapped[int]           = mapped_column(BigInteger, primary_key=True)
+    session_id       : Mapped[int]           = mapped_column(BigInteger, ForeignKey("scrub_sessions.id", ondelete="CASCADE"), nullable=False)
+    facility_id      : Mapped[int]           = mapped_column(Integer, ForeignKey("facilities.id"), nullable=False)
+    claim_id         : Mapped[str]           = mapped_column(String(100), nullable=False)
+    encounter_type   : Mapped[Optional[str]] = mapped_column(String(50))
+    encounter_start  : Mapped[Optional[date]]= mapped_column(Date)
+    encounter_end    : Mapped[Optional[date]]= mapped_column(Date)
+    member_id        : Mapped[Optional[str]] = mapped_column(String(100))
+    emirates_id      : Mapped[Optional[str]] = mapped_column(String(50))
+    payer_id         : Mapped[Optional[str]] = mapped_column(String(50))
+    resubmission_key : Mapped[str]           = mapped_column(String(50), nullable=False, default="")
+    net_amount       : Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2))
+    created_at       : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now())
+
+    session          : Mapped["ScrubSession"]           = relationship(back_populates="scrub_claims")
+    activities       : Mapped[List["ScrubClaimActivity"]] = relationship(back_populates="scrub_claim", cascade="all, delete-orphan")
+    diagnoses        : Mapped[List["ScrubClaimDiagnosis"]] = relationship(back_populates="scrub_claim", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("idx_scrub_claims_session", "session_id"),
+        Index("idx_scrub_claims_emirates_id", "emirates_id"),
+        Index("idx_scrub_claims_encounter_start", "encounter_start"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ScrubClaim {self.claim_id} session={self.session_id}>"
+
+
+# ---------------------------------------------------------------------------
+# ScrubClaimActivity — activities from the staging CS XML
+# ---------------------------------------------------------------------------
+class ScrubClaimActivity(Base):
+    __tablename__ = "scrub_claim_activities"
+
+    id               : Mapped[int]           = mapped_column(BigInteger, primary_key=True)
+    scrub_claim_id   : Mapped[int]           = mapped_column(BigInteger, ForeignKey("scrub_claims.id", ondelete="CASCADE"), nullable=False)
+    session_id       : Mapped[int]           = mapped_column(BigInteger, ForeignKey("scrub_sessions.id", ondelete="CASCADE"), nullable=False)
+    activity_type    : Mapped[Optional[str]] = mapped_column(String(20))
+    activity_code    : Mapped[str]           = mapped_column(String(50), nullable=False)
+    quantity         : Mapped[Decimal]       = mapped_column(Numeric(10, 3), nullable=False, default=1)
+    net              : Mapped[Decimal]       = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    authorization_id : Mapped[Optional[str]] = mapped_column(String(100))
+    activity_start   : Mapped[Optional[date]]= mapped_column(Date)
+    sequence_no      : Mapped[int]           = mapped_column(SmallInteger, nullable=False, default=1)
+    created_at       : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now())
+
+    scrub_claim      : Mapped["ScrubClaim"]  = relationship(back_populates="activities")
+
+    __table_args__ = (
+        Index("idx_scrub_activities_claim", "scrub_claim_id"),
+        Index("idx_scrub_activities_code", "activity_code"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# ScrubClaimDiagnosis — diagnoses from the staging CS XML
+# ---------------------------------------------------------------------------
+class ScrubClaimDiagnosis(Base):
+    __tablename__ = "scrub_claim_diagnoses"
+
+    id               : Mapped[int]           = mapped_column(BigInteger, primary_key=True)
+    scrub_claim_id   : Mapped[int]           = mapped_column(BigInteger, ForeignKey("scrub_claims.id", ondelete="CASCADE"), nullable=False)
+    session_id       : Mapped[int]           = mapped_column(BigInteger, ForeignKey("scrub_sessions.id", ondelete="CASCADE"), nullable=False)
+    diagnosis_type   : Mapped[str]           = mapped_column(String(20), nullable=False)
+    diagnosis_code   : Mapped[str]           = mapped_column(String(20), nullable=False)
+    sequence_no      : Mapped[int]           = mapped_column(SmallInteger, nullable=False, default=1)
+    created_at       : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now())
+
+    scrub_claim      : Mapped["ScrubClaim"]  = relationship(back_populates="diagnoses")
+
+    __table_args__ = (
+        Index("idx_scrub_diagnoses_claim", "scrub_claim_id"),
+        Index("idx_scrub_diagnoses_code", "diagnosis_code"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# ScrubResult — one rule result per (session, claim, rule)
+# ---------------------------------------------------------------------------
+class ScrubResult(Base):
+    __tablename__ = "scrub_results"
+
+    id               : Mapped[int]           = mapped_column(BigInteger, primary_key=True)
+    session_id       : Mapped[int]           = mapped_column(BigInteger, ForeignKey("scrub_sessions.id", ondelete="CASCADE"), nullable=False)
+    scrub_claim_id   : Mapped[int]           = mapped_column(BigInteger, ForeignKey("scrub_claims.id", ondelete="CASCADE"), nullable=False)
+    # FREE_FOLLOWUP | DUPLICATE | MISSING_AUTH | EXCLUDE_1 | EXCLUDE_2
+    rule_code        : Mapped[str]           = mapped_column(String(30), nullable=False)
+    # ERROR | WARN | PASS
+    severity         : Mapped[str]           = mapped_column(String(10), nullable=False)
+    message          : Mapped[str]           = mapped_column(Text, nullable=False)
+    # Extra context: matched production claim IDs, conflicting codes, etc.
+    detail_json      : Mapped[Optional[dict]]= mapped_column(JSONB)
+    created_at       : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now())
+
+    session          : Mapped["ScrubSession"] = relationship(back_populates="scrub_results")
+
+    __table_args__ = (
+        CheckConstraint(
+            "rule_code IN ('FREE_FOLLOWUP','DUPLICATE','MISSING_AUTH','EXCLUDE_1','EXCLUDE_2')",
+            name="ck_scrub_result_rule_code",
+        ),
+        CheckConstraint("severity IN ('ERROR','WARN','PASS')", name="ck_scrub_result_severity"),
+        UniqueConstraint("session_id", "scrub_claim_id", "rule_code", name="uq_scrub_result_session_claim_rule"),
+        Index("idx_scrub_results_session", "session_id"),
+        Index("idx_scrub_results_severity", "severity"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ScrubResult session={self.session_id} claim={self.scrub_claim_id} {self.rule_code}={self.severity}>"
+
+
+# ---------------------------------------------------------------------------
+# ScrubXmlFinding — findings from the Strawberry XML claim scrubber
+# Complements ScrubResult (DB-backed business rules) with structural, coding,
+# arithmetic, MUE, frequency, and denial-risk checks from scrubber.py.
+# ---------------------------------------------------------------------------
+class ScrubXmlFinding(Base):
+    __tablename__ = "scrub_xml_findings"
+
+    id             : Mapped[int]           = mapped_column(BigInteger, primary_key=True)
+    # Either session_id (manual upload) OR raw_xml_id (auto-fetch) must be set
+    session_id     : Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("scrub_sessions.id", ondelete="CASCADE"), nullable=True)
+    raw_xml_id     : Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("raw_xml_store.id", ondelete="CASCADE"), nullable=True)
+    # BLOCK | WARN | PASS  (overall session status stored on the first row; per-finding below)
+    session_status : Mapped[str]           = mapped_column(String(10), nullable=False)
+    # Denial-risk fields (populated once per session on the first finding row; NULL on subsequent rows)
+    risk_level     : Mapped[Optional[str]] = mapped_column(String(10))   # HIGH | MEDIUM | LOW
+    risk_score     : Mapped[Optional[int]] = mapped_column(Integer)
+    # Per-finding fields (from scrubber findings[])
+    severity       : Mapped[str]           = mapped_column(String(10), nullable=False)   # BLOCK | WARN | PASS
+    rule_id        : Mapped[str]           = mapped_column(String(60), nullable=False)
+    location       : Mapped[Optional[str]] = mapped_column(String(200))
+    claim_id       : Mapped[Optional[str]] = mapped_column(String(100))
+    activity_id    : Mapped[Optional[str]] = mapped_column(String(100))
+    message        : Mapped[str]           = mapped_column(Text, nullable=False)
+    source         : Mapped[Optional[str]] = mapped_column(Text)
+    profile        : Mapped[str]           = mapped_column(String(30), nullable=False, default="UAE_COMMON")
+    scrubbed_at    : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("session_status IN ('BLOCK','WARN','PASS')", name="ck_scrub_xml_session_status"),
+        CheckConstraint("severity IN ('BLOCK','WARN','PASS')", name="ck_scrub_xml_severity"),
+        CheckConstraint("(session_id IS NOT NULL OR raw_xml_id IS NOT NULL)", name="ck_scrub_xml_source"),
+        Index("idx_scrub_xml_session", "session_id"),
+        Index("idx_scrub_xml_raw_xml", "raw_xml_id"),
+        Index("idx_scrub_xml_severity", "severity"),
+        Index("idx_scrub_xml_rule_id", "rule_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ScrubXmlFinding session={self.session_id} {self.rule_id}={self.severity}>"

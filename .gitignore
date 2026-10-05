@@ -1,3 +1,5 @@
+GATEWAY_CONNECTION_REFERENCE.md
+
 # Python
 __pycache__/
 *.py[cod]
@@ -40,3 +42,13 @@ logs/
 # Database dumps / exports
 *.sql
 *.dump
+
+# Local SQLite files and Metabase driver plugins (large, machine-specific)
+*.db
+plugins/
+backend/plugins/
+
+# One-off scripts that contain live Riayati credentials — never commit
+backend/scripts/add_marina_sha_old.py
+backend/scripts/update_marina_sha_creds.py
+backend/scripts/update_marina_sha_old_creds.py

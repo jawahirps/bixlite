@@ -34,6 +34,7 @@ router = APIRouter(prefix="/api/analytics", tags=["analytics"])
 @dataclass
 class AnalyticsFilters:
     facility_id: Optional[int] = None
+    facility_ids: Optional[str] = None   # comma-separated IDs for multi-select
     receiver_id: Optional[str] = None
     payer_id: Optional[str] = None
     encounter_type: Optional[str] = None
@@ -44,6 +45,7 @@ class AnalyticsFilters:
 
 def get_analytics_filters(
     facility_id: Optional[int] = None,
+    facility_ids: Optional[str] = None,
     receiver_id: Optional[str] = None,
     payer_id: Optional[str] = None,
     encounter_type: Optional[str] = None,
@@ -53,6 +55,7 @@ def get_analytics_filters(
 ) -> AnalyticsFilters:
     return AnalyticsFilters(
         facility_id=facility_id,
+        facility_ids=facility_ids,
         receiver_id=receiver_id,
         payer_id=payer_id,
         encounter_type=encounter_type,
@@ -63,7 +66,12 @@ def get_analytics_filters(
 
 
 def _apply_claim_filters(query, f: AnalyticsFilters):
-    if f.facility_id:
+    # facility_ids (multi-select) takes priority over facility_id (single)
+    if f.facility_ids:
+        ids = [int(x) for x in f.facility_ids.split(",") if x.strip().isdigit()]
+        if ids:
+            query = query.filter(Claim.facility_id.in_(ids))
+    elif f.facility_id:
         query = query.filter(Claim.facility_id == f.facility_id)
     if f.receiver_id:
         query = query.filter(Claim.receiver_id == f.receiver_id)
@@ -86,7 +94,11 @@ def _remits_with_claims(db: Session, f: AnalyticsFilters):
         Claim,
         and_(Claim.facility_id == Remittance.facility_id, Claim.claim_id == Remittance.claim_id),
     )
-    if f.facility_id:
+    if f.facility_ids:
+        ids = [int(x) for x in f.facility_ids.split(",") if x.strip().isdigit()]
+        if ids:
+            query = query.filter(Remittance.facility_id.in_(ids))
+    elif f.facility_id:
         query = query.filter(Remittance.facility_id == f.facility_id)
     if f.receiver_id:
         query = query.filter(Claim.receiver_id == f.receiver_id)

@@ -160,6 +160,7 @@ class FetchLogOut(BaseModel):
     records_failed: int
     http_errors: int
     validation_errors: int
+    error_detail: Optional[dict] = None
 
 
 class DhaSyncTriggerResponse(BaseModel):

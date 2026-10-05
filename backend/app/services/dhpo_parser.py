@@ -97,12 +97,18 @@ class DHPOXmlParser:
     # ------------------------------------------------------------------
     # Entry point used by the DHA Sync trigger endpoint
     # ------------------------------------------------------------------
-    def run_pending(self, facility_id: Optional[int] = None) -> SyncRunSummary:
+    def run_pending(
+        self,
+        facility_id: Optional[int] = None,
+        raw_xml_ids: Optional[list] = None,   # restrict to specific IDs (used by date-filtered reparse)
+    ) -> SyncRunSummary:
         summary = SyncRunSummary()
 
         stmt = select(RawXmlStore).where(RawXmlStore.parse_status == "pending")
         if facility_id is not None:
             stmt = stmt.where(RawXmlStore.facility_id == facility_id)
+        if raw_xml_ids is not None:
+            stmt = stmt.where(RawXmlStore.id.in_(raw_xml_ids))
         stmt = stmt.order_by(RawXmlStore.id.asc())
 
         records = self.db.scalars(stmt).all()
@@ -163,6 +169,21 @@ class DHPOXmlParser:
         if is_activity:
             log.info("raw_xml_id=%s detected as %s (activity/response format)", record.id, root_tag)
 
+        # ReceiverID is a Header-level field per DHA eClaimLink schema:
+        #   <Claim.Submission><Header><ReceiverID>INS044</ReceiverID>...
+        # Parse the full tree once to extract it before iterating Claims.
+        try:
+            _root = etree.fromstring(clean_xml.encode("utf-8"))
+            header_receiver_id = (
+                _root.findtext("Header/ReceiverID")
+                or _root.findtext("Header/Receiver/ID")
+                or ""
+            ).strip() or None
+        except Exception:
+            header_receiver_id = None
+        if header_receiver_id:
+            log.debug("raw_xml_id=%s Header/ReceiverID=%s", record.id, header_receiver_id)
+
         context = etree.iterparse(
             BytesIO(clean_xml.encode("utf-8")), events=("end",), tag="Claim"
         )
@@ -179,19 +200,28 @@ class DHPOXmlParser:
             if not encounter_id:
                 encounter_id = f"ACT-{claim_id}"
 
+            # Receiver: prefer Header-level ReceiverID (correct per schema),
+            # fall back to any claim-level tag for older/non-standard files.
+            receiver_id = (
+                header_receiver_id
+                or elem.findtext("ReceiverID")
+                or elem.findtext("Receiver/ID")
+            )
+
             db_claim = Claim(
                 facility_id=record.facility_id,
                 raw_xml_id=record.id,
-                source_channel="API",
+                source_channel="FILE",  # DHA eClaimLink — distinguishes from Riayati API
                 claim_id=claim_id,
                 encounter_id=encounter_id,
                 encounter_type=elem.findtext("Encounter/Type"),
                 encounter_start=self._parse_dt(elem.findtext("Encounter/Start")),
                 encounter_end=self._parse_optional_dt(elem.findtext("Encounter/End")),
                 member_id=elem.findtext("Patient/MemberID") or elem.findtext("MemberID") or "UNKNOWN",
+                patient_id=elem.findtext("Encounter/PatientID") or elem.findtext("PatientID") or None,
                 emirates_id=elem.findtext("Patient/EmiratesID") or elem.findtext("EmiratesIDNumber"),
                 payer_id=elem.findtext("PayerID") or "UNKNOWN",
-                receiver_id=elem.findtext("ReceiverID") or elem.findtext("Receiver/ID"),
+                receiver_id=receiver_id,
                 clinician_id=(
                     elem.findtext("ClinicianID")
                     or elem.findtext("Activity/Clinician")
@@ -204,6 +234,7 @@ class DHPOXmlParser:
                 claim_status="submitted",
                 resubmission_type=elem.findtext("Resubmission/Type"),
                 resubmission_key=elem.findtext("Resubmission/Type") or "",
+                resubmission_comment=elem.findtext("Resubmission/Comment"),
             )
 
             # 1. Nested Diagnoses
@@ -247,6 +278,34 @@ class DHPOXmlParser:
                         )
                     )
                 db_claim.activities.append(db_act)
+
+            # 3. Fallback: when the claim-level <Net> / <Gross> is missing or zero,
+            #    derive the amounts by summing across all parsed <Activity> children.
+            #    This handles ClaimSubmission XMLs that omit claim-level totals and
+            #    store financial data only at the activity line level.
+            #
+            #    IMPORTANT: only apply to INITIAL SUBMISSIONS (resubmission_key == "").
+            #    Resubmission rows can legitimately carry zero net (e.g. correction-only
+            #    resubmissions with no additional amount due), so we must not overwrite them.
+            is_initial_submission = not db_claim.resubmission_key  # '' or None → initial
+            if is_initial_submission:
+                if not db_claim.net_amount or db_claim.net_amount == Decimal("0"):
+                    act_net_sum = sum(
+                        (act.net or Decimal("0")) for act in db_claim.activities
+                    )
+                    if act_net_sum:
+                        db_claim.net_amount = act_net_sum
+                        log.debug(
+                            "claim_id=%s: net_amount derived from activity sum: %s",
+                            claim_id, act_net_sum,
+                        )
+
+                if not db_claim.gross_amount or db_claim.gross_amount == Decimal("0"):
+                    act_gross_sum = sum(
+                        (act.gross or Decimal("0")) for act in db_claim.activities
+                    )
+                    if act_gross_sum:
+                        db_claim.gross_amount = act_gross_sum
 
             # Upsert: match on (facility_id, claim_id, resubmission_key) so that
             # initial submissions and resubmissions are stored as SEPARATE rows.
@@ -439,8 +498,8 @@ class DHPOXmlParser:
                 denial_desc = denial_desc[:500]
 
             # ------------------------------------------------------------------
-            # 3. Resolve remittance date — prefer DateSettlement, then header
-            #    TransactionDate, then staged submission_date
+            # 3. Resolve remittance date — prefer DateSettlement (claim-level),
+            #    then RA header TransactionDate, then staged submission_date
             # ------------------------------------------------------------------
             remittance_date = (
                 date_settlement
@@ -483,11 +542,12 @@ class DHPOXmlParser:
             db_remit = Remittance(
                 facility_id=record.facility_id,
                 raw_xml_id=record.id,
-                source_channel="API",
+                source_channel="FILE",  # DHA eClaimLink — distinguishes from Riayati API
                 claim_id=claim_id,
                 payer_id=elem.findtext("PayerID") or elem.findtext("SenderID") or "UNKNOWN",
                 remittance_date=remittance_date,
                 ra_file_id=elem.findtext("IDPayer"),
+                claim_id_payer=elem.findtext("IDPayer"),
                 gross_amount=gross,
                 net_amount=net,
                 paid_amount=paid or Decimal("0"),
@@ -496,11 +556,31 @@ class DHPOXmlParser:
                 denial_amount=denial_amount or Decimal("0"),
                 denial_code=denial_code,
                 denial_description=denial_desc or None,
+                # TPA free-text claim-level comments (RA.Claim/Comments) stored separately
+                # from denial_description so both are available in reports.
+                tpa_comments=comments or None,
                 claim_status_ra=status_ra,
             )
 
-            # 5. Attach per-activity breakdowns (populated for NAS and any RA
-            #    that carries <Activity> children)
+            # 5. Attach per-activity breakdowns.
+            #    For NAS/TPA004 format: act_detail_rows has one entry per <Activity>.
+            #    For DHA standard format (payment at claim level, no <Activity> children):
+            #    act_detail_rows is empty — synthesise a single claim-level row so the
+            #    report query (which starts from RemittanceActivityDetail) can see this claim.
+            if not act_detail_rows:
+                act_detail_rows = [{
+                    "activity_id":        None,
+                    "activity_code":      None,
+                    "activity_type":      None,
+                    "gross":              gross,
+                    "net":                net,
+                    "paid_amount":        paid or Decimal("0"),
+                    "patient_share":      patient_share or Decimal("0"),
+                    "denial_code":        denial_code,
+                    "denial_description": denial_desc or None,
+                    "denial_type":        None,
+                }]
+
             for ad in act_detail_rows:
                 db_remit.activity_details.append(
                     RemittanceActivityDetail(
@@ -520,6 +600,25 @@ class DHPOXmlParser:
 
             self.db.add(db_remit)
             remit_count += 1
+
+            # ── Fetch-time net sync ────────────────────────────────────────
+            # Correct claims.net_amount from the RA net when the RA net is
+            # larger than the stored value.  This handles PRCE-001 cases where
+            # the ClaimSubmission XML stores only the tariff-adjustment delta
+            # (e.g. 0.50) instead of the full submitted amount (e.g. 40.28).
+            # Using "only update if RA net > claim net" ensures that a later
+            # small-delta adjustment RA never overwrites the already-correct
+            # larger value that a previous RA established.
+            if net and net > 0:
+                db_claim = self.db.scalar(
+                    select(Claim).where(
+                        Claim.facility_id      == record.facility_id,
+                        Claim.claim_id         == claim_id,
+                        Claim.resubmission_key == "",   # initial submissions only
+                    )
+                )
+                if db_claim and (db_claim.net_amount is None or net > db_claim.net_amount):
+                    db_claim.net_amount = net
 
             elem.clear()
             while elem.getprevious() is not None:

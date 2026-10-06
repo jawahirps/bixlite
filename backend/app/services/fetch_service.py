@@ -73,6 +73,23 @@ XML_TYPES = ("ClaimSubmission", "RemittanceAdvice")
 LARGE_DOWNLOAD_READ_TIMEOUT = 600
 
 
+def _call_with_timeout(fn, timeout: int, timeout_msg: str):
+    """
+    Run *fn* in a worker thread and give up after *timeout* seconds.
+    The pool is shut down with wait=False: a `with ThreadPoolExecutor()` block
+    would wait for a hung thread on exit (e.g. a socket killed by Mac sleep),
+    blocking the whole fetch indefinitely.
+    """
+    import concurrent.futures
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        return pool.submit(fn).result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
+        raise RuntimeError(timeout_msg)
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
 # ----------------------------------------------------------------------------
 # DHPO SOAP client wrapper
 # ----------------------------------------------------------------------------
@@ -153,6 +170,8 @@ class DHPOSoapClient:
         date_from: date,
         date_to: date,
         transaction_status: int = 1,    # 1 = new (undownloaded) only; 2 = downloaded only
+        time_from: str = "00:00:00",    # HH:MM:SS on date_from (intraday splitting)
+        time_to: str = "23:59:59",      # HH:MM:SS on date_to
     ) -> List[Dict]:
         """
         Returns list of file descriptor dicts matching search criteria.
@@ -164,8 +183,8 @@ class DHPOSoapClient:
         """
         import concurrent.futures
 
-        from_str = date_from.strftime("%d/%m/%Y 00:00:00")
-        to_str   = date_to.strftime("%d/%m/%Y 23:59:59")
+        from_str = date_from.strftime("%d/%m/%Y ") + time_from
+        to_str   = date_to.strftime("%d/%m/%Y ") + time_to
 
         SEARCH_TIMEOUT = 120  # seconds — hard cap per SearchTransactions call
 
@@ -187,18 +206,14 @@ class DHPOSoapClient:
 
         log.warning(
             "SearchTransactions CALL: tx_id=%d status=%d %s→%s (timeout=%ds)",
-            transaction_id, transaction_status, date_from, date_to, SEARCH_TIMEOUT,
+            transaction_id, transaction_status, from_str, to_str, SEARCH_TIMEOUT,
         )
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
-            _future = _pool.submit(_do_search)
-            try:
-                result = _future.result(timeout=SEARCH_TIMEOUT)
-            except concurrent.futures.TimeoutError:
-                raise RuntimeError(
-                    f"SearchTransactions timed out after {SEARCH_TIMEOUT}s "
-                    f"(tx_id={transaction_id} status={transaction_status} "
-                    f"{date_from}→{date_to})"
-                )
+        result = _call_with_timeout(
+            _do_search, SEARCH_TIMEOUT,
+            f"SearchTransactions timed out after {SEARCH_TIMEOUT}s "
+            f"(tx_id={transaction_id} status={transaction_status} "
+            f"{date_from}→{date_to})",
+        )
         log.warning(
             "SearchTransactions OK: tx_id=%d status=%d %s→%s",
             transaction_id, transaction_status, date_from, date_to,
@@ -248,15 +263,11 @@ class DHPOSoapClient:
 
         log.warning("DownloadTransactionFile START: FileID=%s (timeout=%ds)", file_id, DOWNLOAD_TIMEOUT)
         try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
-                _future = _pool.submit(_do_download)
-                try:
-                    result = _future.result(timeout=DOWNLOAD_TIMEOUT)
-                except concurrent.futures.TimeoutError:
-                    raise RuntimeError(
-                        f"DownloadTransactionFile timed out after {DOWNLOAD_TIMEOUT}s "
-                        f"for FileID={file_id}"
-                    )
+            result = _call_with_timeout(
+                _do_download, DOWNLOAD_TIMEOUT,
+                f"DownloadTransactionFile timed out after {DOWNLOAD_TIMEOUT}s "
+                f"for FileID={file_id}",
+            )
         except Exception as exc:
             exc_str = str(exc)
             if "huge text node" in exc_str or "xmlSAX2Characters" in exc_str:
@@ -275,15 +286,11 @@ class DHPOSoapClient:
                 "DownloadTransactionFile timed out for FileID=%s — retrying with %ds limit",
                 file_id, LARGE_DOWNLOAD_READ_TIMEOUT,
             )
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
-                _future = _pool.submit(_do_download)
-                try:
-                    result = _future.result(timeout=LARGE_DOWNLOAD_READ_TIMEOUT)
-                except concurrent.futures.TimeoutError:
-                    raise RuntimeError(
-                        f"DownloadTransactionFile timed out after {LARGE_DOWNLOAD_READ_TIMEOUT}s "
-                        f"(retry) for FileID={file_id}"
-                    )
+            result = _call_with_timeout(
+                _do_download, LARGE_DOWNLOAD_READ_TIMEOUT,
+                f"DownloadTransactionFile timed out after {LARGE_DOWNLOAD_READ_TIMEOUT}s "
+                f"(retry) for FileID={file_id}",
+            )
 
         return_code = (result.downloadTransactionFileResult
                        if hasattr(result, "downloadTransactionFileResult")
@@ -561,16 +568,17 @@ def _search_with_splitting(
     # Exactly DHPO_SEARCH_CAP (or more) — cap was hit
     days = (date_to - date_from).days
     if days == 0:
-        # Single-day window already at cap — nothing more we can do
-        log.warning(
-            "Single-day window %s still hits DHPO cap (%d files, status=%d). "
-            "Some files may be missing for this day.",
+        # Single day still at cap (e.g. a facility sending one claim per file,
+        # 500+ files a day) — split the day by time instead of giving up.
+        log.info(
+            "Single-day window %s hits DHPO cap (%d files, status=%d) — "
+            "splitting by time of day",
             date_from, len(batch), tx_status,
         )
-        new_files = [d for d in batch if d["file_id"] not in seen_ids]
-        for d in new_files:
-            seen_ids.add(d["file_id"])
-        return new_files
+        return _search_intraday(
+            client, login, pwd, direction, caller_license, tx_id,
+            date_from, 0, 86399, tx_status, seen_ids,
+        )
 
     # Bisect: left half [date_from … mid], right half [mid+1 … date_to]
     mid = date_from + timedelta(days=days // 2)
@@ -589,6 +597,61 @@ def _search_with_splitting(
         mid + timedelta(days=1), date_to, tx_status, seen_ids, depth + 1,
     )
     return left + right
+
+
+def _search_intraday(
+    client: DHPOSoapClient,
+    login: str,
+    pwd: str,
+    direction: int,
+    caller_license: Optional[str],
+    tx_id: int,
+    day: date,
+    sec_from: int,
+    sec_to: int,
+    tx_status: int,
+    seen_ids: Set[str],
+) -> List[Dict]:
+    """
+    Searches [sec_from, sec_to] (seconds since midnight) on *day*, bisecting the
+    time window while DHPO keeps returning DHPO_SEARCH_CAP results. Stops at
+    one-minute windows.
+    """
+    def _hms(s: int) -> str:
+        return f"{s // 3600:02d}:{(s % 3600) // 60:02d}:{s % 60:02d}"
+
+    batch = client.search_transactions(
+        login=login,
+        pwd=pwd,
+        direction=direction,
+        caller_license=caller_license,
+        transaction_id=tx_id,
+        date_from=day,
+        date_to=day,
+        transaction_status=tx_status,
+        time_from=_hms(sec_from),
+        time_to=_hms(sec_to),
+    )
+
+    if len(batch) >= DHPO_SEARCH_CAP and sec_to - sec_from >= 60:
+        mid = (sec_from + sec_to) // 2
+        return (
+            _search_intraday(client, login, pwd, direction, caller_license, tx_id,
+                             day, sec_from, mid, tx_status, seen_ids)
+            + _search_intraday(client, login, pwd, direction, caller_license, tx_id,
+                               day, mid + 1, sec_to, tx_status, seen_ids)
+        )
+
+    if len(batch) >= DHPO_SEARCH_CAP:
+        log.warning(
+            "One-minute window %s %s–%s still hits DHPO cap (%d files, status=%d). "
+            "Some files may be missing.",
+            day, _hms(sec_from), _hms(sec_to), len(batch), tx_status,
+        )
+    new_files = [d for d in batch if d["file_id"] not in seen_ids]
+    for d in new_files:
+        seen_ids.add(d["file_id"])
+    return new_files
 
 
 # ----------------------------------------------------------------------------

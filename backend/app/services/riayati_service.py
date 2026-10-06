@@ -221,16 +221,20 @@ class RiayatiClient:
         to_date: date,
         direction: int = DIRECTION_RECEIVED,
         downloaded: int = 2,
+        from_time: str = "00:00",
+        to_time: str = "23:59",
     ) -> List[Dict]:
         """
         Return up to 500 transaction descriptors matching the date window.
+        Use _search_with_splitting() to get everything past the 500 cap.
 
         direction: 0=received (remittance), 1=sent (claim submission)
         downloaded: 0=new only, 1=downloaded only, 2=all
+        from_time / to_time: HH:MM on from_date / to_date (intraday splitting)
         """
         params = {
-            "fromDate":   from_date.strftime("%d/%m/%Y 00:00"),
-            "toDate":     to_date.strftime("%d/%m/%Y 23:59"),
+            "fromDate":   from_date.strftime("%d/%m/%Y ") + from_time,
+            "toDate":     to_date.strftime("%d/%m/%Y ") + to_time,
             "direction":  direction,
             "downloaded": downloaded,
         }
@@ -267,6 +271,55 @@ class RiayatiClient:
         resp.raise_for_status()
 
 
+RIAYATI_SEARCH_CAP = 500   # Riayati Claim/Search returns at most this many rows
+
+
+def _search_with_splitting(
+    client: RiayatiClient,
+    start: datetime,
+    end: datetime,
+    direction: int,
+    seen_ids: set,
+) -> List[Dict]:
+    """
+    Search [start, end] (minute precision). While Riayati returns the 500-row
+    cap, bisect the window by time — whole days first, then hours/minutes —
+    so busy months (e.g. Sabah Al Noor RHA, NAS Ajman SHA) are not silently
+    truncated at 500. Entities are de-duplicated on ID via *seen_ids*.
+    """
+    entities = client.search(
+        start.date(), end.date(), direction=direction, downloaded=2,
+        from_time=start.strftime("%H:%M"), to_time=end.strftime("%H:%M"),
+    )
+
+    span_minutes = int((end - start).total_seconds() // 60)
+    if len(entities) >= RIAYATI_SEARCH_CAP and span_minutes >= 1:
+        mid = start + timedelta(minutes=span_minutes // 2)
+        log.info(
+            "Riayati Search hit cap (%d) for %s -> %s dir=%d — splitting at %s",
+            len(entities), start, end, direction, mid,
+        )
+        return (
+            _search_with_splitting(client, start, mid, direction, seen_ids)
+            + _search_with_splitting(client, mid + timedelta(minutes=1), end,
+                                     direction, seen_ids)
+        )
+
+    if len(entities) >= RIAYATI_SEARCH_CAP:
+        log.warning(
+            "Riayati one-minute window %s still hits cap (%d, dir=%d) — "
+            "some transactions may be missing.", start, len(entities), direction,
+        )
+
+    new = []
+    for ent in entities:
+        tx_id = ent.get("ID")
+        if tx_id and tx_id not in seen_ids:
+            seen_ids.add(tx_id)
+            new.append(ent)
+    return new
+
+
 # ---------------------------------------------------------------------------
 # JSON parser
 # ---------------------------------------------------------------------------
@@ -275,9 +328,12 @@ class RiayatiJsonParser:
 
     def __init__(self, db: Session):
         self.db = db
+        self.quarantined = 0   # files that failed to parse in the last run_pending()
 
     def run_pending(self, facility_id: Optional[int] = None) -> int:
-        """Parse all pending Riayati raw records. Returns count parsed."""
+        """Parse all pending Riayati raw records. Returns count parsed
+        (failures are counted in self.quarantined)."""
+        self.quarantined = 0
         from sqlalchemy import select
         stmt = (
             select(RawXmlStore)
@@ -311,6 +367,7 @@ class RiayatiJsonParser:
                 rec.parse_status = "quarantined"
                 rec.parse_error  = str(exc)
                 self.db.commit()
+                self.quarantined += 1
 
         return parsed
 
@@ -356,9 +413,19 @@ class RiayatiJsonParser:
                     clinician_id = clin
                     break
 
+            # Resubmission block (same semantics as DHA <Resubmission>):
+            # key '' = initial, else the Type text, e.g. 'internal complaint',
+            # 'correction', 'reconciliation' — one row per (claim, key).
+            resub = claim_data.get("Resubmission")
+            resub = resub if isinstance(resub, dict) else {}
+            resub_type    = str(resub.get("Type") or "").strip() or None
+            resub_key     = resub_type or ""
+            resub_comment = str(resub.get("Comment") or "").strip() or None
+
             existing = (
                 self.db.query(Claim)
-                .filter_by(facility_id=record.facility_id, claim_id=claim_id, resubmission_key="")
+                .filter_by(facility_id=record.facility_id, claim_id=claim_id,
+                           resubmission_key=resub_key)
                 .first()
             )
             if existing:
@@ -388,8 +455,10 @@ class RiayatiJsonParser:
                 patient_share_total = _dec(claim_data.get("PatientShare")),
                 submission_date     = sub_date,
                 claim_status        = "submitted",
-                resubmission_count  = 0,
-                resubmission_key    = "",
+                resubmission_count  = 1 if resub_key else 0,
+                resubmission_type   = resub_type,
+                resubmission_key    = resub_key,
+                resubmission_comment= resub_comment,
             )
             self.db.add(claim_row)
             self.db.flush()
@@ -620,7 +689,13 @@ class RiayatiSyncService:
             (DIRECTION_SENT,     "RiayatiClaimSubmission"),
         ]:
             try:
-                entities = client.search(date_from, date_to, direction=direction, downloaded=2)
+                entities = _search_with_splitting(
+                    client,
+                    datetime.combine(date_from, datetime.min.time()),
+                    datetime.combine(date_to, datetime.min.time()).replace(hour=23, minute=59),
+                    direction,
+                    seen_ids=set(),
+                )
                 log.info(
                     "Riayati facility=%d %s -> %d entities (%s -> %s)",
                     facility_id, xml_type, len(entities), date_from, date_to,
@@ -695,6 +770,10 @@ class RiayatiSyncService:
         # Parse all pending Riayati records for this facility
         parsed = parser.run_pending(facility_id=facility_id)
         fetch_log.records_parsed = parsed
+        if parser.quarantined:
+            # Parse failures must not hide behind a 'success' status
+            fetch_log.records_failed += parser.quarantined
+            errors.append(f"{parser.quarantined} file(s) failed to parse (quarantined)")
 
         fetch_log.completed_at = datetime.utcnow()
         fetch_log.status       = "success" if not errors else "partial"

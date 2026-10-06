@@ -362,6 +362,13 @@ class ClaimObservation(Base):
 
     activity           : Mapped["ClaimActivity"] = relationship(back_populates="observations")
 
+    __table_args__ = (
+        # FK indexes — without them every cascaded claim/activity delete
+        # (re-parse) scans this multi-GB table. Created CONCURRENTLY 2026-10-06.
+        Index("idx_claim_obs_claim_fk", "claim_id_fk"),
+        Index("idx_claim_obs_activity_fk", "activity_id_fk"),
+    )
+
 
 # ---------------------------------------------------------------------------
 # Remittance (Adjusted for Hybrid Ingestion Channels)
@@ -435,6 +442,12 @@ class RemittanceActivityDetail(Base):
     created_at         : Mapped[datetime]       = mapped_column(TIMESTAMPTZ, server_default=func.now())
 
     remittance         : Mapped["Remittance"]   = relationship(back_populates="activity_details")
+
+    __table_args__ = (
+        # FK lookups (RA re-parse, report joins) — without it every lookup is a
+        # full scan of this 3M+ row table. Created CONCURRENTLY 2026-10-06.
+        Index("idx_rad_remittance_fk", "remittance_id_fk"),
+    )
 
 
 # ---------------------------------------------------------------------------

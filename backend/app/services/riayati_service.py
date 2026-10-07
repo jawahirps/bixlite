@@ -77,6 +77,8 @@ RIAYATI_PROXY    = os.environ.get("RIAYATI_PROXY", "socks5h://localhost:1080")
 RIAYATI_SSH_KEY  = os.path.expanduser(os.environ.get("RIAYATI_SSH_KEY", "~/.ssh/oracle_riayati"))
 RIAYATI_SSH_HOST = os.environ.get("RIAYATI_SSH_HOST", "opc@129.151.140.159")
 _tunnel_lock = threading.Lock()
+_tunnel_last_fail = 0.0          # monotonic time of the last failed start
+_TUNNEL_RETRY_AFTER = 300        # seconds — don't hammer an unreachable VM
 
 
 def _ensure_riayati_tunnel() -> None:
@@ -93,9 +95,12 @@ def _ensure_riayati_tunnel() -> None:
         except OSError:
             return False
 
+    global _tunnel_last_fail
     with _tunnel_lock:
         if _listening():
             return
+        if time.monotonic() - _tunnel_last_fail < _TUNNEL_RETRY_AFTER:
+            return   # a start just failed — let the request fail fast instead
         if not os.path.exists(RIAYATI_SSH_KEY):
             log.warning("Riayati tunnel down and SSH key %s not found", RIAYATI_SSH_KEY)
             return
@@ -110,12 +115,15 @@ def _ensure_riayati_tunnel() -> None:
             )
         except Exception as exc:
             log.error("Could not start Riayati tunnel: %s", exc)
+            _tunnel_last_fail = time.monotonic()
             return
         for _ in range(10):
             if _listening():
                 return
             time.sleep(0.5)
-        log.error("Riayati tunnel did not come up on %s:%d", host, port)
+        _tunnel_last_fail = time.monotonic()
+        log.error("Riayati tunnel did not come up on %s:%d (Oracle VM %s unreachable?)",
+                  host, port, RIAYATI_SSH_HOST)
 
 DIRECTION_RECEIVED = 0   # payer → provider  (remittance advice)
 DIRECTION_SENT     = 1   # provider → payer  (claim submission)

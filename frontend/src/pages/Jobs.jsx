@@ -378,7 +378,7 @@ export default function Jobs() {
             (<code className="rounded bg-slate-100 px-1 text-xs">tmbapi.riayati.ae:8083</code>).
           </p>
           <p className="mb-3 text-xs text-amber-700 bg-amber-50 rounded px-2 py-1">
-            ⚠ Requires Oracle Cloud VM tunnel — only works when backend runs on the Oracle server.
+            ⓘ Routed through the Oracle UAE VM tunnel (whitelisted IP) — the tunnel is started automatically if it is down.
           </p>
           <div className="mb-3 flex gap-2">
             <input type="date" value={riayatiFrom} onChange={e => setRiayatiFrom(e.target.value)}

@@ -40,7 +40,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import socket
+import subprocess
+import threading
+import time
 from datetime import date, datetime, timedelta
+from urllib.parse import urlparse
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional
 
@@ -62,6 +68,54 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 log = logging.getLogger(__name__)
 
 RIAYATI_BASE_URL = "https://tmbapi.riayati.ae:8083/api"
+
+# tmbapi.riayati.ae:8083 only accepts the MOH-whitelisted Oracle UAE VM IP, so
+# every Riayati call goes through an SSH SOCKS tunnel to that VM. Only the
+# Riayati session uses this proxy (DHPO and everything else stay direct).
+# Set RIAYATI_PROXY="" when the backend itself runs on the Oracle server.
+RIAYATI_PROXY    = os.environ.get("RIAYATI_PROXY", "socks5h://localhost:1080")
+RIAYATI_SSH_KEY  = os.path.expanduser(os.environ.get("RIAYATI_SSH_KEY", "~/.ssh/oracle_riayati"))
+RIAYATI_SSH_HOST = os.environ.get("RIAYATI_SSH_HOST", "opc@129.151.140.159")
+_tunnel_lock = threading.Lock()
+
+
+def _ensure_riayati_tunnel() -> None:
+    """Start the SOCKS tunnel (ssh -D) if nothing is listening on its port."""
+    if not RIAYATI_PROXY:
+        return
+    parsed = urlparse(RIAYATI_PROXY)
+    host, port = parsed.hostname or "localhost", parsed.port or 1080
+
+    def _listening() -> bool:
+        try:
+            with socket.create_connection((host, port), timeout=2):
+                return True
+        except OSError:
+            return False
+
+    with _tunnel_lock:
+        if _listening():
+            return
+        if not os.path.exists(RIAYATI_SSH_KEY):
+            log.warning("Riayati tunnel down and SSH key %s not found", RIAYATI_SSH_KEY)
+            return
+        log.warning("Riayati SOCKS tunnel not running — starting ssh -D %d to %s", port, RIAYATI_SSH_HOST)
+        try:
+            subprocess.run(
+                ["ssh", "-i", RIAYATI_SSH_KEY, "-D", str(port), "-N", "-f",
+                 "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+                 "-o", "ServerAliveInterval=60", "-o", "ServerAliveCountMax=10",
+                 RIAYATI_SSH_HOST],
+                timeout=30, check=False, capture_output=True,
+            )
+        except Exception as exc:
+            log.error("Could not start Riayati tunnel: %s", exc)
+            return
+        for _ in range(10):
+            if _listening():
+                return
+            time.sleep(0.5)
+        log.error("Riayati tunnel did not come up on %s:%d", host, port)
 
 DIRECTION_RECEIVED = 0   # payer → provider  (remittance advice)
 DIRECTION_SENT     = 1   # provider → payer  (claim submission)
@@ -204,6 +258,9 @@ class RiayatiClient:
             "Content-Type":  "application/json",
             "Accept":        "application/json",
         })
+        if RIAYATI_PROXY:
+            _ensure_riayati_tunnel()
+            self._s.proxies.update({"https": RIAYATI_PROXY, "http": RIAYATI_PROXY})
         self._timeout = timeout
 
     def _check_inactive(self, resp: requests.Response) -> None:

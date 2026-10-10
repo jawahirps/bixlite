@@ -1859,7 +1859,7 @@ CLAIM_CYCLE_V2_COLS = [
     "Resub Amount",           # net from 1st resubmission (S2); 0 if none
     "Recons Amount",          # net from reconciliation resubmission (S3); 0 if none
     "Paid Amount",            # SUM(paid_amount) across ALL RA files received
-    "Denial Amount",          # RA Net Amount − Paid Amount; 0 if no RA received
+    "Initial Denied",         # RA Net Amount − Paid Amount; 0 if no RA received
     "Variance",               # Net Submitted − Total Paid
     "Final Rejection",        # Denial Amount when no resubmission filed (claim settled as denied)
     "Resub Receivable",       # Outstanding − Unsettled/AR; actively contested amount expected to recover
@@ -2607,6 +2607,9 @@ def _cycle_status(sub_rank, ra_rank, ra_count, net_amt, paid_amt, denial_code):
     return f"{pay} — {nxt} Window Open"
 
 
+RESUB_WINDOW_DAYS = 21  # DHA: resubmission must be posted within 21 days of the RA
+
+
 def _build_claim_cycle_v2(db, facility_id, payer_id, encounter_type,
                            date_from, date_to, date_field,
                            facility_ids=None):
@@ -3038,9 +3041,12 @@ def _build_claim_cycle_v2(db, facility_id, payer_id, encounter_type,
         else:
             outstanding = 0.0
 
-        # Final Rejection: Denial Amount when NO resubmission was ever filed.
-        # Claim is permanently settled as denied — no open contest.
-        if denial_calc > 0 and resub_net_raw == 0:
+        # Final Rejection: denied, NO resubmission filed, AND the 21-day resubmission window
+        # from the latest RA has closed. Denials still inside the window stay only in
+        # Initial Denied (the claim may yet be resubmitted).
+        _ra_dt = r.ra_date.date() if hasattr(r.ra_date, 'date') else r.ra_date
+        _window_open = _ra_dt is not None and (date.today() - _ra_dt).days <= RESUB_WINDOW_DAYS
+        if denial_calc > 0 and resub_net_raw == 0 and not _window_open:
             final_rejection = _f(denial_calc)
         else:
             final_rejection = _f(0)

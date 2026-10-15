@@ -90,6 +90,35 @@ def _call_with_timeout(fn, timeout: int, timeout_msg: str):
         pool.shutdown(wait=False, cancel_futures=True)
 
 
+# Network errors seen from DHPO that succeed on a retry (dropped connections,
+# truncated downloads, brief DNS loss after Mac wake).
+_TRANSIENT_MARKERS = (
+    "IncompleteRead", "Connection broken", "Connection aborted", "RemoteDisconnected",
+    "Connection reset", "Read timed out", "Max retries exceeded", "nodename nor servname",
+    "Temporary failure in name resolution", "ChunkedEncodingError", "EOF occurred",
+)
+TRANSIENT_RETRY_WAITS = (15, 60)  # seconds before the 2nd and 3rd attempts
+
+
+def _is_transient(exc: Exception) -> bool:
+    text = f"{type(exc).__name__}: {exc}"
+    return any(m in text for m in _TRANSIENT_MARKERS)
+
+
+def _retry_transient(fn, what: str):
+    """Run *fn*; on a transient network error wait and try again (3 attempts in all)."""
+    import time
+    for attempt, wait in enumerate((*TRANSIENT_RETRY_WAITS, None), start=1):
+        try:
+            return fn()
+        except Exception as exc:
+            if wait is None or not _is_transient(exc):
+                raise
+            log.warning("%s failed (attempt %d, %s) — retrying in %ds",
+                        what, attempt, str(exc)[:150], wait)
+            time.sleep(wait)
+
+
 # ----------------------------------------------------------------------------
 # DHPO SOAP client wrapper
 # ----------------------------------------------------------------------------
@@ -124,8 +153,10 @@ class DHPOSoapClient:
         # xml_huge_tree: large monthly batch files arrive as one base64 text node
         # bigger than lxml's default limit ("huge text node") — accept them here
         # rather than relying on the raw-HTTP fallback.
-        self._client = Client(wsdl_url, transport=transport,
-                              settings=Settings(xml_huge_tree=True))
+        self._client = _retry_transient(
+            lambda: Client(wsdl_url, transport=transport, settings=Settings(xml_huge_tree=True)),
+            f"WSDL load {wsdl_url}",
+        )
         log.warning("DHPOSoapClient: WSDL loaded OK — %s", wsdl_url)
         self._wsdl_url = wsdl_url
         self._session  = session          # kept for raw-HTTP fallback on huge responses
@@ -208,11 +239,14 @@ class DHPOSoapClient:
             "SearchTransactions CALL: tx_id=%d status=%d %s→%s (timeout=%ds)",
             transaction_id, transaction_status, from_str, to_str, SEARCH_TIMEOUT,
         )
-        result = _call_with_timeout(
-            _do_search, SEARCH_TIMEOUT,
-            f"SearchTransactions timed out after {SEARCH_TIMEOUT}s "
-            f"(tx_id={transaction_id} status={transaction_status} "
-            f"{date_from}→{date_to})",
+        result = _retry_transient(
+            lambda: _call_with_timeout(
+                _do_search, SEARCH_TIMEOUT,
+                f"SearchTransactions timed out after {SEARCH_TIMEOUT}s "
+                f"(tx_id={transaction_id} status={transaction_status} "
+                f"{date_from}→{date_to})",
+            ),
+            f"SearchTransactions tx_id={transaction_id}",
         )
         log.warning(
             "SearchTransactions OK: tx_id=%d status=%d %s→%s",
@@ -240,6 +274,12 @@ class DHPOSoapClient:
     # DownloadTransactionFile — fetch actual file bytes
     # ------------------------------------------------------------------
     def download_transaction_file(self, login: str, pwd: str, file_id: str) -> bytes:
+        return _retry_transient(
+            lambda: self._download_transaction_file_once(login, pwd, file_id),
+            f"DownloadTransactionFile FileID={file_id}",
+        )
+
+    def _download_transaction_file_once(self, login: str, pwd: str, file_id: str) -> bytes:
         """
         Downloads the file content for *file_id*.
         Returns raw bytes (may be XML or ZIP containing XML).

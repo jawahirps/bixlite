@@ -343,28 +343,42 @@ class DHPOXmlParser:
           <RemittanceAdvice TransactionDate="02/06/2026" ...>
         This is the authoritative remittance date for all claims in the file.
         """
+        fmts = (
+            "%d/%m/%Y %H:%M:%S",
+            "%d/%m/%Y %I:%M:%S %p",
+            "%d/%m/%Y %H:%M",
+            "%d/%m/%Y",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%d",
+        )
+
+        def _parse(raw: str) -> Optional[date]:
+            for fmt in fmts:
+                try:
+                    return datetime.strptime(raw.strip(), fmt).date()
+                except ValueError:
+                    continue
+            return None
+
         try:
-            ctx = etree.iterparse(BytesIO(clean_xml.encode("utf-8")), events=("start",))
-            for _ev, elem in ctx:
-                # First element = root — grab its TransactionDate attribute
-                raw = (elem.get("TransactionDate")
-                       or elem.get("transactionDate")
-                       or elem.get("Transaction_Date")
-                       or "")
-                if raw:
-                    for fmt in (
-                        "%d/%m/%Y %H:%M:%S",
-                        "%d/%m/%Y %I:%M:%S %p",
-                        "%d/%m/%Y %H:%M",
-                        "%d/%m/%Y",
-                        "%Y-%m-%dT%H:%M:%S",
-                        "%Y-%m-%d",
-                    ):
-                        try:
-                            return datetime.strptime(raw.strip(), fmt).date()
-                        except ValueError:
-                            continue
-                break  # only inspect root element
+            ctx = etree.iterparse(BytesIO(clean_xml.encode("utf-8")), events=("start", "end"))
+            root_seen = False
+            for ev, elem in ctx:
+                if ev == "start" and not root_seen:
+                    # Root attribute form: <RemittanceAdvice TransactionDate="...">
+                    root_seen = True
+                    raw = (elem.get("TransactionDate")
+                           or elem.get("transactionDate")
+                           or elem.get("Transaction_Date")
+                           or "")
+                    if raw and _parse(raw):
+                        return _parse(raw)
+                elif ev == "end" and elem.tag == "TransactionDate":
+                    # eClaimLink standard: <Header><TransactionDate>15/10/2026 13:01</TransactionDate>
+                    if elem.text and _parse(elem.text):
+                        return _parse(elem.text)
+                elif ev == "start" and elem.tag == "Claim":
+                    break  # header is over
         except Exception:
             pass
         return None

@@ -25,6 +25,11 @@ from ..models import ResubPlaybook, ResubTracking
 
 WINDOW_DAYS = 21
 URGENT_DAYS = 5
+# Only send the facility items worth their time: P1/P2 and a payer that
+# actually pays on resubmission. Everything else stays with the Ghaf team.
+FACILITY_MIN_RECOVERY_PCT = 20
+LOW_VALUE_ACTION = ("Low chance of recovery (payer rarely pays this denial on resubmission). "
+                    "Not sent to the facility — close as write-off unless the claim shows a clear case.")
 LOOKBACK_DAYS = 400
 
 STATUSES = [
@@ -267,6 +272,13 @@ def build_worklist(db: Session, fid: int, window: int = WINDOW_DAYS) -> dict:
                         "P2" if exp >= 100 or days_left <= URGENT_DAYS else "P3")
         else:
             priority = None
+        playbook_owner = pb.owner if pb else "Ghaf"
+        low_value = False
+        if not (t and t.owner_override) and playbook_owner == "Facility":
+            if reconciliation:
+                owner = "Ghaf"   # reconciliation / B2B settlement is negotiated by Ghaf with the payer
+            elif priority not in ("P1", "P2") or p * 100 < FACILITY_MIN_RECOVERY_PCT:
+                owner, low_value = "Ghaf", True
         items.append({
             "key": k, "claim_id": r.claim_id, "activity_id": r.activity_id, "ra_date": r.ra_date.isoformat(),
             "received_at": r.received_at.isoformat() if r.received_at else None,
@@ -282,11 +294,11 @@ def build_worklist(db: Session, fid: int, window: int = WINDOW_DAYS) -> dict:
             "facility_role": pb.facility_role if pb else None,
             "route": "Reconciliation" if reconciliation else "Resubmission",
             "action": ("Second denial after resubmission — request reconciliation / B2B settlement with the payer."
-                       if reconciliation else (pb.action if pb else "")),
+                       if reconciliation else LOW_VALUE_ACTION if low_value else (pb.action if pb else "")),
             "facility_request": pb.facility_request if (pb and owner == "Facility") else None,
             "documents": pb.documents if pb else None,
             "draft_comment": pb.draft_comment if pb else None,
-            "status": status, "bucket": bucket,
+            "status": status, "bucket": bucket, "low_value": low_value,
             "assigned_to": t.assigned_to if t else None, "remarks": t.remarks if t else None,
             "facility_reply": t.facility_reply if t else None,
             "updated_by": t.updated_by if t else None,

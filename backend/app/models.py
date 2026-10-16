@@ -872,3 +872,50 @@ class ScrubXmlFinding(Base):
 
     def __repr__(self) -> str:
         return f"<ScrubXmlFinding session={self.session_id} {self.rule_id}={self.severity}>"
+
+
+# ---------------------------------------------------------------------------
+# Resubmission worklist — editable playbook + per-activity tracking
+# ---------------------------------------------------------------------------
+class ResubPlaybook(Base):
+    """What to do for each denial-code pattern. Edited from the Resubmission Worklist screen."""
+    __tablename__ = "resub_playbook"
+
+    id               : Mapped[int]           = mapped_column(Integer, primary_key=True)
+    sort_order       : Mapped[int]           = mapped_column(Integer, nullable=False, default=100)
+    pattern          : Mapped[str]           = mapped_column(String(200), nullable=False)   # regex on denial code
+    category         : Mapped[str]           = mapped_column(String(80), nullable=False)
+    owner            : Mapped[str]           = mapped_column(String(20), nullable=False, default="Ghaf")  # Ghaf | Facility
+    facility_role    : Mapped[Optional[str]] = mapped_column(String(80))                   # e.g. Doctor, Front office
+    action           : Mapped[str]           = mapped_column(Text, nullable=False)
+    facility_request : Mapped[Optional[str]] = mapped_column(Text)                         # what we ask the facility for
+    documents        : Mapped[Optional[str]] = mapped_column(Text)
+    draft_comment    : Mapped[Optional[str]] = mapped_column(Text)
+    is_active        : Mapped[bool]          = mapped_column(Boolean, nullable=False, default=True)
+    updated_by       : Mapped[Optional[str]] = mapped_column(String(255))
+    updated_at       : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (CheckConstraint("owner IN ('Ghaf','Facility')", name="ck_resub_playbook_owner"),)
+
+
+class ResubTracking(Base):
+    """Team status for one denied activity (facility + claim + activity + RA date)."""
+    __tablename__ = "resub_tracking"
+
+    id             : Mapped[int]           = mapped_column(Integer, primary_key=True)
+    facility_id    : Mapped[int]           = mapped_column(Integer, ForeignKey("facilities.id"), nullable=False)
+    claim_id       : Mapped[str]           = mapped_column(String(100), nullable=False)
+    activity_id    : Mapped[str]           = mapped_column(String(100), nullable=False)
+    ra_date        : Mapped[date]          = mapped_column(Date, nullable=False)
+    status         : Mapped[str]           = mapped_column(String(60), nullable=False, default="New")
+    owner_override : Mapped[Optional[str]] = mapped_column(String(20))   # Ghaf | Facility
+    assigned_to    : Mapped[Optional[str]] = mapped_column(String(120))
+    remarks        : Mapped[Optional[str]] = mapped_column(Text)
+    facility_reply : Mapped[Optional[str]] = mapped_column(Text)
+    updated_by     : Mapped[Optional[str]] = mapped_column(String(255))
+    updated_at     : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("facility_id", "claim_id", "activity_id", "ra_date", name="uq_resub_tracking_key"),
+        Index("ix_resub_tracking_fac", "facility_id"),
+    )

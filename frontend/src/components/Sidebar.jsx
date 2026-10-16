@@ -10,6 +10,7 @@ const navItems = [
   { to: "/jobs", label: "Background Jobs" },
   { to: "/scrubber", label: "Claim Scrubber" },
   { to: "/calibration", label: "Denial Intelligence" },
+  { to: "/resub-worklist", label: "Resubmission Worklist" },
 ];
 
 const linkClasses = ({ isActive }) =>

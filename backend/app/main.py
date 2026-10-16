@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse
 
 from .config import get_settings
 from .database import SessionLocal, init_db
-from .routers import analytics, auth, calibration, clinical_profiles, dha_sync, facilities, reports, portal, receipts, scrub
+from .routers import analytics, auth, calibration, clinical_profiles, dha_sync, facilities, reports, portal, receipts, resub, scrub
 from .seed import run_seed
 
 settings = get_settings()
@@ -106,6 +106,7 @@ app.include_router(portal.router, prefix="/api")  # /api/portal/* — no auth mi
 app.include_router(receipts.router)               # /api/receipts/* — JWT-protected
 app.include_router(scrub.router)                  # /api/scrub/*   — JWT-protected
 app.include_router(calibration.router)            # /api/calibration/* — JWT-protected
+app.include_router(resub.router)                  # /api/resub/* — JWT-protected
 
 # ── Serve React frontend (built with `npm run build`) ────────────────────────
 # Routes are always registered so they survive uvicorn --reload cycles where

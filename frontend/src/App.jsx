@@ -12,6 +12,7 @@ import RemittancePortal from "./pages/portal/RemittancePortal";
 import Jobs from "./pages/Jobs";
 import Scrubber from "./pages/Scrubber";
 import Calibration from "./pages/Calibration";
+import ResubWorklist from "./pages/ResubWorklist";
 
 export default function App() {
   return (
@@ -32,6 +33,7 @@ export default function App() {
           <Route path="/jobs" element={<Jobs />} />
           <Route path="/scrubber" element={<Scrubber />} />
           <Route path="/calibration" element={<Calibration />} />
+          <Route path="/resub-worklist" element={<ResubWorklist />} />
         </Route>
       </Route>
 

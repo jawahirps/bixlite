@@ -213,7 +213,9 @@ WITH den AS (
 )
 SELECT den.*,
        c.encounter_start::date AS treatment_date, c.receiver_id, c.receiver_name, c.payer_name,
-       c.clinician_name, c.member_id,
+       c.clinician_name, c.member_id, c.payer_id AS claim_payer_id,
+       (SELECT a.authorization_id FROM claim_activities a
+         WHERE a.claim_id_fk = c.id AND a.activity_id = den.activity_id LIMIT 1) AS authorization_id,
        EXISTS (SELECT 1 FROM claims x WHERE x.facility_id = den.facility_id AND x.claim_id = den.claim_id
                AND x.resubmission_key <> '' AND x.submission_date::date >= den.ra_date) AS resub_after,
        EXISTS (SELECT 1 FROM claims x WHERE x.facility_id = den.facility_id AND x.claim_id = den.claim_id
@@ -222,6 +224,24 @@ FROM den
 LEFT JOIN LATERAL (SELECT * FROM claims c WHERE c.facility_id = den.facility_id AND c.claim_id = den.claim_id
                    AND c.resubmission_key = '' ORDER BY c.id LIMIT 1) c ON true
 """)
+
+
+_names_cache: Dict[date, tuple] = {}
+
+
+def party_names(db: Session):
+    """Payer / receiver id -> most common name seen on any claim."""
+    if date.today() in _names_cache:
+        return _names_cache[date.today()]
+    def lookup(col):
+        return {r[0]: r[1] for r in db.execute(text(f"""
+            SELECT DISTINCT ON (upper({col}_id)) upper({col}_id), {col}_name
+            FROM (SELECT {col}_id, {col}_name, count(*) n FROM claims
+                  WHERE nullif({col}_name,'') IS NOT NULL GROUP BY 1, 2) t
+            ORDER BY upper({col}_id), n DESC"""))}
+    _names_cache.clear()
+    _names_cache[date.today()] = (lookup("payer"), lookup("receiver"))
+    return _names_cache[date.today()]
 
 
 def tracking_key(claim_id, activity_id, ra_date) -> str:
@@ -234,6 +254,7 @@ def build_worklist(db: Session, fid: int, window: int = WINDOW_DAYS) -> dict:
     today = date.today()
     match = _matcher(ensure_playbook(db))
     rate, overall = recovery_model(db, fid)
+    payer_names, receiver_names = party_names(db)
 
     tracking = {tracking_key(t.claim_id, t.activity_id, t.ra_date): t
                 for t in db.query(ResubTracking).filter(ResubTracking.facility_id == fid,
@@ -285,8 +306,13 @@ def build_worklist(db: Session, fid: int, window: int = WINDOW_DAYS) -> dict:
             "is_new": bool(r.received_at and r.received_at >= new_cut and t is None),
             "treatment_date": r.treatment_date.isoformat() if r.treatment_date else None,
             "deadline": deadline.isoformat(), "days_left": days_left, "priority": priority,
-            "receiver": f"{r.receiver_id or ''} {r.receiver_name or ''}".strip(),
-            "payer": r.payer_name or r.payer_id, "clinician": r.clinician_name, "member_id": r.member_id,
+            "receiver_id": r.receiver_id,
+            "receiver": " – ".join(x for x in (r.receiver_id, r.receiver_name
+                                              or receiver_names.get((r.receiver_id or "").upper())) if x),
+            "payer_id": r.claim_payer_id,
+            "payer": " – ".join(x for x in (r.claim_payer_id, r.payer_name
+                                           or payer_names.get((r.claim_payer_id or "").upper())) if x) or None,
+            "authorization_id": r.authorization_id, "clinician": r.clinician_name, "member_id": r.member_id,
             "activity_code": r.activity_code, "denial_code": code,
             "denial_reason": (r.denial_desc or r.tpa_comments or "")[:400],
             "denied": round(denied, 2), "recovery_pct": round(p * 100), "expected_recovery": exp,
@@ -372,7 +398,8 @@ def to_workbook(facility_name: str, data: dict, audience: str = "ghaf"):
     if audience == "facility":
         cols = [("Priority", "priority"), ("Days Left", "days_left"), ("Reply By", "reply_by"),
                 ("Claim ID", "claim_id"), ("Activity ID", "activity_id"), ("Treatment Date", "treatment_date"),
-                ("Member ID", "member_id"), ("Clinician", "clinician"), ("Receiver", "receiver"),
+                ("Member ID", "member_id"), ("Clinician", "clinician"), ("Receiver", "receiver"), ("Payer", "payer"),
+                ("Auth ID", "authorization_id"),
                 ("Activity Code", "activity_code"), ("Denial Code", "denial_code"), ("Denial Reason", "denial_reason"),
                 ("Denied (AED)", "denied"), ("Who", "facility_role"), ("What We Need From You", "facility_request"),
                 ("Documents to Attach", "documents"), ("Facility Reply", "facility_reply")]
@@ -386,6 +413,7 @@ def to_workbook(facility_name: str, data: dict, audience: str = "ghaf"):
         cols = [("Priority", "priority"), ("Days Left", "days_left"), ("Deadline", "deadline"),
                 ("Owner", "owner"), ("Claim ID", "claim_id"), ("Activity ID", "activity_id"), ("RA Date", "ra_date"),
                 ("Treatment Date", "treatment_date"), ("Receiver", "receiver"), ("Payer", "payer"),
+                ("Auth ID", "authorization_id"),
                 ("Clinician", "clinician"), ("Member ID", "member_id"), ("Activity Code", "activity_code"),
                 ("Denial Code", "denial_code"), ("Denial Reason", "denial_reason"), ("Denied (AED)", "denied"),
                 ("Payer Pays on Resub %", "recovery_pct"), ("Expected Recovery (AED)", "expected_recovery"),

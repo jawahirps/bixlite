@@ -138,7 +138,7 @@ export default function ResubWorklist() {
     (!filters.owner || x.owner === filters.owner) &&
     (!filters.priority || x.priority === filters.priority) &&
     (!filters.category || x.category === filters.category) &&
-    (!filters.q || `${x.claim_id} ${x.denial_code} ${x.receiver} ${x.clinician} ${x.member_id}`.toLowerCase().includes(filters.q.toLowerCase()))
+    (!filters.q || `${x.claim_id} ${x.denial_code} ${x.receiver} ${x.payer} ${x.authorization_id} ${x.clinician} ${x.member_id}`.toLowerCase().includes(filters.q.toLowerCase()))
   );
 
   const s = data?.summary;
@@ -237,7 +237,7 @@ export default function ResubWorklist() {
         <>
           {/* Filters */}
           <div className="flex flex-wrap gap-2">
-            <input placeholder="Search claim, code, receiver, clinician, member…" value={filters.q}
+            <input placeholder="Search claim, code, receiver, payer, auth ID, clinician, member…" value={filters.q}
               onChange={e => setFilters(f => ({ ...f, q: e.target.value }))}
               className="min-w-64 flex-1 rounded-lg border border-slate-300 px-3 py-1.5 text-sm" />
             {!facilityView && (
@@ -262,7 +262,7 @@ export default function ResubWorklist() {
               <table className="min-w-full divide-y divide-slate-200 text-sm">
                 <thead className="bg-slate-50">
                   <tr>
-                    {["Priority", "Deadline", "Claim / Activity", "Receiver", "Denial", "Denied (AED)",
+                    {["Priority", "Deadline", "Claim / Activity", "Receiver / Payer", "Denial", "Denied (AED)",
                       ...(facilityView ? [] : ["Expected", "Owner"]), "Status"].map(h => (
                       <th key={h} className="whitespace-nowrap px-3 py-2 text-left font-semibold text-slate-600">{h}</th>
                     ))}
@@ -318,7 +318,10 @@ function Row({ x, expanded, onToggle, onSave, saving, statuses, facilityView }) 
           <div className="font-medium text-slate-800">{x.claim_id}</div>
           <div className="text-xs text-slate-400">{x.activity_code} · {x.activity_id}</div>
         </td>
-        <td className="px-3 py-2 text-xs text-slate-600">{x.receiver}</td>
+        <td className="max-w-[220px] px-3 py-2 text-xs">
+          <div className="truncate text-slate-700" title={x.receiver}>{x.receiver || "—"}</div>
+          <div className="truncate text-slate-400" title={x.payer}>{x.payer || "—"}</div>
+        </td>
         <td className="max-w-xs px-3 py-2">
           <div className="font-mono text-xs font-semibold text-slate-700">{x.denial_code}</div>
           <div className="truncate text-xs text-slate-500" title={x.denial_reason}>{x.category}{x.route === "Reconciliation" ? " · Reconciliation" : ""}</div>
@@ -350,10 +353,18 @@ function Row({ x, expanded, onToggle, onSave, saving, statuses, facilityView }) 
             <div className="grid gap-4 text-sm lg:grid-cols-2">
               <div className="space-y-2">
                 <Field label="Denial reason (from payer)">{x.denial_reason || "—"}</Field>
-                <Field label="Claim">
-                  Treatment {fmtDate(x.treatment_date)} · RA {fmtDate(x.ra_date)} · Payer {x.payer || "—"} ·
-                  Clinician {x.clinician || "—"} · Member {x.member_id || "—"}
-                </Field>
+                <div className="grid grid-cols-2 gap-x-4 gap-y-2 rounded-lg border border-slate-200 bg-white p-3 sm:grid-cols-3">
+                  <Field label="Receiver (TPA)">{x.receiver || "—"}</Field>
+                  <Field label="Payer (insurer)">{x.payer || "—"}</Field>
+                  <Field label="Member ID"><span className="font-mono">{x.member_id || "—"}</span></Field>
+                  <Field label="Auth ID">
+                    {x.authorization_id
+                      ? <span className="flex items-center gap-2 font-mono">{x.authorization_id} <CopyButton text={x.authorization_id} /></span>
+                      : <span className="text-slate-400">none on claim</span>}
+                  </Field>
+                  <Field label="Treatment / RA">{fmtDate(x.treatment_date)} · {fmtDate(x.ra_date)}</Field>
+                  <Field label="Clinician">{x.clinician || "—"}</Field>
+                </div>
                 {!facilityView && <Field label="Action (Ghaf team)">{x.action}</Field>}
                 {x.facility_request && <Field label={`Needed from facility${x.facility_role ? ` — ${x.facility_role}` : ""}`}>{x.facility_request}</Field>}
                 <Field label="Documents to attach">{x.documents || "—"}</Field>

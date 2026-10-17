@@ -248,6 +248,11 @@ LEFT JOIN LATERAL (SELECT * FROM claims c WHERE c.facility_id = den.facility_id 
                    AND c.resubmission_key = '' ORDER BY c.id LIMIT 1) c ON true
 """)
 
+# Reconciliation has no 21-day clock from the RA (the 2nd resubmission is due 21 days from the
+# reconciliation date), so eligible claims are kept from RECON_SINCE onward, not just the window.
+RECON_SINCE = date(2026, 1, 1)
+_RECON_SQL = text("SELECT * FROM (" + _OPEN_SQL.text + ") q WHERE q.resub_before AND NOT q.resub_after")
+
 
 RECON_REMARKS = {
     "Medical necessity": "As the activity was rendered based on the clinical presentation, requesting your "
@@ -504,8 +509,13 @@ def build_worklist(db: Session, fid: int, window: int = WINDOW_DAYS) -> dict:
 
     tracking = {tracking_key(t.claim_id, t.activity_id, t.ra_date): t
                 for t in db.query(ResubTracking).filter(ResubTracking.facility_id == fid,
-                                                        ResubTracking.ra_date >= today - timedelta(days=window + 8))}
-    rows = db.execute(_OPEN_SQL, {"f": fid, "since": today - timedelta(days=window + 7)}).fetchall()
+                                                        ResubTracking.ra_date >= min(RECON_SINCE, today - timedelta(days=window + 8)))}
+    since = today - timedelta(days=window + 7)
+    rows = db.execute(_OPEN_SQL, {"f": fid, "since": since}).fetchall()
+    if RECON_SINCE < since:
+        seen = {(r.claim_id, r.activity_id, r.ra_date) for r in rows}
+        rows += [r for r in db.execute(_RECON_SQL, {"f": fid, "since": RECON_SINCE}).fetchall()
+                 if r.ra_date < since and (r.claim_id, r.activity_id, r.ra_date) not in seen]
     new_cut = datetime.now(timezone.utc) - timedelta(hours=30)
 
     items = []

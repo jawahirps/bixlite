@@ -70,6 +70,8 @@ export default function ResubWorklist() {
   const [saving, setSaving] = useState(null);
   const [filters, setFilters] = useState({ q: "", owner: "", priority: "", category: "" });
   const [limit, setLimit] = useState(200);
+  const [groupByClaim, setGroupByClaim] = useState(true);
+  const [openClaims, setOpenClaims] = useState(new Set());
 
   const facilityView = data?.facility_view;
   const canEditPlaybook = ["admin", "billing_manager"].includes(user?.role);
@@ -153,6 +155,28 @@ export default function ResubWorklist() {
     (!filters.category || x.category === filters.category) &&
     (!filters.q || `${x.claim_id} ${x.denial_code} ${x.receiver} ${x.payer} ${x.authorization_id} ${x.clinician} ${x.member_id}`.toLowerCase().includes(filters.q.toLowerCase()))
   );
+
+  const PRI = { P1: 0, P2: 1, P3: 2 };
+  const groups = useMemo(() => {
+    if (!groupByClaim) return null;
+    const m = new Map();
+    for (const x of shown) {
+      const k = `${x.claim_id}|${x.ra_date}`;
+      if (!m.has(k)) m.set(k, []);
+      m.get(k).push(x);
+    }
+    return [...m.entries()].map(([k, lines]) => ({
+      key: k, lines,
+      priority: lines.reduce((p, x) => (x.priority && (!p || PRI[x.priority] < PRI[p]) ? x.priority : p), null),
+      days_left: Math.min(...lines.map(x => x.days_left)),
+      denied: lines.reduce((a, x) => a + x.denied, 0),
+      expected: lines.reduce((a, x) => a + x.expected_recovery, 0),
+    })).sort((a, b) => (PRI[a.priority] ?? 3) - (PRI[b.priority] ?? 3) || a.days_left - b.days_left || b.expected - a.expected);
+  }, [shown, groupByClaim]);
+
+  function toggleClaim(k) {
+    setOpenClaims(prev => { const n = new Set(prev); n.has(k) ? n.delete(k) : n.add(k); return n; });
+  }
 
   const s = data?.summary;
   const tabs = facilityView
@@ -265,6 +289,10 @@ export default function ResubWorklist() {
                 <option value="">All owners</option><option>Ghaf</option><option>Facility</option>
               </select>
             )}
+            <label className="flex items-center gap-2 rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-700">
+              <input type="checkbox" checked={groupByClaim} onChange={e => { setGroupByClaim(e.target.checked); setOpenClaims(new Set()); }} />
+              Group by claim
+            </label>
             <select value={filters.priority} onChange={e => setFilters(f => ({ ...f, priority: e.target.value }))}
               className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm">
               <option value="">All priorities</option><option>P1</option><option>P2</option><option>P3</option>
@@ -281,19 +309,32 @@ export default function ResubWorklist() {
               <table className="min-w-full divide-y divide-slate-200 text-sm">
                 <thead className="bg-slate-50">
                   <tr>
-                    {["Priority", "Deadline", "Claim / Activity", "Receiver / Payer", "Denial", "Denied (AED)",
+                    {["Priority", "Deadline", groupByClaim ? "Claim · denied / claimed activities" : "Claim / Activity", "Receiver / Payer", "Denial", "Denied (AED)",
                       ...(facilityView ? [] : ["Expected", "Owner"]), "Status"].map(h => (
                       <th key={h} className="whitespace-nowrap px-3 py-2 text-left font-semibold text-slate-600">{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {shown.slice(0, limit).map(x => (
-                    <Row key={x.key} x={x} expanded={expanded === x.key}
-                      onToggle={() => setExpanded(expanded === x.key ? null : x.key)}
-                      onSave={patch => saveItem(x, patch)} saving={saving === x.key}
-                      statuses={data.statuses} facilityView={facilityView} />
-                  ))}
+                  {groupByClaim
+                    ? groups.slice(0, limit).map(g => (
+                      <ClaimGroup key={g.key} g={g} open={openClaims.has(g.key)} onToggle={() => toggleClaim(g.key)}
+                        facilityView={facilityView} statuses={data.statuses}
+                        onSaveAll={status => Promise.all(g.lines.map(x => saveItem(x, { status })))}>
+                        {g.lines.map(x => (
+                          <Row key={x.key} x={x} nested expanded={expanded === x.key}
+                            onToggle={() => setExpanded(expanded === x.key ? null : x.key)}
+                            onSave={patch => saveItem(x, patch)} saving={saving === x.key}
+                            statuses={data.statuses} facilityView={facilityView} />
+                        ))}
+                      </ClaimGroup>
+                    ))
+                    : shown.slice(0, limit).map(x => (
+                      <Row key={x.key} x={x} expanded={expanded === x.key}
+                        onToggle={() => setExpanded(expanded === x.key ? null : x.key)}
+                        onSave={patch => saveItem(x, patch)} saving={saving === x.key}
+                        statuses={data.statuses} facilityView={facilityView} />
+                    ))}
                   {shown.length === 0 && (
                     <tr><td colSpan={9} className="px-3 py-8 text-center text-slate-400">
                       {loading ? "Loading…" : "Nothing here."}
@@ -302,10 +343,10 @@ export default function ResubWorklist() {
                 </tbody>
               </table>
             </div>
-            {shown.length > limit && (
+            {(groupByClaim ? groups.length : shown.length) > limit && (
               <div className="border-t border-slate-100 p-3 text-center">
                 <button onClick={() => setLimit(l => l + 200)} className="text-sm font-medium text-ghaf-700 hover:underline">
-                  Show more ({shown.length - limit} remaining)
+                  Show more ({(groupByClaim ? groups.length : shown.length) - limit} {groupByClaim ? "claims" : "lines"} remaining)
                 </button>
               </div>
             )}
@@ -316,7 +357,7 @@ export default function ResubWorklist() {
   );
 }
 
-function Row({ x, expanded, onToggle, onSave, saving, statuses, facilityView }) {
+function Row({ x, expanded, onToggle, onSave, saving, statuses, facilityView, nested }) {
   const [remarks, setRemarks] = useState(x.remarks || "");
   const [assigned, setAssigned] = useState(x.assigned_to || "");
   const [reply, setReply] = useState(x.facility_reply || "");
@@ -326,7 +367,7 @@ function Row({ x, expanded, onToggle, onSave, saving, statuses, facilityView }) 
 
   return (
     <>
-      <tr className={`cursor-pointer hover:bg-slate-50 ${x.is_new ? "bg-sky-50/50" : ""}`} onClick={onToggle}>
+      <tr className={`cursor-pointer hover:bg-slate-50 ${nested ? "bg-slate-50/60 text-[13px]" : x.is_new ? "bg-sky-50/50" : ""}`} onClick={onToggle}>
         <td className="px-3 py-2">
           {x.priority ? <span className={`rounded px-2 py-0.5 text-xs ${PRIORITY_STYLE[x.priority]}`}>{x.priority}</span> : "—"}
           {x.is_new && <span className="ml-1 rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700">NEW</span>}
@@ -335,9 +376,13 @@ function Row({ x, expanded, onToggle, onSave, saving, statuses, facilityView }) 
           <DaysChip d={x.days_left} bucket={x.bucket} />
           <div className="mt-0.5 text-xs text-slate-400">{fmtDate(x.deadline)}</div>
         </td>
-        <td className="px-3 py-2">
-          <div className="font-medium text-slate-800">{x.claim_id}</div>
-          <div className="text-xs text-slate-400">{x.activity_code} · {x.activity_id}</div>
+        <td className={`px-3 py-2 ${nested ? "pl-8" : ""}`}>
+          {nested
+            ? <div className="font-medium text-slate-700">↳ {x.activity_code} <span className="text-xs font-normal text-slate-400">· activity {x.activity_id}</span></div>
+            : <>
+                <div className="font-medium text-slate-800">{x.claim_id}</div>
+                <div className="text-xs text-slate-400">{x.activity_code} · {x.activity_id}</div>
+              </>}
         </td>
         <td className="max-w-[220px] px-3 py-2 text-xs">
           <div className="truncate text-slate-700" title={x.receiver}>{x.receiver || "—"}</div>
@@ -442,6 +487,68 @@ function Row({ x, expanded, onToggle, onSave, saving, statuses, facilityView }) 
           </td>
         </tr>
       )}
+    </>
+  );
+}
+
+function ClaimGroup({ g, open, onToggle, onSaveAll, facilityView, statuses, children }) {
+  const x = g.lines[0];
+  const n = g.lines.length, total = x.claim_activities || n;
+  const owners = [...new Set(g.lines.map(l => l.owner))];
+  const codes = [...new Set(g.lines.map(l => l.denial_code))];
+  const cats = [...new Set(g.lines.map(l => l.category))];
+  const verdicts = [...new Set(g.lines.filter(l => l.consult).map(l => l.consult.verdict))];
+  const allStatus = [...new Set(g.lines.map(l => l.status))];
+  return (
+    <>
+      <tr className={`cursor-pointer border-t-2 border-slate-200 hover:bg-slate-50 ${g.lines.some(l => l.is_new) ? "bg-sky-50/40" : ""}`} onClick={onToggle}>
+        <td className="px-3 py-2">
+          {g.priority ? <span className={`rounded px-2 py-0.5 text-xs ${PRIORITY_STYLE[g.priority]}`}>{g.priority}</span> : "—"}
+          {g.lines.some(l => l.is_new) && <span className="ml-1 rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700">NEW</span>}
+        </td>
+        <td className="whitespace-nowrap px-3 py-2">
+          <DaysChip d={g.days_left} bucket={x.bucket} />
+          <div className="mt-0.5 text-xs text-slate-400">{fmtDate(x.deadline)}</div>
+        </td>
+        <td className="px-3 py-2">
+          <div className="flex items-center gap-2 font-semibold text-slate-800">
+            <span className="text-slate-400">{open ? "▾" : "▸"}</span>{x.claim_id}
+          </div>
+          <div className="mt-0.5 text-xs">
+            <span className="rounded bg-rose-50 px-1.5 py-0.5 font-semibold text-rose-700">{n} of {total} activities denied</span>
+            <span className="ml-2 text-slate-400">claim net AED {fmt(x.claim_net)}</span>
+          </div>
+        </td>
+        <td className="max-w-[220px] px-3 py-2 text-xs">
+          <div className="truncate text-slate-700" title={x.receiver}>{x.receiver || "—"}</div>
+          <div className="truncate text-slate-400" title={x.payer}>{x.payer || "—"}</div>
+        </td>
+        <td className="max-w-xs px-3 py-2">
+          <div className="font-mono text-xs font-semibold text-slate-700">{codes.slice(0, 4).join(", ")}{codes.length > 4 ? " …" : ""}</div>
+          <div className="truncate text-xs text-slate-500">{cats.join(" · ")}</div>
+          {verdicts.map(v => <div key={v} className="mt-0.5 text-[11px] text-violet-700">{v}</div>)}
+        </td>
+        <td className="px-3 py-2 text-right font-semibold tabular-nums">{fmt(g.denied)}</td>
+        {!facilityView && (
+          <>
+            <td className="px-3 py-2 text-right text-xs tabular-nums text-slate-500">{fmt(g.expected)}</td>
+            <td className="px-3 py-2">
+              {owners.map(o => <span key={o} className={`mr-1 rounded px-2 py-0.5 text-xs font-medium ${OWNER_STYLE[o]}`}>{o}</span>)}
+            </td>
+          </>
+        )}
+        <td className="px-3 py-2 text-xs" onClick={e => e.stopPropagation()}>
+          {allStatus.length === 1 ? <span className="text-slate-600">{allStatus[0]}</span> : <span className="text-slate-500">mixed</span>}
+          {!facilityView && (
+            <select value="" onChange={e => e.target.value && onSaveAll(e.target.value)}
+              className="mt-1 block rounded border border-slate-300 px-1.5 py-1 text-xs">
+              <option value="">Set all lines…</option>
+              {statuses.map(st => <option key={st}>{st}</option>)}
+            </select>
+          )}
+        </td>
+      </tr>
+      {open && children}
     </>
   );
 }

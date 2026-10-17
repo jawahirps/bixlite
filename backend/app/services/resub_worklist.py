@@ -242,6 +242,8 @@ WITH den AS (
 SELECT den.*,
        c.encounter_start::date AS treatment_date, c.receiver_id, c.receiver_name, c.payer_name,
        c.clinician_name, c.member_id, c.payer_id AS claim_payer_id,
+       (SELECT count(*) FROM claim_activities a WHERE a.claim_id_fk = c.id) AS claim_activities,
+       c.net_amount AS claim_net,
        (SELECT a.authorization_id FROM claim_activities a
          WHERE a.claim_id_fk = c.id AND a.activity_id = den.activity_id LIMIT 1) AS authorization_id,
        EXISTS (SELECT 1 FROM claims x WHERE x.facility_id = den.facility_id AND x.claim_id = den.claim_id
@@ -583,7 +585,8 @@ def build_worklist(db: Session, fid: int, window: int = WINDOW_DAYS, recon_histo
             "payer_id": r.claim_payer_id,
             "payer": " – ".join(x for x in (r.claim_payer_id, r.payer_name
                                            or payer_names.get((r.claim_payer_id or "").upper())) if x) or None,
-            "authorization_id": r.authorization_id, "clinician": r.clinician_name, "member_id": r.member_id,
+            "authorization_id": r.authorization_id,
+            "claim_activities": r.claim_activities, "claim_net": float(r.claim_net or 0), "clinician": r.clinician_name, "member_id": r.member_id,
             "activity_code": r.activity_code, "denial_code": code,
             "denial_reason": (r.denial_desc or r.tpa_comments or "")[:400],
             "denied": round(denied, 2), "recovery_pct": round(p * 100), "expected_recovery": exp,
@@ -709,12 +712,18 @@ def to_workbook(facility_name: str, data: dict, audience: str = "ghaf"):
             "Draft Resubmission Comment", "Remarks", "Facility Reply"}
 
     items = data["items"]
+    # denied activities per claim (same RA) vs activities claimed
+    per_claim = defaultdict(list)
+    for x in items:
+        per_claim[(x["claim_id"], x["ra_date"], x["bucket"])].append(x)
+    items = [x | {"denied_of": f"{len(per_claim[(x['claim_id'], x['ra_date'], x['bucket'])])} of "
+                              f"{x.get('claim_activities') or '?'}"} for x in items]
     open_ = [x for x in items if x["bucket"] == "open"]
     wb = openpyxl.Workbook()
 
     if audience == "reconciliation":
-        cols = [("Claim ID", "claim_id"), ("Activity ID", "activity_id"), ("Treatment Date", "treatment_date"),
-                ("RA Date", "ra_date"), ("Receiver", "receiver"), ("Payer", "payer"), ("Member ID", "member_id"),
+        cols = [("Claim ID", "claim_id"), ("Activity ID", "activity_id"), ("Denied / Claimed Activities", "denied_of"),
+                ("Treatment Date", "treatment_date"), ("RA Date", "ra_date"), ("Receiver", "receiver"), ("Payer", "payer"), ("Member ID", "member_id"),
                 ("Auth ID", "authorization_id"), ("Clinician", "clinician"), ("Activity Code", "activity_code"),
                 ("Denial Code", "denial_code"), ("Denial Reason", "denial_reason"), ("Denied (AED)", "denied"),
                 ("Category", "category"), ("Suggested Remark to Payer", "recon_remark"),
@@ -732,8 +741,8 @@ def to_workbook(facility_name: str, data: dict, audience: str = "ghaf"):
                  f"last column and inform Ghaf — we will resubmit under type 'Reconciliation' within 21 days.")
     elif audience == "facility":
         cols = [("Priority", "priority"), ("Days Left", "days_left"), ("Reply By", "reply_by"),
-                ("Claim ID", "claim_id"), ("Activity ID", "activity_id"), ("Treatment Date", "treatment_date"),
-                ("Member ID", "member_id"), ("Clinician", "clinician"), ("Receiver", "receiver"), ("Payer", "payer"),
+                ("Claim ID", "claim_id"), ("Activity ID", "activity_id"), ("Denied / Claimed Activities", "denied_of"),
+                ("Treatment Date", "treatment_date"), ("Member ID", "member_id"), ("Clinician", "clinician"), ("Receiver", "receiver"), ("Payer", "payer"),
                 ("Auth ID", "authorization_id"),
                 ("Activity Code", "activity_code"), ("Denial Code", "denial_code"), ("Denial Reason", "denial_reason"),
                 ("Denied (AED)", "denied"), ("Who", "facility_role"), ("What We Need From You", "facility_request"),
@@ -746,7 +755,8 @@ def to_workbook(facility_name: str, data: dict, audience: str = "ghaf"):
                  f"Please reply by the 'Reply By' date so the Ghaf team can resubmit before the payer deadline.")
     else:
         cols = [("Priority", "priority"), ("Days Left", "days_left"), ("Deadline", "deadline"),
-                ("Owner", "owner"), ("Claim ID", "claim_id"), ("Activity ID", "activity_id"), ("RA Date", "ra_date"),
+                ("Owner", "owner"), ("Claim ID", "claim_id"), ("Activity ID", "activity_id"),
+                ("Denied / Claimed Activities", "denied_of"), ("RA Date", "ra_date"),
                 ("Treatment Date", "treatment_date"), ("Receiver", "receiver"), ("Payer", "payer"),
                 ("Auth ID", "authorization_id"),
                 ("Clinician", "clinician"), ("Member ID", "member_id"), ("Activity Code", "activity_code"),
@@ -828,4 +838,43 @@ def to_workbook(facility_name: str, data: dict, audience: str = "ghaf"):
         ws.freeze_panes = "E2"; ws.auto_filter.ref = ws.dimensions
         for i, (h, _) in enumerate(cols, 1):
             ws.column_dimensions[get_column_letter(i)].width = 50 if h in WIDE else max(10, min(24, len(h) + 3))
+    if audience == "ghaf":
+        ws = wb.create_sheet("By Claim", 1)
+        hdr = ["Priority", "Days Left", "Deadline", "Claim ID", "RA Date", "Treatment Date", "Receiver", "Payer",
+               "Activities Claimed", "Activities Denied", "Claim Net (AED)", "Denied (AED)", "Expected Recovery (AED)",
+               "Denial Codes", "Categories", "Owner(s)", "Visit Check", "Status"]
+        ws.append(hdr)
+        for c in ws[1]:
+            c.font = WB; c.fill = TEAL; c.alignment = Alignment(wrap_text=True, vertical="center")
+        order = {"P1": 0, "P2": 1, "P3": 2}
+        groups = defaultdict(list)
+        for x in open_:
+            groups[(x["claim_id"], x["ra_date"])].append(x)
+        rows = []
+        for (cid, ra), ls in groups.items():
+            pr = min((l["priority"] for l in ls if l["priority"]), key=lambda p: order[p], default=None)
+            dl = min(l["days_left"] for l in ls)
+            j = lambda vals: ", ".join(dict.fromkeys(v for v in vals if v))
+            st = set(l["status"] for l in ls)
+            rows.append([pr, dl, date.fromisoformat(ls[0]["deadline"]), cid, date.fromisoformat(ra),
+                         date.fromisoformat(ls[0]["treatment_date"]) if ls[0]["treatment_date"] else None,
+                         ls[0]["receiver"], ls[0]["payer"], ls[0].get("claim_activities"), len(ls),
+                         ls[0].get("claim_net"), round(sum(l["denied"] for l in ls), 2),
+                         round(sum(l["expected_recovery"] for l in ls), 2), j(l["denial_code"] for l in ls),
+                         j(l["category"] for l in ls), j(l["owner"] for l in ls),
+                         j((l.get("consult") or {}).get("verdict") for l in ls),
+                         st.pop() if len(st) == 1 else "mixed"])
+        rows.sort(key=lambda r: (order.get(r[0], 3), r[1], -r[12]))
+        for r in rows:
+            ws.append(r)
+            if r[1] is not None and r[1] <= URGENT_DAYS:
+                for c in ws[ws.max_row]: c.fill = URG
+        for row in ws.iter_rows(min_row=2):
+            for c in row:
+                c.border = THIN; c.alignment = Alignment(vertical="top", wrap_text=c.column in (14, 15, 17))
+                if isinstance(c.value, date): c.number_format = "DD/MM/YYYY"
+                if c.column in (11, 12, 13): c.number_format = "#,##0.00"
+        for i, w in enumerate([9, 9, 12, 30, 12, 13, 30, 30, 10, 10, 12, 12, 13, 22, 26, 14, 30, 16], 1):
+            ws.column_dimensions[get_column_letter(i)].width = w
+        ws.freeze_panes = "E2"; ws.auto_filter.ref = ws.dimensions
     return wb

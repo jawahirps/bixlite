@@ -314,7 +314,9 @@ function Row({ x, expanded, onToggle, onSave, saving, statuses, facilityView }) 
   const [remarks, setRemarks] = useState(x.remarks || "");
   const [assigned, setAssigned] = useState(x.assigned_to || "");
   const [reply, setReply] = useState(x.facility_reply || "");
-  const facilityStatuses = ["Facility replied", "Collect from patient"];
+  const facilityStatuses = x.route === "Reconciliation"
+    ? ["Facility discussing with payer", "Agreed — resubmit as Reconciliation", "Not agreed with payer (write-off)"]
+    : ["Facility replied", "Collect from patient"];
 
   return (
     <>
@@ -399,7 +401,7 @@ function Row({ x, expanded, onToggle, onSave, saving, statuses, facilityView }) 
                     )}
                   </div>
                 )}
-                {x.recon_remark && <Field label={<span className="flex items-center gap-2">Reconciliation remark (B to B) <CopyButton text={x.recon_remark} /></span>}><span className="italic">{x.recon_remark}</span></Field>}
+                {x.recon_remark && <Field label={<span className="flex items-center gap-2">Suggested remark for the facility to use with the payer <CopyButton text={x.recon_remark} /></span>}><span className="italic">{x.recon_remark}</span></Field>}
                 {!facilityView && <Field label="Action (Ghaf team)">{x.action}</Field>}
                 {x.facility_request && <Field label={`Needed from facility${x.facility_role ? ` — ${x.facility_role}` : ""}`}>{x.facility_request}</Field>}
                 <Field label="Documents to attach">{x.documents || "—"}</Field>
@@ -427,7 +429,7 @@ function Row({ x, expanded, onToggle, onSave, saving, statuses, facilityView }) 
                       onSave={() => onSave({ remarks })} saving={saving} />
                   </>
                 )}
-                <TextBox label="Facility reply" value={reply} onChange={setReply} saving={saving}
+                <TextBox label={x.route === "Reconciliation" ? "Facility outcome with payer (agreed / not agreed, date)" : "Facility reply"} value={reply} onChange={setReply} saving={saving}
                   onSave={() => onSave(facilityView ? { facility_reply: reply, status: "Facility replied" } : { facility_reply: reply })} />
               </div>
             </div>

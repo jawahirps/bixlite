@@ -82,7 +82,8 @@ def save_tracking(body: TrackingBatch, db: Session = Depends(get_db), user: User
         # facility staff answer requests; they don't re-route or close Ghaf's work
         allowed = {"claim_id", "activity_id", "ra_date", "facility_reply", "status"}
         updates = [{k: v for k, v in u.items() if k in allowed} for u in updates]
-        if any(u.get("status") not in (None, "Facility replied", "Collect from patient") for u in updates):
+        if any(u.get("status") not in (None, "Facility replied", "Collect from patient", "Facility discussing with payer",
+                                  rw.RECON_AGREED, "Not agreed with payer (write-off)") for u in updates):
             raise HTTPException(status_code=403, detail="Facility users can only reply")
     try:
         n = rw.save_tracking(db, body.facility_id, updates, user.email)

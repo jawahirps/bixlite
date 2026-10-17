@@ -35,8 +35,13 @@ LOOKBACK_DAYS = 400
 STATUSES = [
     "New", "In progress", "Sent to facility", "Facility replied", "Ready to resubmit",
     "Resubmitted", "Not resubmitting (write-off)", "Collect from patient",
+    # reconciliation flow: Ghaf sends → facility takes it up with the payer → facility confirms → Ghaf resubmits
+    "Sent to facility (reconciliation)", "Facility discussing with payer",
+    "Agreed — resubmit as Reconciliation", "Not agreed with payer (write-off)",
 ]
-CLOSED_BY_TEAM = ("Resubmitted", "Not resubmitting (write-off)", "Collect from patient")
+CLOSED_BY_TEAM = ("Resubmitted", "Not resubmitting (write-off)", "Collect from patient",
+                  "Not agreed with payer (write-off)")
+RECON_AGREED = "Agreed — resubmit as Reconciliation"
 
 # (pattern, category, owner, facility_role, action, facility_request, documents, draft_comment)
 CONSULT_ACTIVITY = r"^(9|10|11)(\.\d+)?$"
@@ -535,8 +540,15 @@ def build_worklist(db: Session, fid: int, window: int = WINDOW_DAYS) -> dict:
             bucket, status = "closed_resubmitted", "Resubmitted"
         elif status in CLOSED_BY_TEAM:
             bucket = "closed_team"
+        elif reconciliation and status == RECON_AGREED:
+            # facility confirmed mutual agreement with the payer: Ghaf resubmits as type Reconciliation
+            # within 21 days of the reconciliation (agreement) date
+            bucket = "open"
+            agreed_on = t.updated_at.date() if t and t.updated_at else today
+            deadline = agreed_on + timedelta(days=WINDOW_DAYS)
+            days_left = (deadline - today).days
         elif reconciliation:
-            bucket = "reconciliation"   # second denial: B2B / reconciliation with the payer, via the facility
+            bucket = "reconciliation"   # second denial: sent to the facility, who takes it up with the payer
         elif days_left < 0:
             bucket = "expired"
         else:
@@ -555,7 +567,8 @@ def build_worklist(db: Session, fid: int, window: int = WINDOW_DAYS) -> dict:
         low_value = False
         if not (t and t.owner_override) and playbook_owner == "Facility":
             if reconciliation:
-                owner = "Ghaf"   # reconciliation / B2B settlement is negotiated by Ghaf with the payer
+                # the facility takes reconciliation up with the payer; Ghaf resubmits once agreed
+                owner = "Ghaf" if status == RECON_AGREED else "Facility"
             elif priority not in ("P1", "P2") or p * 100 < FACILITY_MIN_RECOVERY_PCT:
                 owner, low_value = "Ghaf", True
         items.append({
@@ -579,7 +592,12 @@ def build_worklist(db: Session, fid: int, window: int = WINDOW_DAYS) -> dict:
             "route": "Reconciliation" if reconciliation else "Resubmission",
             "recon_remark": (RECON_REMARKS.get(pb.category if pb else "Other", RECON_DEFAULT)
                              if reconciliation else None),
-            "action": ("Second denial after resubmission — request reconciliation / B2B settlement with the payer."
+            "action": (("Facility confirmed agreement with the payer — resubmit this claim under resubmission type "
+                        "'Reconciliation' before the deadline (21 days from the reconciliation date).")
+                       if reconciliation and status == RECON_AGREED else
+                       ("Denied again after resubmission — reconciliation. Ghaf sends it to the facility in the "
+                        "month-end reconciliation pack; the facility takes it up with the payer and, once mutually "
+                        "agreed, informs Ghaf to resubmit under type 'Reconciliation'.")
                        if reconciliation else LOW_VALUE_ACTION if low_value else (pb.action if pb else "")),
             "facility_request": pb.facility_request if (pb and owner == "Facility") else None,
             "documents": pb.documents if pb else None,
@@ -686,7 +704,8 @@ def to_workbook(facility_name: str, data: dict, audience: str = "ghaf"):
     DONE = PatternFill("solid", fgColor="E8F5E9"); GREY = PatternFill("solid", fgColor="EEEEEE")
     THIN = Border(bottom=Side(style="thin", color="DDDDDD"))
     WB = Font(bold=True, color="FFFFFF")
-    WIDE = {"Denial Reason", "Action", "Rate Basis", "Provider Remarks", "Facility Confirmation", "What We Need From You", "Documents to Attach",
+    WIDE = {"Denial Reason", "Action", "Rate Basis", "Suggested Remark to Payer",
+            "Outcome with Payer (Agreed / Not agreed, date)", "What We Need From You", "Documents to Attach",
             "Draft Resubmission Comment", "Remarks", "Facility Reply"}
 
     items = data["items"]
@@ -698,7 +717,8 @@ def to_workbook(facility_name: str, data: dict, audience: str = "ghaf"):
                 ("RA Date", "ra_date"), ("Receiver", "receiver"), ("Payer", "payer"), ("Member ID", "member_id"),
                 ("Auth ID", "authorization_id"), ("Clinician", "clinician"), ("Activity Code", "activity_code"),
                 ("Denial Code", "denial_code"), ("Denial Reason", "denial_reason"), ("Denied (AED)", "denied"),
-                ("Category", "category"), ("Provider Remarks", "recon_remark"), ("Facility Confirmation", "facility_reply")]
+                ("Category", "category"), ("Suggested Remark to Payer", "recon_remark"),
+                ("Outcome with Payer (Agreed / Not agreed, date)", "facility_reply")]
         recon = [x for x in items if x["bucket"] == "reconciliation"]
         by_rcv = defaultdict(list)
         for x in recon:
@@ -708,8 +728,8 @@ def to_workbook(facility_name: str, data: dict, audience: str = "ghaf"):
             sheets.append((re.sub(r"[\\/*?:\[\]]", "", rcv)[:31], rs, lambda x: None))
         team_from = len(cols) - 1
         intro = (f"{facility_name} — claims eligible for reconciliation (denied again after resubmission). "
-                 f"Please confirm in 'Facility Confirmation' which claims we may take up with the payer for "
-                 f"B to B settlement / Resub under Reconciliation.")
+                 f"Please take these up with the payer. Once mutually agreed, record the outcome and date in the "
+                 f"last column and inform Ghaf — we will resubmit under type 'Reconciliation' within 21 days.")
     elif audience == "facility":
         cols = [("Priority", "priority"), ("Days Left", "days_left"), ("Reply By", "reply_by"),
                 ("Claim ID", "claim_id"), ("Activity ID", "activity_id"), ("Treatment Date", "treatment_date"),

@@ -884,6 +884,8 @@ class ResubPlaybook(Base):
     id               : Mapped[int]           = mapped_column(Integer, primary_key=True)
     sort_order       : Mapped[int]           = mapped_column(Integer, nullable=False, default=100)
     pattern          : Mapped[str]           = mapped_column(String(200), nullable=False)   # regex on denial code
+    activity_pattern : Mapped[Optional[str]] = mapped_column(String(200))   # optional regex on activity code
+    reason_pattern   : Mapped[Optional[str]] = mapped_column(String(300))   # optional regex on denial reason text
     category         : Mapped[str]           = mapped_column(String(80), nullable=False)
     owner            : Mapped[str]           = mapped_column(String(20), nullable=False, default="Ghaf")  # Ghaf | Facility
     facility_role    : Mapped[Optional[str]] = mapped_column(String(80))                   # e.g. Doctor, Front office

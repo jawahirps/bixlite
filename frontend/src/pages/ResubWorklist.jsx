@@ -433,7 +433,8 @@ function Playbook({ rows, setRows, canEdit, setError }) {
   const [editing, setEditing] = useState(null);
   const [draft, setDraft] = useState({});
   const FIELDS = [
-    ["pattern", "Denial code pattern", true], ["category", "Category", true], ["owner", "Owner", true],
+    ["pattern", "Denial code pattern", true], ["activity_pattern", "Activity code pattern (optional)", true],
+    ["reason_pattern", "Denial reason contains (optional)", true], ["category", "Category", true], ["owner", "Owner", true],
     ["facility_role", "Facility role", true], ["action", "Action (Ghaf team)"],
     ["facility_request", "What we ask the facility"], ["documents", "Documents to attach"],
     ["draft_comment", "Draft resubmission comment"],
@@ -450,7 +451,7 @@ function Playbook({ rows, setRows, canEdit, setError }) {
   return (
     <div className="space-y-3">
       <div className="rounded-xl border border-teal-200 bg-teal-50 px-4 py-3 text-xs text-teal-900">
-        Rules are checked top to bottom; the first pattern that matches the denial code is used.
+        Rules are checked top to bottom; the first rule whose denial code (and, if set, activity code and denial reason) all match is used.
         <strong> Owner = Facility</strong> sends the item to the facility with the request text below.
         {!canEdit && " Only admins and billing managers can edit."}
       </div>
@@ -483,7 +484,9 @@ function Playbook({ rows, setRows, canEdit, setError }) {
           ) : (
             <div className="grid gap-2 text-sm md:grid-cols-[220px_1fr]">
               <div>
-                <div className="font-mono text-xs font-semibold text-slate-700">{p.pattern}</div>
+                <div className="font-mono text-xs font-semibold text-slate-700">{p.pattern === ".*" && (p.activity_pattern || p.reason_pattern) ? "any code" : p.pattern}</div>
+                {p.activity_pattern && <div className="mt-0.5 text-[11px] text-slate-500">activity: <span className="font-mono">{p.activity_pattern}</span></div>}
+                {p.reason_pattern && <div className="mt-0.5 text-[11px] text-slate-500">reason: <span className="font-mono">{p.reason_pattern}</span></div>}
                 <div className="mt-1 font-medium text-slate-800">{p.category}</div>
                 <span className={`mt-1 inline-block rounded px-2 py-0.5 text-xs font-medium ${OWNER_STYLE[p.owner]}`}>
                   {p.owner}{p.facility_role ? ` · ${p.facility_role}` : ""}

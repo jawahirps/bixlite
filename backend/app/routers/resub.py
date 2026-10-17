@@ -94,6 +94,8 @@ def save_tracking(body: TrackingBatch, db: Session = Depends(get_db), user: User
 class PlaybookIn(BaseModel):
     sort_order: Optional[int] = None
     pattern: Optional[str] = None
+    activity_pattern: Optional[str] = None
+    reason_pattern: Optional[str] = None
     category: Optional[str] = None
     owner: Optional[str] = None
     facility_role: Optional[str] = None
@@ -105,7 +107,7 @@ class PlaybookIn(BaseModel):
 
 
 def _pb_out(p: ResubPlaybook) -> dict:
-    return {c: getattr(p, c) for c in ("id", "sort_order", "pattern", "category", "owner", "facility_role",
+    return {c: getattr(p, c) for c in ("id", "sort_order", "pattern", "activity_pattern", "reason_pattern", "category", "owner", "facility_role",
                                        "action", "facility_request", "documents", "draft_comment",
                                        "is_active", "updated_by")} | {
         "updated_at": p.updated_at.isoformat() if p.updated_at else None}
@@ -115,11 +117,12 @@ def _validate_pb(data: dict) -> None:
     import re
     if "owner" in data and data["owner"] not in ("Ghaf", "Facility"):
         raise HTTPException(status_code=400, detail="Owner must be Ghaf or Facility")
-    if data.get("pattern"):
-        try:
-            re.compile(data["pattern"])
-        except re.error as exc:
-            raise HTTPException(status_code=400, detail=f"Invalid pattern: {exc}")
+    for k in ("pattern", "activity_pattern", "reason_pattern"):
+        if data.get(k):
+            try:
+                re.compile(data[k])
+            except re.error as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid {k.replace('_', ' ')}: {exc}")
 
 
 @router.get("/playbook")

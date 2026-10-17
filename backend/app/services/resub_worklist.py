@@ -39,6 +39,18 @@ STATUSES = [
 CLOSED_BY_TEAM = ("Resubmitted", "Not resubmitting (write-off)", "Collect from patient")
 
 # (pattern, category, owner, facility_role, action, facility_request, documents, draft_comment)
+CONSULT_ACTIVITY = r"^(9|10|11)(\.\d+)?$"
+CONSULT_REASON = r"too soon|too frequent|repeat|follow[ -]?up|within \d+ days|free (follow|visit)"
+CONSULT_RULE = dict(
+    sort_order=5, pattern=".*", activity_pattern=CONSULT_ACTIVITY, reason_pattern=CONSULT_REASON,
+    category="Consultation visit rules", owner="Ghaf", facility_role=None,
+    action="Consultation denied as a repeat / follow-up visit (whatever code the payer used). Check the patient's "
+           "previous visits: if the diagnosis or clinician differs, or the follow-up period has passed, resubmit "
+           "explaining this; if it is a true follow-up within the free period, close as not resubmitting.",
+    facility_request=None, documents="Previous and current visit details",
+    draft_comment="This consultation was for a new complaint / different diagnosis from the previous visit "
+                  "(or outside the follow-up period), as documented. Kindly review and settle.")
+
 DEFAULT_PLAYBOOK = [
     ("^MNEC-00[345]", "Medical necessity", "Facility", "Doctor",
      "Resubmit with the treating doctor's clinical justification once received.",
@@ -108,11 +120,17 @@ DEFAULT_PLAYBOOK = [
 def ensure_playbook(db: Session) -> List[ResubPlaybook]:
     rows = db.query(ResubPlaybook).order_by(ResubPlaybook.sort_order, ResubPlaybook.id).all()
     if rows:
+        # one-time addition of the consultation rule to an existing playbook
+        if not any(r.activity_pattern == CONSULT_ACTIVITY for r in rows):
+            db.add(ResubPlaybook(**CONSULT_RULE, updated_by="system"))
+            db.commit()
+            rows = db.query(ResubPlaybook).order_by(ResubPlaybook.sort_order, ResubPlaybook.id).all()
         return rows
     for i, (pat, cat, owner, role, action, req, docs, comment) in enumerate(DEFAULT_PLAYBOOK):
         db.add(ResubPlaybook(sort_order=(i + 1) * 10, pattern=pat, category=cat, owner=owner,
                              facility_role=role, action=action, facility_request=req,
                              documents=docs, draft_comment=comment, updated_by="system"))
+    db.add(ResubPlaybook(**CONSULT_RULE, updated_by="system"))
     db.commit()
     return db.query(ResubPlaybook).order_by(ResubPlaybook.sort_order, ResubPlaybook.id).all()
 
@@ -123,13 +141,17 @@ def _matcher(playbook: List[ResubPlaybook]):
         if not p.is_active:
             continue
         try:
-            compiled.append((re.compile(p.pattern, re.I), p))
+            compiled.append((re.compile(p.pattern, re.I),
+                             re.compile(p.activity_pattern, re.I) if p.activity_pattern else None,
+                             re.compile(p.reason_pattern, re.I) if p.reason_pattern else None, p))
         except re.error:
             continue
 
-    def match(code: str) -> Optional[ResubPlaybook]:
-        for rx, p in compiled:
-            if rx.search(code):
+    def match(code: str, activity_code: str = "", reason: str = "") -> Optional[ResubPlaybook]:
+        """First rule whose denial-code, activity-code and reason patterns all match."""
+        for rx, ax, tx, p in compiled:
+            if rx.search(code) and (ax is None or ax.search(activity_code or "")) \
+                    and (tx is None or tx.search(reason or "")):
                 return p
         return None
     return match
@@ -265,7 +287,7 @@ def build_worklist(db: Session, fid: int, window: int = WINDOW_DAYS) -> dict:
     items = []
     for r in rows:
         code = norm_code(r.denial_code)
-        pb = match(code)
+        pb = match(code, (r.activity_code or "").strip(), f"{r.denial_desc or ''} {r.tpa_comments or ''}")
         deadline = r.ra_date + timedelta(days=window)
         days_left = (deadline - today).days
         p = rate(r.receiver_id, code)

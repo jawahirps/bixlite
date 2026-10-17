@@ -214,7 +214,8 @@ def recovery_model(db: Session, fid: int):
             return (p[2] + base * 150) / (p[1] + 150)
         return base
 
-    _model_cache.clear()
+    for k in [k for k in _model_cache if k[1] != date.today()]:
+        del _model_cache[k]
     _model_cache[key] = (rate, overall)
     return rate, overall
 
@@ -268,6 +269,211 @@ def party_names(db: Session):
 
 def tracking_key(claim_id, activity_id, ra_date) -> str:
     return f"{claim_id}|{activity_id}|{ra_date}"
+
+
+# ── Consultation repeat / follow-up check ────────────────────────────────────
+# Same condition = same primary diagnosis (first 3 chars, Z-codes excluded) or a
+# related diagnosis in the same ICD block (same letter + tens digit, e.g. J00–J09),
+# seen by the same doctor or a doctor of the same specialty.
+#   ≤7 days  → follow-up (free)              → close, do not resubmit
+#   8–28 days→ repeat visit (billable)        → recode 9/10/11 → 9.02/10.02/11.02 at the repeat rate
+#   otherwise→ new visit                      → resubmit; payer denial is wrong
+CONSULT_RE = re.compile(r"^(9|10|11)(\.\d+)?$")
+FOLLOWUP_DAYS, REPEAT_DAYS = 7, 28
+# Apollo NAS (TPA004) / Neuron (TPA001) agreed repeat rates by claimed initial amount
+APOLLO_NETWORK = {
+    "10": [((120, 135, 150), 100), ((54, 60), 40), ((40.5, 45, 48), 32), ((36,), 28)],
+    "9":  [((80, 90, 100), 75), ((36, 40.5, 45, 48, 50), 28)],
+}
+_spec_cache: Dict[str, str] = {}
+
+
+def _specialties() -> Dict[str, str]:
+    """Clinician licence -> specialty, from the eClaimLink clinician list kept with the report scripts."""
+    if _spec_cache.get("__loaded__"):
+        return _spec_cache
+    _spec_cache["__loaded__"] = "1"
+    import csv, os
+    base = os.path.expanduser("~/Desktop/report-scripts/assets")
+    for fn in ("eclaimlink_clinicians.csv", "clinician_names.csv"):
+        try:
+            with open(os.path.join(base, fn), newline="") as f:
+                for r in csv.DictReader(f):
+                    sp = (r.get("specialty") or "").strip()
+                    if sp:
+                        _spec_cache[r["license"].strip().upper()] = sp
+        except OSError:
+            pass
+    return _spec_cache
+
+
+def _block(dx: str) -> str:
+    m = re.match(r"([A-Z])(\d)", dx or "")
+    return m.group(1) + m.group(2) if m else ""
+
+
+_VISITS_SQL = text("""
+SELECT c.id, c.claim_id, c.patient_id, coalesce(c.member_id,'') AS member_id, c.encounter_start::date AS d,
+       a.activity_id, a.activity_code AS code, a.clinician_id AS doc, a.net,
+       (SELECT array_agg(DISTINCT upper(left(x.diagnosis_code,3))) FROM claim_diagnoses x WHERE x.claim_id_fk = c.id) AS dx3s,
+       (SELECT upper(x.diagnosis_code) FROM claim_diagnoses x WHERE x.claim_id_fk = c.id ORDER BY x.sequence_no LIMIT 1) AS pdx
+FROM claims c JOIN claim_activities a ON a.claim_id_fk = c.id AND a.activity_code ~ '^(9|10|11)(\\.\\d+)?$'
+WHERE c.facility_id = :f AND c.resubmission_key = '' AND c.encounter_start >= :d0 AND c.encounter_start < :d1
+""")
+_RATES_SQL = text("""
+SELECT c.receiver_id, a.activity_code AS code, d.paid_amount AS paid, count(*) AS n
+FROM remittance_activity_details d JOIN remittances r ON r.id = d.remittance_id_fk
+JOIN claims c ON c.facility_id = r.facility_id AND c.claim_id = r.claim_id AND c.resubmission_key = ''
+JOIN claim_activities a ON a.claim_id_fk = c.id AND a.activity_id = d.activity_id
+WHERE r.facility_id = :f AND d.paid_amount > 0 AND a.activity_code IN ('9','10','11','9.02','10.02','11.02')
+GROUP BY 1, 2, 3
+""")
+
+
+_ctx_cache: Dict[tuple, tuple] = {}
+
+
+class ConsultContext:
+    """Consultation visits and paid-rate history for one facility, loaded once per worklist build."""
+
+    def __init__(self, db: Session, fid: int, d0: date, d1: date):
+        self.fid = fid
+        self.by_claim: Dict[tuple, object] = {}
+        self.by_patient: Dict[str, list] = defaultdict(list)
+        for v in db.execute(_VISITS_SQL, {"f": fid, "d0": d0, "d1": d1 + timedelta(days=1)}):
+            self.by_claim[(v.claim_id, v.activity_id)] = v
+            self.by_claim.setdefault((v.claim_id, None), v)
+            if v.patient_id:
+                self.by_patient["P:" + v.patient_id].append(v)
+            if v.member_id:
+                self.by_patient["M:" + v.member_id].append(v)
+        self.paid = defaultdict(lambda: defaultdict(int))     # (receiver, code) -> {amount: n}
+        for r in db.execute(_RATES_SQL, {"f": fid}):
+            self.paid[(r.receiver_id, r.code)][round(float(r.paid), 2)] += r.n
+        self.rate_cache: dict = {}
+
+    def previous(self, cur) -> list:
+        seen, out = set(), []
+        for key in ("P:" + (cur.patient_id or ""), "M:" + (cur.member_id or "")):
+            for v in self.by_patient.get(key, []):
+                if v.id == cur.id or v.id in seen:
+                    continue
+                if cur.d - timedelta(days=REPEAT_DAYS) <= v.d <= cur.d:
+                    seen.add(v.id); out.append(v)
+        return sorted(out, key=lambda v: v.d, reverse=True)
+
+    def repeat_rate(self, receiver: str, base: str, claimed: float):
+        """(rate, basis, is_assumption) for the repeat code of `base` (9/10/11)."""
+        if self.fid == 13 and receiver in ("TPA004", "TPA001") and base in APOLLO_NETWORK:
+            for amounts, rate in APOLLO_NETWORK[base]:
+                if any(abs(claimed - x) < 0.01 for x in amounts):
+                    return rate, f"Apollo network rate for {base} @ {claimed:g}", False
+        key = (receiver, base)
+        if key not in self.rate_cache:
+            mode = lambda d: max(d.items(), key=lambda kv: kv[1])[0] if d else None
+            rep, ini = mode(self.paid.get((receiver, f"{base}.02"), {})), mode(self.paid.get((receiver, base), {}))
+            if rep is not None:
+                self.rate_cache[key] = (rep, f"usual amount paid by {receiver} for {base}.02", False)
+            elif ini is not None:
+                self.rate_cache[key] = (round(ini / 2, 2), f"ASSUMPTION – {receiver} never paid a {base}.02; "
+                                                           f"50% of its usual {base} payment", True)
+            else:
+                self.rate_cache[key] = (28.0, f"ASSUMPTION – no {base} / {base}.02 payment history with "
+                                              f"{receiver}; AED 28 default", True)
+        return self.rate_cache[key]
+
+
+def _ev(p, cur, gap):
+    return {"prev_claim": p.claim_id if p else None, "prev_date": p.d.isoformat() if p else None,
+            "prev_code": p.code if p else None, "prev_dx": p.pdx if p else None, "gap_days": gap, "dx": cur.pdx}
+
+
+def consult_check(ctx: ConsultContext, item: dict, other_denied: List[str]) -> Optional[dict]:
+    code = (item["activity_code"] or "").strip()
+    if not CONSULT_RE.match(code):
+        return None
+    cur = ctx.by_claim.get((item["claim_id"], item["activity_id"])) or ctx.by_claim.get((item["claim_id"], None))
+    if not cur:
+        return None
+    spec = _specialties()
+    dx = (cur.pdx or "")[:3]
+    my_spec = spec.get((cur.doc or "").upper())
+    base = code.split(".")[0]
+    others = (" Other denied lines on this claim: " + ", ".join(other_denied) + " — review and resubmit together."
+              if other_denied else "")
+    close = lambda verdict, why, ev: {"verdict": verdict, "consult_action": "close", "evidence": ev,
+                                      "action": f"Close — do not resubmit. {why}.", "draft_comment": None,
+                                      "recode": None, "repeat_rate": None, "rate_basis": None}
+    resub = lambda verdict, why, comment, ev: {"verdict": verdict, "consult_action": "resubmit", "evidence": ev,
+                                               "action": f"Resubmit — {why}.{others}", "draft_comment": comment,
+                                               "recode": None, "repeat_rate": None, "rate_basis": None}
+    prev = ctx.previous(cur)
+    unknown_spec = None
+    for p in prev:
+        gap = (cur.d - p.d).days
+        if not dx or dx.startswith("Z"):
+            continue
+        same_dx = dx in (p.dx3s or [])
+        related = not same_dx and any(_block(x) == _block(dx) for x in (p.dx3s or []) if _block(x))
+        if not (same_dx or related):
+            continue
+        same_doc = bool(cur.doc) and cur.doc == p.doc
+        p_spec = spec.get((p.doc or "").upper())
+        same_spec = bool(my_spec) and my_spec == p_spec
+        if not (same_doc or same_spec):
+            if not (my_spec and p_spec) and unknown_spec is None:
+                unknown_spec = (p, gap, same_dx)
+            continue
+        why = (f"{'same' if same_dx else 'related'} diagnosis ({p.pdx} → {cur.pdx}), "
+               f"{'same doctor' if same_doc else 'same specialty (' + my_spec + ')'}, "
+               f"{gap} days after {p.claim_id} on {p.d:%d/%m/%Y}")
+        if gap <= FOLLOWUP_DAYS:
+            return close("Follow-up (≤7 days) — not billable", f"Follow-up visit: {why}", _ev(p, cur, gap))
+        if code.endswith(".02"):
+            return resub("Repeat visit — already billed as repeat code",
+                         f"{code} is the correct repeat code ({why}); the payer denial is wrong",
+                         f"This visit is a repeat consultation {gap} days after the initial visit ({p.claim_id}, "
+                         f"{p.d:%d/%m/%Y}) and is correctly billed under the repeat consultation code {code}. "
+                         f"Kindly review and settle.", _ev(p, cur, gap))
+        rate, basis, assumed = ctx.repeat_rate(item.get("receiver_id") or "", base, float(cur.net or 0))
+        return {"verdict": "Repeat visit (8–28 days) — recode", "consult_action": "recode", "evidence": _ev(p, cur, gap),
+                "action": f"Change activity code {code} → {base}.02 and the net to AED {rate:g} (repeat consultation "
+                          f"rate{' – ASSUMPTION, confirm with contract' if assumed else ''}), then resubmit. "
+                          f"Repeat visit: {why}.{others}",
+                "draft_comment": f"Activity corrected to repeat consultation code {base}.02 at the repeat consultation "
+                                 f"rate, as the visit is {gap} days after the initial consultation ({p.claim_id}, "
+                                 f"{p.d:%d/%m/%Y}) for the same condition. Kindly review and settle.",
+                "recode": f"{base}.02", "repeat_rate": rate, "rate_basis": basis, "rate_assumed": assumed}
+    if unknown_spec:
+        p, gap, same_dx = unknown_spec
+        return {"verdict": "Same condition, different doctor — check specialty", "consult_action": "check",
+                "evidence": _ev(p, cur, gap),
+                "action": f"Check the department of both doctors ({p.doc} on {p.d:%d/%m/%Y} and {cur.doc}). Same "
+                          f"{'diagnosis' if same_dx else 'related diagnosis'} ({p.pdx} → {cur.pdx}), {gap} days apart. "
+                          f"If same specialty: {'close (follow-up ≤7 days)' if gap <= FOLLOWUP_DAYS else f'recode to {base}.02 at the repeat rate'}; "
+                          f"if a different specialty: resubmit as a new specialist consultation.{others}",
+                "draft_comment": None, "recode": None, "repeat_rate": None, "rate_basis": None}
+    if prev:
+        p = prev[0]; gap = (cur.d - p.d).days
+        same_cond = dx and (dx in (p.dx3s or []) or any(_block(x) == _block(dx) for x in (p.dx3s or []) if _block(x)))
+        if same_cond:   # same condition but a different specialty → a new specialist consultation
+            sp = spec.get((p.doc or "").upper())
+            return resub("Different specialty — not a repeat",
+                         f"not a repeat: previous visit {p.claim_id} on {p.d:%d/%m/%Y} was with {sp}, this visit is with {my_spec}",
+                         f"This consultation is with a different specialty ({my_spec}) from the previous visit on "
+                         f"{p.d:%d/%m/%Y} ({sp}); it is a new specialist consultation, not a repeat or follow-up. "
+                         f"Kindly review and settle.", _ev(p, cur, gap))
+        return resub("New condition — not a repeat",
+                     f"not a repeat: previous consultation {p.claim_id} on {p.d:%d/%m/%Y} ({gap} days earlier) was "
+                     f"for {p.pdx}, this visit is for an unrelated condition {cur.pdx}",
+                     f"This is a new consultation for a different condition: the previous visit on {p.d:%d/%m/%Y} "
+                     f"was for {p.pdx}, this visit is for {cur.pdx}. It is not a repeat or follow-up visit. "
+                     f"Kindly review and settle.", _ev(p, cur, gap))
+    return resub("No visit in previous 28 days — payer denial wrong",
+                 "not a repeat: no consultation for this patient at the facility in the previous 28 days; "
+                 "the payer comment is wrong",
+                 "There is no consultation for this patient in the 28 days before this visit; it is a new "
+                 "consultation, not a repeat or follow-up. Kindly review and settle.", _ev(None, cur, None))
 
 
 def build_worklist(db: Session, fid: int, window: int = WINDOW_DAYS) -> dict:
@@ -353,6 +559,43 @@ def build_worklist(db: Session, fid: int, window: int = WINDOW_DAYS) -> dict:
             "updated_at": t.updated_at.isoformat() if t and t.updated_at else None,
         })
 
+    # consultation repeat / follow-up verdicts (open items only)
+    denied_by_claim = defaultdict(list)
+    for x in items:
+        if x["bucket"] == "open":
+            denied_by_claim[x["claim_id"]].append(x)
+    targets = [x for x in items if x["bucket"] == "open" and x["category"] == "Consultation visit rules"
+               and CONSULT_RE.match((x["activity_code"] or "").strip())]
+    ctx = None
+    if targets:
+        tds = [date.fromisoformat(x["treatment_date"]) for x in targets if x["treatment_date"]]
+        if tds:
+            d0, d1 = min(tds) - timedelta(days=REPEAT_DAYS), max(tds)
+            cached = _ctx_cache.get((fid, date.today()))
+            if cached and cached[0] <= d0 and cached[1] >= d1:
+                ctx = cached[2]
+            else:
+                ctx = ConsultContext(db, fid, d0, d1)
+                for k in [k for k in _ctx_cache if k[1] != date.today()]:
+                    del _ctx_cache[k]
+                _ctx_cache[(fid, date.today())] = (d0, d1, ctx)
+    for x in items:
+        x.setdefault("consult", None)
+    for x in targets if ctx else []:
+        others = [f"{o['activity_code']} ({o['denial_code']})" for o in denied_by_claim[x["claim_id"]]
+                  if o["key"] != x["key"]]
+        chk = consult_check(ctx, x, others)
+        if not chk:
+            continue
+        x["consult"] = chk
+        x["action"] = chk["action"]
+        x["draft_comment"] = chk["draft_comment"]
+        if chk["consult_action"] == "close":
+            x["expected_recovery"] = 0.0
+            x["priority"] = "P3"
+        elif chk["consult_action"] == "recode":
+            x["expected_recovery"] = round(min(x["denied"], chk["repeat_rate"]), 2)
+
     order = {"P1": 0, "P2": 1, "P3": 2, None: 3}
     items.sort(key=lambda x: (order[x["priority"]], x["days_left"], -x["expected_recovery"]))
     return {"items": items, "overall_rate": round(overall * 100), "window_days": window}
@@ -410,7 +653,7 @@ def to_workbook(facility_name: str, data: dict, audience: str = "ghaf"):
     DONE = PatternFill("solid", fgColor="E8F5E9"); GREY = PatternFill("solid", fgColor="EEEEEE")
     THIN = Border(bottom=Side(style="thin", color="DDDDDD"))
     WB = Font(bold=True, color="FFFFFF")
-    WIDE = {"Denial Reason", "Action", "What We Need From You", "Documents to Attach",
+    WIDE = {"Denial Reason", "Action", "Rate Basis", "What We Need From You", "Documents to Attach",
             "Draft Resubmission Comment", "Remarks", "Facility Reply"}
 
     items = data["items"]
@@ -439,7 +682,10 @@ def to_workbook(facility_name: str, data: dict, audience: str = "ghaf"):
                 ("Clinician", "clinician"), ("Member ID", "member_id"), ("Activity Code", "activity_code"),
                 ("Denial Code", "denial_code"), ("Denial Reason", "denial_reason"), ("Denied (AED)", "denied"),
                 ("Payer Pays on Resub %", "recovery_pct"), ("Expected Recovery (AED)", "expected_recovery"),
-                ("Category", "category"), ("Route", "route"), ("Action", "action"),
+                ("Category", "category"), ("Visit Check", "c_verdict"), ("Previous Claim", "c_prev"),
+                ("Previous Visit", "c_prev_date"), ("Gap (days)", "c_gap"), ("Previous Dx", "c_prev_dx"), ("This Dx", "c_dx"),
+                ("Recode To", "c_recode"), ("Repeat Rate (AED)", "c_rate"), ("Rate Basis", "c_basis"),
+                ("Route", "route"), ("Action", "action"),
                 ("What We Need From Facility", "facility_request"), ("Documents to Attach", "documents"),
                 ("Draft Resubmission Comment", "draft_comment"),
                 ("Status", "status"), ("Assigned To", "assigned_to"), ("Remarks", "remarks"),
@@ -481,10 +727,15 @@ def to_workbook(facility_name: str, data: dict, audience: str = "ghaf"):
             c.alignment = Alignment(wrap_text=True, vertical="center")
         ws.row_dimensions[1].height = 32
         for x in rows:
+            c = x.get("consult") or {}
+            ev = c.get("evidence") or {}
+            x = x | {"c_verdict": c.get("verdict"), "c_prev": ev.get("prev_claim"), "c_prev_date": ev.get("prev_date"),
+                     "c_gap": ev.get("gap_days"), "c_prev_dx": ev.get("prev_dx"), "c_dx": ev.get("dx"),
+                     "c_recode": c.get("recode"), "c_rate": c.get("repeat_rate"), "c_basis": c.get("rate_basis")}
             vals = []
             for _, k in cols:
                 v = x.get(k)
-                if k in ("deadline", "ra_date", "treatment_date", "reply_by") and v:
+                if k in ("deadline", "ra_date", "treatment_date", "reply_by", "c_prev_date") and v:
                     v = date.fromisoformat(v)
                 vals.append(v)
             ws.append(vals)

@@ -16,6 +16,12 @@ const PRIORITY_STYLE = {
   P2: "bg-amber-100 text-amber-800 font-semibold",
   P3: "bg-slate-100 text-slate-600",
 };
+const VERDICT_STYLE = {
+  close: "bg-slate-200 text-slate-700",
+  recode: "bg-violet-100 text-violet-800",
+  resubmit: "bg-emerald-100 text-emerald-800",
+  check: "bg-amber-100 text-amber-800",
+};
 const OWNER_STYLE = {
   Ghaf: "bg-teal-100 text-teal-800",
   Facility: "bg-indigo-100 text-indigo-800",
@@ -325,6 +331,11 @@ function Row({ x, expanded, onToggle, onSave, saving, statuses, facilityView }) 
         <td className="max-w-xs px-3 py-2">
           <div className="font-mono text-xs font-semibold text-slate-700">{x.denial_code}</div>
           <div className="truncate text-xs text-slate-500" title={x.denial_reason}>{x.category}{x.route === "Reconciliation" ? " · Reconciliation" : ""}</div>
+          {x.consult && (
+            <span className={`mt-1 inline-block rounded px-1.5 py-0.5 text-[11px] font-medium ${VERDICT_STYLE[x.consult.consult_action]}`}>
+              {x.consult.verdict}
+            </span>
+          )}
         </td>
         <td className="px-3 py-2 text-right tabular-nums">{fmt(x.denied)}</td>
         {!facilityView && (
@@ -365,6 +376,22 @@ function Row({ x, expanded, onToggle, onSave, saving, statuses, facilityView }) 
                   <Field label="Treatment / RA">{fmtDate(x.treatment_date)} · {fmtDate(x.ra_date)}</Field>
                   <Field label="Clinician">{x.clinician || "—"}</Field>
                 </div>
+                {x.consult && !facilityView && (
+                  <div className={`rounded-lg p-3 ${VERDICT_STYLE[x.consult.consult_action]}`}>
+                    <div className="text-xs font-semibold uppercase tracking-wide">Visit history check — {x.consult.verdict}</div>
+                    <div className="mt-1 text-sm">
+                      {x.consult.evidence.prev_claim
+                        ? <>Previous consultation <span className="font-mono">{x.consult.evidence.prev_claim}</span> on {fmtDate(x.consult.evidence.prev_date)} (code {x.consult.evidence.prev_code}, {x.consult.evidence.prev_dx}) — {x.consult.evidence.gap_days} days before this visit ({x.consult.evidence.dx}).</>
+                        : <>No consultation for this patient at the facility in the previous 28 days (this visit: {x.consult.evidence.dx}).</>}
+                    </div>
+                    {x.consult.recode && (
+                      <div className="mt-1 text-sm font-semibold">
+                        Recode {x.activity_code} → {x.consult.recode} · net AED {x.consult.repeat_rate}
+                        <span className="ml-1 font-normal opacity-80">({x.consult.rate_basis})</span>
+                      </div>
+                    )}
+                  </div>
+                )}
                 {!facilityView && <Field label="Action (Ghaf team)">{x.action}</Field>}
                 {x.facility_request && <Field label={`Needed from facility${x.facility_role ? ` — ${x.facility_role}` : ""}`}>{x.facility_request}</Field>}
                 <Field label="Documents to attach">{x.documents || "—"}</Field>

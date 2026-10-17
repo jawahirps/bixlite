@@ -504,7 +504,7 @@ def consult_check(ctx: ConsultContext, item: dict, other_denied: List[str]) -> O
                  "consultation, not a repeat or follow-up. Kindly review and settle.", _ev(None, cur, None))
 
 
-def build_worklist(db: Session, fid: int, window: int = WINDOW_DAYS) -> dict:
+def build_worklist(db: Session, fid: int, window: int = WINDOW_DAYS, recon_history: bool = True) -> dict:
     """Returns {'items': [...], 'overall_rate': float}. Items carry a 'bucket':
     open | closed_resubmitted | closed_team | expired."""
     today = date.today()
@@ -517,7 +517,7 @@ def build_worklist(db: Session, fid: int, window: int = WINDOW_DAYS) -> dict:
                                                         ResubTracking.ra_date >= min(RECON_SINCE, today - timedelta(days=window + 8)))}
     since = today - timedelta(days=window + 7)
     rows = db.execute(_OPEN_SQL, {"f": fid, "since": since}).fetchall()
-    if RECON_SINCE < since:
+    if recon_history and RECON_SINCE < since:   # full 2026 reconciliation list (screen, month-end pack)
         seen = {(r.claim_id, r.activity_id, r.ra_date) for r in rows}
         rows += [r for r in db.execute(_RECON_SQL, {"f": fid, "since": RECON_SINCE}).fetchall()
                  if r.ra_date < since and (r.claim_id, r.activity_id, r.ra_date) not in seen]

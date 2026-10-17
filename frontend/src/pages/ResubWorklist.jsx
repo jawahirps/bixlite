@@ -84,7 +84,13 @@ export default function ResubWorklist() {
     setLoading(true); setError(null); setExpanded(null);
     try {
       const r = await apiClient.get("/resub/worklist", { params: { facility_id: fid } });
-      setData(r.data);
+      const { texts = [], text_fields = [] } = r.data;
+      const items = r.data.items.map(x => {
+        const y = { ...x };
+        for (const f of text_fields) if (typeof y[f] === "number") y[f] = texts[y[f]];
+        return y;
+      });
+      setData({ ...r.data, items });
       if (r.data.facility_view) setTab("facility");
     } catch (e) {
       setError(e.response?.data?.detail || e.message);

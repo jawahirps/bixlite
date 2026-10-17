@@ -30,6 +30,8 @@ from ..services import resub_worklist as rw
 router = APIRouter(prefix="/api/resub", tags=["resubmission"])
 
 EDITOR_ROLES = ("admin", "billing_manager")
+TEXT_FIELDS = ["action", "facility_request", "documents", "draft_comment", "recon_remark", "denial_reason",
+               "category", "receiver", "payer", "clinician"]
 
 
 def _is_facility_user(user: User) -> bool:
@@ -48,8 +50,22 @@ def get_worklist(facility_id: int, db: Session = Depends(get_db), user: User = D
     items = data["items"]
     if _is_facility_user(user):
         items = [x for x in items if x["owner"] == "Facility" or x["bucket"] == "reconciliation"]
+    # long texts repeat across thousands of rows: send each once and reference it by index
+    texts, ix = [], {}
+    slim = []
+    for x in items:
+        y = dict(x)
+        for f in TEXT_FIELDS:
+            v = y.get(f)
+            if v:
+                if v not in ix:
+                    ix[v] = len(texts); texts.append(v)
+                y[f] = ix[v]
+        slim.append(y)
     return {
-        "items": items,
+        "items": slim,
+        "texts": texts,
+        "text_fields": TEXT_FIELDS,
         "summary": rw.summarize(data["items"]),
         "overall_rate": data["overall_rate"],
         "window_days": data["window_days"],

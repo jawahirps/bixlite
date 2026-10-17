@@ -9,6 +9,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
@@ -95,6 +96,8 @@ def _cleanup_stale_jobs(db) -> None:
 def health_check():
     return {"status": "ok", "app": settings.APP_NAME, "environment": settings.ENVIRONMENT}
 
+
+app.add_middleware(GZipMiddleware, minimum_size=50_000)  # large worklist / report payloads
 
 app.include_router(auth.router)
 app.include_router(clinical_profiles.router)

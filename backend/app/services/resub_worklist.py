@@ -249,6 +249,24 @@ LEFT JOIN LATERAL (SELECT * FROM claims c WHERE c.facility_id = den.facility_id 
 """)
 
 
+RECON_REMARKS = {
+    "Medical necessity": "As the activity was rendered based on the clinical presentation, requesting your "
+                         "consideration to settle on a B to B basis. Awaiting your confirmation to proceed with "
+                         "Resub under Reconciliation.",
+    "Contract & tariff": "The service was billed as per the agreed contract and tariff. Requesting your review and "
+                         "settlement on a B to B basis. Awaiting your confirmation to proceed with Resub under "
+                         "Reconciliation.",
+    "Prior approval": "The service was rendered in good faith based on the eligibility and approval status at the "
+                      "time of the visit. Requesting your consideration to settle on a B to B basis. Awaiting your "
+                      "confirmation to proceed with Resub under Reconciliation.",
+    "Consultation visit rules": "The consultation was rendered as clinically required for the presentation. "
+                                "Requesting your consideration to settle on a B to B basis. Awaiting your "
+                                "confirmation to proceed with Resub under Reconciliation.",
+}
+RECON_REMARKS["Coverage / eligibility"] = RECON_REMARKS["Prior approval"]
+RECON_DEFAULT = ("Requesting your review of the denial and settlement on a B to B basis. Awaiting your "
+                 "confirmation to proceed with Resub under Reconciliation.")
+
 _names_cache: Dict[date, tuple] = {}
 
 
@@ -507,6 +525,8 @@ def build_worklist(db: Session, fid: int, window: int = WINDOW_DAYS) -> dict:
             bucket, status = "closed_resubmitted", "Resubmitted"
         elif status in CLOSED_BY_TEAM:
             bucket = "closed_team"
+        elif reconciliation:
+            bucket = "reconciliation"   # second denial: B2B / reconciliation with the payer, via the facility
         elif days_left < 0:
             bucket = "expired"
         else:
@@ -547,6 +567,8 @@ def build_worklist(db: Session, fid: int, window: int = WINDOW_DAYS) -> dict:
             "category": pb.category if pb else "Other", "owner": owner,
             "facility_role": pb.facility_role if pb else None,
             "route": "Reconciliation" if reconciliation else "Resubmission",
+            "recon_remark": (RECON_REMARKS.get(pb.category if pb else "Other", RECON_DEFAULT)
+                             if reconciliation else None),
             "action": ("Second denial after resubmission — request reconciliation / B2B settlement with the payer."
                        if reconciliation else LOW_VALUE_ACTION if low_value else (pb.action if pb else "")),
             "facility_request": pb.facility_request if (pb and owner == "Facility") else None,
@@ -614,6 +636,7 @@ def summarize(items: List[dict]) -> dict:
         "facility": agg([x for x in open_ if x["owner"] == "Facility"]),
         "resubmitted_7d": agg([x for x in items if x["bucket"] == "closed_resubmitted"]),
         "expired_7d": agg([x for x in items if x["bucket"] == "expired"]),
+        "reconciliation": agg([x for x in items if x["bucket"] == "reconciliation"]),
     }
 
 
@@ -653,14 +676,31 @@ def to_workbook(facility_name: str, data: dict, audience: str = "ghaf"):
     DONE = PatternFill("solid", fgColor="E8F5E9"); GREY = PatternFill("solid", fgColor="EEEEEE")
     THIN = Border(bottom=Side(style="thin", color="DDDDDD"))
     WB = Font(bold=True, color="FFFFFF")
-    WIDE = {"Denial Reason", "Action", "Rate Basis", "What We Need From You", "Documents to Attach",
+    WIDE = {"Denial Reason", "Action", "Rate Basis", "Provider Remarks", "Facility Confirmation", "What We Need From You", "Documents to Attach",
             "Draft Resubmission Comment", "Remarks", "Facility Reply"}
 
     items = data["items"]
     open_ = [x for x in items if x["bucket"] == "open"]
     wb = openpyxl.Workbook()
 
-    if audience == "facility":
+    if audience == "reconciliation":
+        cols = [("Claim ID", "claim_id"), ("Activity ID", "activity_id"), ("Treatment Date", "treatment_date"),
+                ("RA Date", "ra_date"), ("Receiver", "receiver"), ("Payer", "payer"), ("Member ID", "member_id"),
+                ("Auth ID", "authorization_id"), ("Clinician", "clinician"), ("Activity Code", "activity_code"),
+                ("Denial Code", "denial_code"), ("Denial Reason", "denial_reason"), ("Denied (AED)", "denied"),
+                ("Category", "category"), ("Provider Remarks", "recon_remark"), ("Facility Confirmation", "facility_reply")]
+        recon = [x for x in items if x["bucket"] == "reconciliation"]
+        by_rcv = defaultdict(list)
+        for x in recon:
+            by_rcv[x["receiver"] or "—"].append(x)
+        sheets = [("All Reconciliation", sorted(recon, key=lambda x: (x["receiver"] or "", x["claim_id"])), lambda x: None)]
+        for rcv, rs in sorted(by_rcv.items(), key=lambda kv: -sum(x["denied"] for x in kv[1])):
+            sheets.append((re.sub(r"[\\/*?:\[\]]", "", rcv)[:31], rs, lambda x: None))
+        team_from = len(cols) - 1
+        intro = (f"{facility_name} — claims eligible for reconciliation (denied again after resubmission). "
+                 f"Please confirm in 'Facility Confirmation' which claims we may take up with the payer for "
+                 f"B to B settlement / Resub under Reconciliation.")
+    elif audience == "facility":
         cols = [("Priority", "priority"), ("Days Left", "days_left"), ("Reply By", "reply_by"),
                 ("Claim ID", "claim_id"), ("Activity ID", "activity_id"), ("Treatment Date", "treatment_date"),
                 ("Member ID", "member_id"), ("Clinician", "clinician"), ("Receiver", "receiver"), ("Payer", "payer"),
@@ -710,13 +750,21 @@ def to_workbook(facility_name: str, data: dict, audience: str = "ghaf"):
                (f"Urgent — {URGENT_DAYS} days or less", "urgent"), ("Ghaf team", "ghaf"),
                ("Needs facility input", "facility"), ("Resubmitted (last 7 days)", "resubmitted_7d"),
                ("Expired without resubmission (last 7 days)", "expired_7d")]
-              if audience == "ghaf" else [("Needs your input", None)])
+              if audience == "ghaf" else [("Needs your input", None)] if audience == "facility" else [])
     for j, h in enumerate(["", "Activities", "Denied (AED)"], 1):
         c = sm.cell(4, j, h); c.font = WB; c.fill = TEAL
     for i, (lbl, k) in enumerate(labels):
         agg = s[k] if k else {"count": len(sheets[0][1]), "denied": round(sum(x["denied"] for x in sheets[0][1]), 2)}
         sm.cell(5 + i, 1, lbl); sm.cell(5 + i, 2, agg["count"])
         sm.cell(5 + i, 3, agg["denied"]).number_format = "#,##0.00"
+    if audience == "reconciliation":
+        rr = 5
+        for rcv, rs in sorted(by_rcv.items(), key=lambda kv: -sum(x["denied"] for x in kv[1])):
+            sm.cell(rr, 1, rcv); sm.cell(rr, 2, len(rs))
+            sm.cell(rr, 3, round(sum(x["denied"] for x in rs), 2)).number_format = "#,##0.00"; rr += 1
+        sm.cell(rr, 1, "Total").font = Font(bold=True); sm.cell(rr, 2, len(recon)).font = Font(bold=True)
+        c = sm.cell(rr, 3, round(sum(x["denied"] for x in recon), 2)); c.font = Font(bold=True); c.number_format = "#,##0.00"
+        sm.cell(4, 1).value = "Receiver"
     for col, w in zip("ABC", [48, 12, 16]): sm.column_dimensions[col].width = w
 
     for title, rows, fill_rule in sheets:

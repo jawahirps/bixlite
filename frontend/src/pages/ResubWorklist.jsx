@@ -136,7 +136,8 @@ export default function ResubWorklist() {
     new: open.filter(x => x.is_new),
     action: open,
     facility: open.filter(x => x.owner === "Facility"),
-    closed: items.filter(x => x.bucket !== "open"),
+    closed: items.filter(x => !["open", "reconciliation"].includes(x.bucket)),
+    reconciliation: items.filter(x => x.bucket === "reconciliation"),
   };
   const categories = useMemo(() => [...new Set(items.map(x => x.category))].sort(), [items]);
 
@@ -149,11 +150,13 @@ export default function ResubWorklist() {
 
   const s = data?.summary;
   const tabs = facilityView
-    ? [{ key: "facility", label: `Needs Your Input (${lists.facility.length})` }]
+    ? [{ key: "facility", label: `Needs Your Input (${lists.facility.length})` },
+       { key: "reconciliation", label: `Reconciliation (${lists.reconciliation.length})` }]
     : [
         { key: "new", label: `New Today (${lists.new.length})` },
         { key: "action", label: `Action List (${lists.action.length})` },
         { key: "facility", label: `Needs Facility (${lists.facility.length})` },
+        { key: "reconciliation", label: `Reconciliation (${lists.reconciliation.length})` },
         { key: "closed", label: `Closed (${lists.closed.length})` },
         { key: "playbook", label: `Playbook (${playbook.length})` },
       ];
@@ -191,6 +194,10 @@ export default function ResubWorklist() {
             Excel — Ghaf team
           </button>
         )}
+        <button onClick={() => exportExcel("reconciliation")}
+          className="rounded-lg border border-slate-300 px-4 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50">
+          Excel — Reconciliation
+        </button>
         <button onClick={() => exportExcel("facility")}
           className="rounded-lg border border-slate-300 px-4 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50">
           Excel — Facility requests
@@ -208,7 +215,7 @@ export default function ResubWorklist() {
             { label: "Urgent (≤5 days)", v: s.urgent, c: s.urgent.count ? "bg-orange-50 text-orange-800" : "bg-white text-slate-400" },
             { label: "Ghaf team", v: s.ghaf, c: "bg-teal-50 text-teal-800" },
             { label: "Needs facility", v: s.facility, c: "bg-indigo-50 text-indigo-800" },
-            { label: "Resubmitted (7 days)", v: s.resubmitted_7d, c: "bg-emerald-50 text-emerald-800" },
+            { label: "Reconciliation", v: s.reconciliation, c: "bg-rose-50 text-rose-800" },
           ].map(k => (
             <div key={k.label} className={`rounded-xl p-4 shadow-sm ${k.c}`}>
               <p className="text-2xl font-bold">{k.v.count.toLocaleString()}</p>
@@ -392,6 +399,7 @@ function Row({ x, expanded, onToggle, onSave, saving, statuses, facilityView }) 
                     )}
                   </div>
                 )}
+                {x.recon_remark && <Field label={<span className="flex items-center gap-2">Reconciliation remark (B to B) <CopyButton text={x.recon_remark} /></span>}><span className="italic">{x.recon_remark}</span></Field>}
                 {!facilityView && <Field label="Action (Ghaf team)">{x.action}</Field>}
                 {x.facility_request && <Field label={`Needed from facility${x.facility_role ? ` — ${x.facility_role}` : ""}`}>{x.facility_request}</Field>}
                 <Field label="Documents to attach">{x.documents || "—"}</Field>

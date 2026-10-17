@@ -47,7 +47,7 @@ def get_worklist(facility_id: int, db: Session = Depends(get_db), user: User = D
     data = rw.build_worklist(db, facility_id)
     items = data["items"]
     if _is_facility_user(user):
-        items = [x for x in items if x["owner"] == "Facility"]
+        items = [x for x in items if x["owner"] == "Facility" or x["bucket"] == "reconciliation"]
     return {
         "items": items,
         "summary": rw.summarize(data["items"]),
@@ -164,7 +164,9 @@ def add_playbook(body: PlaybookIn, db: Session = Depends(get_db), user: User = D
 def export(facility_id: int, audience: str = "ghaf", db: Session = Depends(get_db),
            user: User = Depends(get_current_user)):
     _check_facility(user, facility_id)
-    if _is_facility_user(user):
+    if audience not in ("ghaf", "facility", "reconciliation"):
+        raise HTTPException(status_code=400, detail="audience must be ghaf, facility or reconciliation")
+    if _is_facility_user(user) and audience == "ghaf":
         audience = "facility"
     fac = db.get(Facility, facility_id)
     if not fac:
@@ -172,6 +174,7 @@ def export(facility_id: int, audience: str = "ghaf", db: Session = Depends(get_d
     data = rw.build_worklist(db, facility_id)
     wb = rw.to_workbook(fac.facility_name, data, audience)
     buf = io.BytesIO(); wb.save(buf); buf.seek(0)
-    name = f"Resub_Worklist_{'Facility' if audience == 'facility' else 'Ghaf'}_{fac.facility_code}.xlsx"
+    label = {"ghaf": "Resub_Worklist_Ghaf", "facility": "Resub_Facility_Requests", "reconciliation": "Reconciliation"}[audience]
+    name = f"{label}_{fac.facility_code}.xlsx"
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                              headers={"Content-Disposition": f'attachment; filename="{name}"'})

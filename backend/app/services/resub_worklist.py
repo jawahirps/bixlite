@@ -86,10 +86,31 @@ DEFAULT_PLAYBOOK = [
      "Front office to share the prior approval; if none was taken, request retro-approval with the clinical reason.",
      "Approval reference, clinical notes",
      "Prior approval reference is attached for this pre-approved service. Kindly review and settle."),
-    ("^PRCE", "Contract & tariff", "Ghaf", None,
-     "Check the contracted price for this payer; correct the net amount or resubmit quoting the contract.",
-     None, "Contract / tariff reference",
+    ("^PRCE-006", "Consultation visit rules", "Ghaf", None,
+     "Member had another consultation within the follow-up period. Check the patient's previous visits: if the "
+     "diagnosis or clinician differs, or the follow-up period has passed, resubmit explaining this; if it is a true "
+     "follow-up, close as not resubmitting (8–28 days: recode to the repeat code).",
+     None, "Previous and current visit details",
+     "This consultation was for a new complaint / different diagnosis from the previous visit (or outside the "
+     "follow-up period), as documented. Kindly review and settle."),
+    ("^PRCE-010", "Coding", "Ghaf", None,
+     "CPT bundling: the two codes cannot be billed together. Remove the bundled (component) code, or — if the services "
+     "were separate and distinct — resubmit with the appropriate modifier and a short justification.",
+     None, "Procedure notes if billing both with a modifier",
+     "The services were separate and distinct procedures, billed with the appropriate modifier as documented. "
+     "Kindly review and settle."),
+    # PRCE-001 claimed > agreed tariff · 002 inclusive · 003 recovery · 007 not priced — the facility holds the contracts
+    ("^PRCE-00[1237]", "Contract & tariff", "Facility", "Billing / management",
+     "Price / contract issue — the facility holds the payer contracts. Once the facility confirms the contracted price "
+     "(or that the item is included / not covered), resubmit with the corrected net, or close as write-off.",
+     "Check this service against the contract with this payer: confirm the agreed price (PRCE-001 / 007), whether it "
+     "is included in another service (PRCE-002), or the reason for the recovery (PRCE-003). Correct the price list and "
+     "tell Ghaf the net to resubmit, or confirm write-off.",
+     "Contract / tariff reference",
      "The service is billed as per the agreed contract tariff. Kindly review and settle."),
+    ("^PRCE", "Other", "Ghaf", None,
+     "Other price-related denial (PRCE): review the payer comment and decide — correct and resubmit, or close as write-off.",
+     None, "As required by the denial", "Kindly review the attached details and settle."),
     ("^CODE", "Coding", "Ghaf", None,
      "Correct the ICD / CPT coding (principal diagnosis, sequela codes, code pairs) and resubmit.",
      None, "Corrected coding",

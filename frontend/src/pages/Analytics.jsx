@@ -235,19 +235,29 @@ export default function Analytics() {
     loadJobs();
   }, [loadJobs]);
 
-  // Auto-poll every 3s while any job is "pending" or "running"
-  // Guard: ignore jobs older than 15 min (likely stuck from a server restart)
+  // Keep the queue current:
+  //   every 3s while a job started in the last 15 min is pending/running,
+  //   every 15s while an older job is still pending/running (long report or stuck),
+  //   every 30s otherwise, so reports started elsewhere also appear.
+  // Skipped while the browser tab is hidden; refreshed as soon as it is shown again.
   useEffect(() => {
     const fifteenMinAgo = Date.now() - 15 * 60 * 1000;
-    const hasActive = reportJobs.some(
-      (j) =>
-        (j.status === "pending" || j.status === "running") &&
-        new Date(j.created_at).getTime() > fifteenMinAgo
-    );
-    if (!hasActive) return;
-    const timer = setTimeout(() => loadJobs(), 3000);
+    const active = reportJobs.filter((j) => j.status === "pending" || j.status === "running");
+    const delay = active.some((j) => new Date(j.created_at).getTime() > fifteenMinAgo)
+      ? 3000
+      : active.length ? 15000 : 30000;
+    const timer = setTimeout(() => {
+      if (document.visibilityState === "visible") loadJobs();
+      else setReportJobs((jobs) => [...jobs]);   // re-arm the timer without a request
+    }, delay);
     return () => clearTimeout(timer);
   }, [reportJobs, loadJobs]);
+
+  useEffect(() => {
+    const onVisible = () => document.visibilityState === "visible" && loadJobs();
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [loadJobs]);
 
   // Generate a report — POSTs to /generate/{type}, saves to queue
   const generateReport = async (reportKey) => {

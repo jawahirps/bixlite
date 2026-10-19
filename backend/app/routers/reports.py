@@ -2644,15 +2644,24 @@ def _build_claim_cycle_v2(db, facility_id, payer_id, encounter_type,
         params["encounter_type"] = encounter_type
 
     # Date filter always on encounter_start (consistent with all V2 reports)
+    # Plain range on the column (not DATE(...)) so the planner estimates the row count
+    # correctly; a wrapped column made it expect ~10 rows and pick quadratic nested loops.
     if date_from:
-        claim_where += " AND DATE(c.encounter_start) >= :date_from"
+        claim_where += " AND c.encounter_start >= CAST(:date_from AS date)"
         params["date_from"] = str(date_from)
     if date_to:
-        claim_where += " AND DATE(c.encounter_start) <= :date_to"
+        claim_where += " AND c.encounter_start < CAST(:date_to AS date) + 1"
         params["date_to"] = str(date_to)
 
     sql = _text(f"""
-        WITH sub_ranked AS (
+        WITH scope AS (
+            -- Claims in the selected period: remittance CTEs are limited to these,
+            -- instead of scanning every RA the facility has ever received.
+            SELECT DISTINCT c.facility_id, c.claim_id
+            FROM claims c
+            WHERE {claim_where}
+        ),
+        sub_ranked AS (
             -- Rank each claim row by its submission level (1=Initial, 2=Resub, 3=Recons).
             -- latest_sub_rn = 1 identifies the highest submission for each claim_id.
             SELECT
@@ -2740,6 +2749,7 @@ def _build_claim_cycle_v2(db, facility_id, payer_id, encounter_type,
                 COALESCE(SUM(r.paid_amount), 0)   AS total_paid,
                 COALESCE(SUM(r.net_amount),  0)   AS total_ra_net
             FROM remittances r
+            JOIN scope sp ON sp.facility_id = r.facility_id AND sp.claim_id = r.claim_id
             WHERE {rem_where}
             GROUP BY r.facility_id, r.claim_id
         ),
@@ -2749,6 +2759,7 @@ def _build_claim_cycle_v2(db, facility_id, payer_id, encounter_type,
             SELECT DISTINCT ON (r.facility_id, r.claim_id)
                    r.facility_id, r.claim_id, r.net_amount AS first_ra_net
             FROM remittances r
+            JOIN scope sp ON sp.facility_id = r.facility_id AND sp.claim_id = r.claim_id
             WHERE {rem_where}
             ORDER BY r.facility_id, r.claim_id, r.id ASC
         ),
@@ -2771,6 +2782,7 @@ def _build_claim_cycle_v2(db, facility_id, payer_id, encounter_type,
                     ORDER BY r.id DESC
                 ) AS latest_rn
             FROM remittances r
+            JOIN scope sp ON sp.facility_id = r.facility_id AND sp.claim_id = r.claim_id
             LEFT JOIN raw_xml_store rx ON rx.id = r.raw_xml_id
             WHERE {rem_where}
         ),
@@ -2949,7 +2961,10 @@ def _build_claim_cycle_v2(db, facility_id, payer_id, encounter_type,
         ORDER BY sr.encounter_start DESC, sr.claim_id
     """)
 
+    # Safety net: the CTE joins are large; hash/merge joins are always the right choice here.
+    db.execute(_text("SET LOCAL enable_nestloop = off"))
     rows = db.execute(sql, params).fetchall()
+    db.execute(_text("SET LOCAL enable_nestloop = on"))
 
     wb = openpyxl.Workbook()
     ws = wb.active

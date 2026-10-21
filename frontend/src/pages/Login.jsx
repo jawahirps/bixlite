@@ -6,7 +6,7 @@ export default function Login() {
   const { login } = useAuth();
   const navigate = useNavigate();
 
-  const [email, setEmail] = useState("admin@ghafapp.local");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -46,6 +46,7 @@ export default function Login() {
               required
               value={email}
               onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@clinic.ae"
               className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-ghaf-500 focus:outline-none focus:ring-1 focus:ring-ghaf-500"
             />
           </div>
@@ -70,10 +71,6 @@ export default function Login() {
             {loading ? "Signing in…" : "Sign in"}
           </button>
         </form>
-
-        <p className="mt-6 text-center text-xs text-slate-400">
-          Default seeded admin: admin@ghafapp.local / ChangeMe123!
-        </p>
       </div>
     </div>
   );

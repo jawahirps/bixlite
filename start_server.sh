@@ -22,9 +22,10 @@ cd "$BACKEND"
 lsof -ti tcp:$BACKEND_PORT | xargs kill -9 2>/dev/null || true
 sleep 1
 
-# Use the project venv when there is one, else the system Python that has the backend packages
-if [ -x .venv/bin/uvicorn ]; then
-  UVICORN=(.venv/bin/uvicorn)
+# Use the project venv only if it actually runs (a moved venv keeps stale shebangs),
+# else the system Python that has the backend packages
+if .venv/bin/python -c "import uvicorn" >/dev/null 2>&1; then
+  UVICORN=(.venv/bin/python -m uvicorn)
 else
   UVICORN=(python3.12 -m uvicorn)
 fi

@@ -1,16 +1,15 @@
 """
 Ghaf App — first-run seed data.
 
-Creates a default facility and admin user if the database is empty, so the
-React app has something to log in with on first run.
-
-  email:    admin@ghafapp.local
-  password: ChangeMe123!
+Creates a default facility if the database is empty, and a first admin user
+only when SEED_ADMIN_EMAIL and SEED_ADMIN_PASSWORD are set in the environment
+(nothing is created otherwise; credentials never live in code or logs).
 
 Also seeds the initial DHA Exclusion 1 & 2 code reference list if the
 exclusion_codes table is empty.
 """
 import logging
+import os
 
 from sqlalchemy.orm import Session
 
@@ -19,8 +18,6 @@ from .security import hash_password
 
 log = logging.getLogger(__name__)
 
-DEFAULT_ADMIN_EMAIL = "admin@ghafapp.local"
-DEFAULT_ADMIN_PASSWORD = "ChangeMe123!"
 
 
 def run_seed(db: Session) -> None:
@@ -40,22 +37,22 @@ def run_seed(db: Session) -> None:
         db.refresh(facility)
         log.info("Seeded default facility %s", facility.facility_code)
 
-    admin = db.query(User).filter(User.email == DEFAULT_ADMIN_EMAIL).first()
-    if admin is None:
-        admin = User(
-            facility_id=facility.id,
-            email=DEFAULT_ADMIN_EMAIL,
-            full_name="Ghaf App Administrator",
-            hashed_password=hash_password(DEFAULT_ADMIN_PASSWORD),
-            role="admin",
-            is_active=True,
-        )
-        db.add(admin)
-        db.commit()
-        log.warning(
-            "Seeded default admin user %s with password '%s' — change this immediately.",
-            DEFAULT_ADMIN_EMAIL, DEFAULT_ADMIN_PASSWORD,
-        )
+    admin_email = os.getenv("SEED_ADMIN_EMAIL", "").strip()
+    admin_password = os.getenv("SEED_ADMIN_PASSWORD", "")
+    if admin_email and admin_password:
+        admin = db.query(User).filter(User.email == admin_email).first()
+        if admin is None:
+            admin = User(
+                facility_id=facility.id,
+                email=admin_email,
+                full_name="Administrator",
+                hashed_password=hash_password(admin_password),
+                role="admin",
+                is_active=True,
+            )
+            db.add(admin)
+            db.commit()
+            log.warning("Seeded admin user %s from SEED_ADMIN_* env vars.", admin_email)
 
     _seed_exclusion_codes(db)
 

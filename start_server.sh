@@ -22,7 +22,13 @@ cd "$BACKEND"
 lsof -ti tcp:$BACKEND_PORT | xargs kill -9 2>/dev/null || true
 sleep 1
 
-nohup .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port $BACKEND_PORT > /tmp/ghaf_backend.log 2>&1 &
+# Use the project venv when there is one, else the system Python that has the backend packages
+if [ -x .venv/bin/uvicorn ]; then
+  UVICORN=(.venv/bin/uvicorn)
+else
+  UVICORN=(python3.12 -m uvicorn)
+fi
+nohup "${UVICORN[@]}" app.main:app --host 127.0.0.1 --port $BACKEND_PORT > /tmp/ghaf_backend.log 2>&1 &
 UVICORN_PID=$!
 echo "Backend PID: $UVICORN_PID  (log: /tmp/ghaf_backend.log)"
 

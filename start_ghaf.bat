@@ -1,6 +1,6 @@
 @echo off
 echo ============================================
-echo   Ghaf App - RCM ^& Clinical Platform
+echo   Bix Lite - Revenue intelligence by Ghaf
 echo ============================================
 echo.
 echo Starting Backend (FastAPI)...

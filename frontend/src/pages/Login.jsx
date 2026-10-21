@@ -29,8 +29,13 @@ export default function Login() {
     <div className="flex h-screen w-screen items-center justify-center bg-slate-900">
       <div className="w-full max-w-sm rounded-2xl bg-white p-8 shadow-xl">
         <div className="mb-6 text-center">
-          <h1 className="text-2xl font-bold text-slate-900">Ghaf App</h1>
-          <p className="mt-1 text-sm text-slate-500">RCM &amp; Clinical Platform</p>
+          <img src="/ghaf-mark.png" alt="" className="mx-auto mb-3 h-10 w-10" />
+          <h1 className="gh-product text-3xl">
+            <span className="text-ghaf-600">Bi</span>x Lite
+          </h1>
+          <p className="mt-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-600">
+            Revenue intelligence · by Ghaf
+          </p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">

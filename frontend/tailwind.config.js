@@ -43,6 +43,7 @@ export default {
       fontFamily: {
         sans: ['"DM Sans"', "Arial", "sans-serif"],
         display: ["Manrope", '"DM Sans"', "Arial", "sans-serif"],
+        product: ["Sora", "Manrope", "sans-serif"],
       },
       borderColor: { hairline: "rgba(0,104,132,0.16)" },
     },

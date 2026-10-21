@@ -507,8 +507,67 @@ def generate(db: Session, session_id: int) -> int:
 # Export in the claim-query template layout
 # ---------------------------------------------------------------------------
 
-BASE_HEADERS = ["Batch", "Insurance", "MRN / File no", "Invoice no", "Date", "Patient name",
-                "Procedure / Code / Dx", "Query type", "Status", "Query", "In-charge"]
+BASE_HEADERS = ["Batch", "Insurance", "MRN / File no", "Invoice no", "Claim ID", "Date", "Patient name",
+                "Procedure / Code / Dx", "Type", "Query type", "Status", "Query", "In-charge"]
+
+# ---- code type (Dental / Consultation / Laboratory / Radiology …) for the "Type" column -------------------
+# CPT groups come from the DHA CPT list, kept outside the repo (AMA-licensed) as code,type in
+# ~/Desktop/report-scripts/assets/cpt_types.csv; without it, CPT number ranges are used.
+_CPT_TYPES: Optional[Dict[str, str]] = None
+_TOKEN = re.compile(r"\b(D\d{4}|\d{4}-\d{6}-\d{4}|[A-Z]\d{2}(?:\.[0-9A-Z]{1,4})?|[A-Z]\d{4}|\d{4}[FTU]|\d{5}|\d{1,2}(?:\.\d{2})?)\b")
+
+
+def _cpt_types() -> Dict[str, str]:
+    global _CPT_TYPES
+    if _CPT_TYPES is None:
+        import csv, os
+        _CPT_TYPES = {}
+        try:
+            with open(os.path.expanduser("~/Desktop/report-scripts/assets/cpt_types.csv"), newline="") as f:
+                _CPT_TYPES = {r["code"].upper(): r["type"] for r in csv.DictReader(f)}
+        except OSError:
+            pass
+    return _CPT_TYPES
+
+
+def code_type(code: str) -> Optional[str]:
+    c = (code or "").strip().upper()
+    if re.fullmatch(r"D\d{4}", c):
+        return "Dental"
+    if re.fullmatch(r"\d{4}-\d{6}-\d{4}", c):
+        return "Drug"
+    if re.fullmatch(r"\d{1,2}(\.\d{2})?", c):
+        return "Consultation"
+    if re.fullmatch(r"[A-Z]\d{2}(\.[0-9A-Z]{1,4})?", c):
+        return "Diagnosis (ICD)"
+    if re.fullmatch(r"[A-Z]\d{4}", c):
+        return "HCPCS"
+    if re.fullmatch(r"\d{4}F", c):
+        return "Category II"
+    if re.fullmatch(r"\d{4}[TU]", c):
+        return "Category III"
+    if re.fullmatch(r"\d{5}", c):
+        t = _cpt_types().get(c)
+        if t:
+            return t
+        n = int(c)
+        if n < 2000:
+            return "Anesthesia"
+        if 99000 <= n <= 99499:
+            return "Consultation (E&M)"
+        return ("Surgery" if n < 70000 else "Radiology" if n < 80000 else "Laboratory" if n < 90000 else "Medicine")
+    return None
+
+
+def item_type(item: Optional[str]) -> str:
+    """Type(s) of the codes in the Procedure / Code / Dx cell; activity types first, diagnosis last."""
+    seen = []
+    for tok in _TOKEN.findall((item or "").upper()):
+        t = code_type(tok)
+        if t and t not in seen:
+            seen.append(t)
+    act = [t for t in seen if t != "Diagnosis (ICD)"]
+    return ", ".join(act or seen)
 GHAF_HEADERS = ["Action by", "Ghaf review", "Ghaf remarks"]
 FACILITY_HEADERS = ["Facility response", "Facility remarks", "Closed (Y/N)"]
 FACILITY_RESPONSES = ["FIXED", "LINE REMOVED", "JUSTIFICATION ADDED", "APPROVAL ATTACHED",
@@ -589,17 +648,20 @@ def to_workbook(db: Session, session_ids: List[int], batch: Optional[str], audie
     for r in rows:
         label = batch or (batch_for(r.d, r.d) if r.d else "") or ""
         line = [label, receiver_names.get(r.rcv) or payer_names.get(r.rcv) or r.rcv, r.patient_id,
-                invoice_no(r.claim_id), r.d, None, r.item, r.query_type, r.status, r.query_text, r.incharge]
+                invoice_no(r.claim_id), r.claim_id, r.d, None, r.item,
+                item_type(r.item) or ("Dental" if r.rule_code in ("DENTAL_RULE", "APPROVAL_DENTAL") else None),
+                r.query_type, r.status,
+                r.query_text, r.incharge]
         who = action_by(r.rule_code, r.status)
         if ghaf:
             line += [who, None, None]
         line += [None, None, "N"]
         ws.append(line)
-        ws.cell(ws.max_row, 5).number_format = "DD/MM/YYYY"
-        ws.cell(ws.max_row, 10).alignment = Alignment(wrap_text=True, vertical="top")
+        ws.cell(ws.max_row, headers.index("Date") + 1).number_format = "DD/MM/YYYY"
+        ws.cell(ws.max_row, headers.index("Query") + 1).alignment = Alignment(wrap_text=True, vertical="top")
         if ghaf and who != "FACILITY":
-            ws.cell(ws.max_row, 12).fill = ghaf_fill
-    widths = [10, 28, 14, 14, 12, 18, 22, 34, 22, 70, 11] + ([24, 28, 30] if ghaf else []) + [22, 30, 10]
+            ws.cell(ws.max_row, headers.index("Action by") + 1).fill = ghaf_fill
+    widths = [10, 28, 14, 14, 30, 12, 18, 22, 18, 34, 22, 70, 11] + ([24, 28, 30] if ghaf else []) + [22, 30, 10]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
     ws.freeze_panes = "A2"

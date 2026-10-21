@@ -54,6 +54,8 @@ class ScrubXmlExtractor:
         # Strip namespace prefixes so we can use plain tag names
         _strip_ns(root)
 
+        self.receiver_id = (_text(root, "Header/ReceiverID") or "").strip() or None
+
         claim_elements = root.findall(".//Claim")
         if not claim_elements:
             # Some files wrap claims under ClaimSubmission/Claims/Claim
@@ -85,6 +87,7 @@ class ScrubXmlExtractor:
         member_id = _text(elem, "Patient/MemberID") or _text(elem, "MemberID") or ""
         emirates_id = _text(elem, "Patient/EmiratesID") or _text(elem, "EmiratesID")
         payer_id = _text(elem, "PayerID") or ""
+        patient_id = _text(elem, "Encounter/PatientID")
         resubmission_key = _text(elem, "Resubmission/Type") or ""
 
         # Net amount: prefer <Net> under the claim root; fall back to summing activities
@@ -100,6 +103,8 @@ class ScrubXmlExtractor:
             member_id=member_id,
             emirates_id=emirates_id,
             payer_id=payer_id,
+            receiver_id=getattr(self, "receiver_id", None) or payer_id,
+            patient_id=patient_id,
             resubmission_key=resubmission_key,
             net_amount=net_amount,
         )
@@ -132,6 +137,7 @@ class ScrubXmlExtractor:
             qty = _decimal(_text(act, "Quantity")) or Decimal("1")
             net = _decimal(_text(act, "Net")) or Decimal("0")
             auth_id = _text(act, "PriorAuthorizationID")
+            clinician = _text(act, "Clinician")
             act_start = _parse_date(_text(act, "Start"))
             self.db.add(ScrubClaimActivity(
                 scrub_claim_id=scrub_claim.id,
@@ -141,10 +147,112 @@ class ScrubXmlExtractor:
                 quantity=qty,
                 net=net,
                 authorization_id=auth_id if auth_id else None,
+                clinician_id=clinician,
                 activity_start=act_start,
                 sequence_no=seq,
             ))
             seq += 1
+
+
+class ScrubExcelExtractor:
+    """
+    Same staging as ScrubXmlExtractor, from an Excel sheet with one row per activity.
+    Rows with the same Claim ID form one claim; diagnoses are comma-separated (first = principal).
+    """
+
+    COLUMNS = {
+        "claim_id": ("claim id", "claimid", "invoice", "invoice no", "invoice#", "invoice number"),
+        "patient_id": ("mrn", "file no", "patient id", "patientid"),
+        "member_id": ("member id", "memberid", "card no", "card number"),
+        "emirates_id": ("emirates id", "emiratesid"),
+        "payer_id": ("payer id", "payerid", "payer"),
+        "receiver_id": ("receiver id", "receiverid", "receiver", "insurance", "company"),
+        "encounter_start": ("date", "encounter date", "visit date", "encounter start"),
+        "clinician_id": ("clinician", "clinician id", "doctor licence", "doctor license"),
+        "activity_type": ("activity type", "type"),
+        "activity_code": ("activity code", "code", "cpt", "procedure code"),
+        "quantity": ("quantity", "qty"),
+        "net": ("net", "net amount"),
+        "authorization_id": ("authorization", "authorization id", "approval no", "approval number", "prior authorization id"),
+        "diagnoses": ("diagnosis", "diagnoses", "icd", "icd codes"),
+    }
+
+    def __init__(self, db: Session, session_id: int, facility_id: int) -> None:
+        self.db = db
+        self.session_id = session_id
+        self.facility_id = facility_id
+
+    def parse(self, xlsx_bytes: bytes) -> int:
+        import openpyxl
+        try:
+            ws = openpyxl.load_workbook(BytesIO(xlsx_bytes), read_only=True, data_only=True).worksheets[0]
+        except Exception as exc:
+            raise ValueError(f"Invalid Excel file: {exc}") from exc
+        rows = [r for r in ws.iter_rows(values_only=True) if any(c not in (None, "") for c in r)]
+        if not rows:
+            raise ValueError("Excel file is empty.")
+        header = [str(c or "").strip().lower() for c in rows[0]]
+        col = {}
+        for field, names in self.COLUMNS.items():
+            for i, h in enumerate(header):
+                if h in names and field not in col:
+                    col[field] = i
+        missing = [f for f in ("claim_id", "activity_code") if f not in col]
+        if missing:
+            raise ValueError("Excel needs columns: Claim ID (or Invoice) and Activity code. Missing: " + ", ".join(missing))
+
+        def val(r, f):
+            i = col.get(f)
+            v = r[i] if i is not None and i < len(r) else None
+            return None if v is None or str(v).strip() == "" else v
+
+        claims: dict = {}
+        for r in rows[1:]:
+            cid = val(r, "claim_id")
+            if cid is None:
+                continue
+            claims.setdefault(str(cid).strip(), []).append(r)
+
+        for cid, lines in claims.items():
+            first = lines[0]
+            d = val(first, "encounter_start")
+            enc = d.date() if hasattr(d, "date") else _parse_date(str(d)) if d else None
+            payer = str(val(first, "payer_id") or val(first, "receiver_id") or "").strip()
+            sc = ScrubClaim(
+                session_id=self.session_id, facility_id=self.facility_id, claim_id=cid,
+                encounter_type=None, encounter_start=enc, encounter_end=enc,
+                member_id=str(val(first, "member_id") or ""), emirates_id=val(first, "emirates_id"),
+                payer_id=payer, receiver_id=str(val(first, "receiver_id") or payer).strip() or None,
+                patient_id=str(val(first, "patient_id") or "").strip() or None,
+                net_amount=sum((_decimal(str(val(r, "net") or 0)) or Decimal("0")) for r in lines),
+            )
+            self.db.add(sc)
+            self.db.flush()
+            seen_dx = []
+            for r in lines:
+                for dx in str(val(r, "diagnoses") or "").replace(";", ",").split(","):
+                    dx = dx.strip().upper()
+                    if dx and dx not in seen_dx:
+                        seen_dx.append(dx)
+            for n, dx in enumerate(seen_dx, 1):
+                self.db.add(ScrubClaimDiagnosis(scrub_claim_id=sc.id, session_id=self.session_id,
+                                                diagnosis_type="Principal" if n == 1 else "Secondary",
+                                                diagnosis_code=dx, sequence_no=n))
+            for n, r in enumerate(lines, 1):
+                code = val(r, "activity_code")
+                if code is None:
+                    continue
+                self.db.add(ScrubClaimActivity(
+                    scrub_claim_id=sc.id, session_id=self.session_id,
+                    activity_type=str(val(r, "activity_type") or ""), activity_code=str(code).strip(),
+                    quantity=_decimal(str(val(r, "quantity") or 1)) or Decimal("1"),
+                    net=_decimal(str(val(r, "net") or 0)) or Decimal("0"),
+                    authorization_id=str(val(r, "authorization_id")).strip() if val(r, "authorization_id") else None,
+                    clinician_id=str(val(r, "clinician_id") or "").strip() or None,
+                    activity_start=enc, sequence_no=n,
+                ))
+        self.db.flush()
+        return len(claims)
 
 
 # ---------------------------------------------------------------------------
@@ -170,8 +278,12 @@ def _text(elem: ET.Element, path: str) -> Optional[str]:
 def _parse_date(raw: Optional[str]) -> Optional[date]:
     if not raw:
         return None
-    # Accept ISO-8601 date (YYYY-MM-DD) and datetime (YYYY-MM-DDTHH:MM:SS)
+    # Accept DHA format (DD/MM/YYYY HH:MM), ISO-8601 date (YYYY-MM-DD) and datetime (YYYY-MM-DDTHH:MM:SS)
+    raw = raw.strip()
     try:
+        if "/" in raw[:10]:
+            dd, mm, yyyy = raw[:10].split("/")
+            return date(int(yyyy), int(mm), int(dd))
         return date.fromisoformat(raw[:10])
     except (ValueError, TypeError):
         return None

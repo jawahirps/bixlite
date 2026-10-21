@@ -47,13 +47,66 @@ function fmtDate(iso) {
   return new Date(iso).toLocaleString("en-AE", { dateStyle: "medium", timeStyle: "short" });
 }
 
+function fmtDay(iso) {
+  if (!iso) return "—";
+  return new Date(iso.slice(0, 10) + "T00:00:00").toLocaleDateString("en-AE", { dateStyle: "medium" });
+}
+
+// Download options shared by the single-batch and combined query Excel
+function ExportControls({ value, onChange }) {
+  const set = (k) => (e) => onChange({ ...value, [k]: e.target.value });
+  const cls = "rounded-lg border border-slate-300 px-2 py-1.5 text-xs";
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <label className="text-xs text-slate-500">Visit date</label>
+      <input type="date" value={value.from} onChange={set("from")} className={cls} aria-label="Visit date from" />
+      <span className="text-xs text-slate-400">to</span>
+      <input type="date" value={value.to} onChange={set("to")} className={cls} aria-label="Visit date to" />
+      <select value={value.batch} onChange={set("batch")} className={cls} aria-label="Batch">
+        <option value="">Batch: auto (1–10 / 11–20 / 21–end)</option>
+        <option value="1ST">1st batch</option>
+        <option value="2ND">2nd batch</option>
+        <option value="FINAL">Final batch</option>
+      </select>
+      <select value={value.audience} onChange={set("audience")} className={cls} aria-label="Sheet">
+        <option value="ghaf">Ghaf review sheet</option>
+        <option value="facility">Facility sheet</option>
+      </select>
+    </div>
+  );
+}
+
+const EXPORT_DEFAULT = { from: "", to: "", batch: "", audience: "ghaf" };
+
+function exportQuery(o) {
+  const p = new URLSearchParams();
+  if (o.from) p.set("date_from", o.from);
+  if (o.to) p.set("date_to", o.to);
+  if (o.batch) p.set("batch", o.batch);
+  p.set("audience", o.audience);
+  return p.toString();
+}
+
+async function downloadBlob(url, fallbackName) {
+  const response = await api.get(url, { responseType: "blob" });
+  const cd = response.headers["content-disposition"] || "";
+  const m = cd.match(/filename="([^"]+)"/);
+  const href = URL.createObjectURL(response.data);
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = m ? m[1] : fallbackName;
+  a.click();
+  URL.revokeObjectURL(href);
+}
+
 // ---------------------------------------------------------------------------
 // Upload panel
 // ---------------------------------------------------------------------------
 function UploadPanel({ onUploaded }) {
   const [facilityId, setFacilityId] = useState("");
   const [facilities, setFacilities] = useState([]);
-  const [file, setFile] = useState(null);
+  const [files, setFiles] = useState([]);
+  const [progress, setProgress] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -63,29 +116,40 @@ function UploadPanel({ onUploaded }) {
 
   async function handleUpload(e) {
     e.preventDefault();
-    if (!file || !facilityId) return;
+    if (!files.length || !facilityId) return;
     setBusy(true);
     setError("");
-    const form = new FormData();
-    form.append("file", file);
-    form.append("facility_id", facilityId);
-    try {
-      const { data: session } = await api.post("/scrub/sessions", form, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-      // Auto-run rules immediately after parse
-      await api.post(`/scrub/sessions/${session.id}/run`);
-      onUploaded();
-    } catch (err) {
-      setError(err?.response?.data?.detail || "Upload failed.");
-    } finally {
-      setBusy(false);
+    const ids = [];
+    const failed = [];
+    for (const [i, f] of files.entries()) {
+      setProgress(`${i + 1} / ${files.length}`);
+      const form = new FormData();
+      form.append("file", f);
+      form.append("facility_id", facilityId);
+      try {
+        const { data: session } = await api.post("/scrub/sessions", form, {
+          headers: { "Content-Type": "multipart/form-data" },
+        });
+        // Auto-run rules immediately after parse
+        await api.post(`/scrub/sessions/${session.id}/run`);
+        ids.push(session.id);
+      } catch (err) {
+        failed.push(`${f.name}: ${err?.response?.data?.detail || "upload failed"}`);
+      }
     }
+    if (failed.length) setError(failed.join(" · "));
+    setProgress("");
+    setBusy(false);
+    if (ids.length) onUploaded(ids);
   }
 
   return (
     <form onSubmit={handleUpload} className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-      <h2 className="mb-4 text-base font-semibold text-slate-700">Upload ClaimSubmission XML</h2>
+      <h2 className="mb-1 text-base font-semibold text-slate-700">Upload batch — ERP test XML or Excel</h2>
+      <p className="mb-4 text-xs text-slate-500">
+        Excel: one row per activity with columns Claim ID (or Invoice), MRN, Member ID, Payer ID, Receiver ID, Date,
+        Clinician, Activity code, Quantity, Net, Approval no, Diagnosis (comma-separated, principal first).
+      </p>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
         <div className="flex-1">
           <label className="mb-1 block text-xs font-medium text-slate-500">Facility</label>
@@ -102,21 +166,22 @@ function UploadPanel({ onUploaded }) {
           </select>
         </div>
         <div className="flex-1">
-          <label className="mb-1 block text-xs font-medium text-slate-500">XML File</label>
+          <label className="mb-1 block text-xs font-medium text-slate-500">XML / Excel files (select one or more)</label>
           <input
             type="file"
-            accept=".xml"
+            accept=".xml,.xlsx"
+            multiple
             required
-            onChange={(e) => setFile(e.target.files[0] || null)}
+            onChange={(e) => setFiles(Array.from(e.target.files || []))}
             className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm file:mr-3 file:rounded file:border-0 file:bg-ghaf-50 file:px-3 file:py-1 file:text-xs file:font-medium file:text-ghaf-700 focus:outline-none"
           />
         </div>
         <button
           type="submit"
-          disabled={busy || !file || !facilityId}
+          disabled={busy || !files.length || !facilityId}
           className="rounded-lg bg-ghaf-600 px-5 py-2 text-sm font-semibold text-white hover:bg-ghaf-700 disabled:opacity-40"
         >
-          {busy ? "Processing…" : "Upload & Scrub"}
+          {busy ? `Processing ${progress}…` : files.length > 1 ? `Upload & Scrub ${files.length} files` : "Upload & Scrub"}
         </button>
       </div>
       {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
@@ -127,7 +192,7 @@ function UploadPanel({ onUploaded }) {
 // ---------------------------------------------------------------------------
 // Sessions list
 // ---------------------------------------------------------------------------
-function SessionsList({ refreshKey, onSelect, selectedId }) {
+function SessionsList({ refreshKey, onSelect, selectedId, checked, onCheck }) {
   const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -149,6 +214,11 @@ function SessionsList({ refreshKey, onSelect, selectedId }) {
       <table className="min-w-full text-sm">
         <thead className="bg-slate-50 text-xs font-semibold uppercase text-slate-500">
           <tr>
+            <th className="w-10 px-4 py-3">
+              <input type="checkbox" aria-label="Select all sessions"
+                checked={sessions.length > 0 && sessions.every((s) => checked.includes(s.id))}
+                onChange={(e) => onCheck(e.target.checked ? sessions.map((s) => s.id) : [])} />
+            </th>
             <th className="px-4 py-3 text-left">File</th>
             <th className="px-4 py-3 text-left">Uploaded</th>
             <th className="px-4 py-3 text-center">Claims</th>
@@ -164,6 +234,11 @@ function SessionsList({ refreshKey, onSelect, selectedId }) {
                 s.id === selectedId ? "bg-ghaf-50" : ""
               }`}
             >
+              <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                <input type="checkbox" aria-label={`Select ${s.uploaded_filename}`}
+                  checked={checked.includes(s.id)}
+                  onChange={(e) => onCheck(e.target.checked ? [...checked, s.id] : checked.filter((x) => x !== s.id))} />
+              </td>
               <td className="max-w-xs truncate px-4 py-3 font-medium text-slate-700">
                 {s.uploaded_filename}
               </td>
@@ -737,22 +812,149 @@ function XmlCheckPanel({ sessionId }) {
 // ---------------------------------------------------------------------------
 // Main page
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Claim queries (Ghaf claim-query template wording)
+// ---------------------------------------------------------------------------
+
+const STATUS_STYLE = {
+  "CORRECTION APPLIED": "bg-emerald-50 text-emerald-700",
+  "CORRECTION REQUIRED": "bg-red-50 text-red-700",
+};
+
+function ClaimQueriesPanel({ sessionId }) {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [opts, setOpts] = useState(EXPORT_DEFAULT);
+  const [type, setType] = useState("ALL");
+
+  useEffect(() => {
+    if (!sessionId) return;
+    setLoading(true);
+    api.get(`/scrub/sessions/${sessionId}/queries`)
+      .then((r) => setRows(r.data))
+      .catch(() => setRows([]))
+      .finally(() => setLoading(false));
+  }, [sessionId]);
+
+  async function handleDownload() {
+    try {
+      await downloadBlob(`/scrub/sessions/${sessionId}/query-excel?${exportQuery(opts)}`, "CLAIM QUERIES.xlsx");
+    } catch {
+      alert("Download failed.");
+    }
+  }
+
+  const types = [...new Set(rows.map((r) => r.query_type))].sort();
+  const shown = type === "ALL" ? rows : rows.filter((r) => r.query_type === type);
+  const corrections = rows.filter((r) => r.status === "CORRECTION APPLIED").length;
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-4">
+        <div className="text-sm text-slate-600">
+          <span className="font-semibold text-slate-800">{rows.length}</span> queries on{" "}
+          <span className="font-semibold text-slate-800">{new Set(rows.map((r) => r.claim_id)).size}</span> claims
+          {corrections > 0 && (
+            <span className="ml-2 text-xs text-emerald-700">
+              · {corrections} corrections to apply in the ERP before sending
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <select value={type} onChange={(e) => setType(e.target.value)}
+            className="rounded-lg border border-slate-300 px-2 py-1.5 text-xs">
+            <option value="ALL">All query types</option>
+            {types.map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+          <ExportControls value={opts} onChange={setOpts} />
+          <button onClick={handleDownload} disabled={!rows.length}
+            className="rounded-lg bg-ghaf-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-ghaf-700 disabled:opacity-40">
+            Download query Excel
+          </button>
+        </div>
+      </div>
+      {loading ? (
+        <p className="p-6 text-sm text-slate-400">Loading…</p>
+      ) : !shown.length ? (
+        <p className="p-6 text-sm text-slate-400">No queries for this batch.</p>
+      ) : (
+        <div className="max-h-[60vh] overflow-auto">
+          <table className="min-w-full text-xs">
+            <thead className="sticky top-0 bg-slate-50 text-left text-slate-500">
+              <tr>
+                <th className="px-3 py-2">Claim / MRN</th>
+                <th className="px-3 py-2">Date</th>
+                <th className="px-3 py-2">Payer</th>
+                <th className="px-3 py-2">Code / Dx</th>
+                <th className="px-3 py-2">Query type</th>
+                <th className="px-3 py-2">Query</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {shown.map((r) => (
+                <tr key={r.id} className="align-top">
+                  <td className="px-3 py-2 font-mono text-[11px] text-slate-700">
+                    {r.claim_id}<div className="text-slate-400">{r.patient_id}</div>
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-2">{fmtDay(r.encounter_start)}</td>
+                  <td className="px-3 py-2">{r.receiver}</td>
+                  <td className="px-3 py-2 font-mono text-[11px]">{r.item}</td>
+                  <td className="px-3 py-2">
+                    {r.query_type}
+                    <div className={`mt-1 inline-block rounded px-1.5 py-0.5 text-[10px] font-semibold ${STATUS_STYLE[r.status] || "bg-slate-100 text-slate-600"}`}>
+                      {r.status}
+                    </div>
+                  </td>
+                  <td className="px-3 py-2 text-slate-700">
+                    {r.query_text}
+                    {r.evidence && <div className="mt-1 text-[10px] text-slate-400">Why: {r.evidence}</div>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Scrubber() {
   const [tab, setTab] = useState("scrub");           // 'scrub' | 'exclusions'
-  const [resultsTab, setResultsTab] = useState("rules"); // 'rules' | 'xml'
+  const [resultsTab, setResultsTab] = useState("queries"); // 'queries' | 'rules' | 'xml'
   const [refreshKey, setRefreshKey] = useState(0);
   const [selectedSessionId, setSelectedSessionId] = useState(null);
+  const [checked, setChecked] = useState([]);
+  const [combinedOpts, setCombinedOpts] = useState(EXPORT_DEFAULT);
 
-  function handleUploaded() {
+  function handleUploaded(ids) {
     setRefreshKey((k) => k + 1);
-    setSelectedSessionId(null);
-    setResultsTab("rules");
+    setSelectedSessionId(ids?.length ? ids[ids.length - 1] : null);
+    setChecked(ids?.length > 1 ? ids : []);
+    setResultsTab("queries");
+  }
+
+  async function handleCombinedDownload() {
+    try {
+      await downloadBlob(`/scrub/query-excel?session_ids=${checked.join(",")}&${exportQuery(combinedOpts)}`,
+        "CLAIM QUERIES.xlsx");
+    } catch {
+      alert("Download failed.");
+    }
   }
 
   function handleSelectSession(id) {
-    setSelectedSessionId(id);
-    setResultsTab("rules");
+    // clicking the open batch again closes it
+    setSelectedSessionId((cur) => (cur === id ? null : id));
+    setResultsTab("queries");
   }
+
+  // Results sit under the upload panel; bring them into view when a session is picked or uploaded
+  useEffect(() => {
+    if (selectedSessionId) {
+      setTimeout(() => document.getElementById("scrub-results")?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+    }
+  }, [selectedSessionId]);
 
   const tabClass = (t) =>
     `px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
@@ -774,7 +976,8 @@ export default function Scrubber() {
       <div>
         <h1 className="text-2xl font-bold text-slate-800">Claim Scrubber</h1>
         <p className="mt-1 text-sm text-slate-500">
-          Upload a ClaimSubmission XML — checks DHA business rules and XML / coding quality before submission.
+          Upload the batch (ERP test XML or Excel) — generates the claim query Excel in the Ghaf template, plus DHA
+          business rules and XML / coding checks.
         </p>
       </div>
 
@@ -792,34 +995,57 @@ export default function Scrubber() {
         <div className="space-y-6">
           <UploadPanel onUploaded={handleUploaded} />
 
-          <h2 className="text-sm font-semibold text-slate-600">Recent Sessions</h2>
-          <SessionsList
-            refreshKey={refreshKey}
-            onSelect={handleSelectSession}
-            selectedId={selectedSessionId}
-          />
-
           {selectedSessionId && (
-            <>
+            <div id="scrub-results" className="space-y-4">
               {/* Results header + sub-tabs */}
               <div className="flex items-center justify-between">
                 <h2 className="text-sm font-semibold text-slate-600">
                   Results — Session #{selectedSessionId}
                 </h2>
                 <div className="flex gap-2">
+                  <button className={subTabClass("queries")} onClick={() => setResultsTab("queries")}>
+                    Claim Queries
+                  </button>
                   <button className={subTabClass("rules")} onClick={() => setResultsTab("rules")}>
                     Business Rules
                   </button>
                   <button className={subTabClass("xml")} onClick={() => setResultsTab("xml")}>
                     XML &amp; Coding Check
                   </button>
+                  <button onClick={() => setSelectedSessionId(null)} aria-label="Close results"
+                    className="rounded-full px-3 py-1.5 text-xs font-semibold text-slate-500 hover:bg-slate-100 hover:text-slate-700">
+                    ✕ Close
+                  </button>
                 </div>
               </div>
 
+              {resultsTab === "queries" && <ClaimQueriesPanel sessionId={selectedSessionId} />}
               {resultsTab === "rules" && <ResultsPanel sessionId={selectedSessionId} />}
               {resultsTab === "xml"   && <XmlCheckPanel sessionId={selectedSessionId} />}
-            </>
+            </div>
           )}
+
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="text-sm font-semibold text-slate-600">Recent Sessions</h2>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-slate-500">
+                {checked.length ? `${checked.length} batches selected` : "Tick batches to combine their queries"}
+              </span>
+              <ExportControls value={combinedOpts} onChange={setCombinedOpts} />
+              <button onClick={handleCombinedDownload} disabled={!checked.length}
+                className="rounded-lg bg-ghaf-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-ghaf-700 disabled:opacity-40">
+                Download combined query Excel
+              </button>
+            </div>
+          </div>
+          <SessionsList
+            refreshKey={refreshKey}
+            onSelect={handleSelectSession}
+            selectedId={selectedSessionId}
+            checked={checked}
+            onCheck={setChecked}
+          />
+
         </div>
       )}
 

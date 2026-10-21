@@ -13,7 +13,7 @@ DELETE /api/scrub/exclusions/{code_id}       Delete an exclusion code
 from __future__ import annotations
 
 import io
-from datetime import datetime
+from datetime import date, datetime
 from typing import List, Optional
 
 import openpyxl
@@ -26,7 +26,8 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import ExclusionCode, ScrubClaim, ScrubResult, ScrubSession, ScrubXmlFinding, User
 from ..security import get_current_user
-from ..services.scrub_extractor import ScrubXmlExtractor
+from ..services import presub_queries
+from ..services.scrub_extractor import ScrubExcelExtractor, ScrubXmlExtractor
 from ..services.scrub_rules import ScrubRuleEngine
 from ..services.scrub_xml_service import ScrubXmlService
 
@@ -125,13 +126,16 @@ async def upload_xml(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Upload a ClaimSubmission XML file.  Creates a ScrubSession, parses claims
-    into scrub_* staging tables, and returns the session record.
+    Upload a ClaimSubmission XML file (e.g. the ERP test XML) or an Excel sheet with one
+    row per activity.  Creates a ScrubSession, parses claims into scrub_* staging tables,
+    generates the claim queries, and returns the session record.
     """
-    if not file.filename or not file.filename.lower().endswith(".xml"):
+    name = (file.filename or "").lower()
+    is_excel = name.endswith((".xlsx", ".xlsm"))
+    if not (name.endswith(".xml") or is_excel):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only .xml files are accepted.",
+            detail="Only .xml or .xlsx files are accepted.",
         )
 
     xml_bytes = await file.read()
@@ -153,7 +157,8 @@ async def upload_xml(
 
     # Parse XML into staging tables
     try:
-        extractor = ScrubXmlExtractor(db, session_id=scrub_session.id, facility_id=facility_id)
+        extractor_cls = ScrubExcelExtractor if is_excel else ScrubXmlExtractor
+        extractor = extractor_cls(db, session_id=scrub_session.id, facility_id=facility_id)
         count = extractor.parse(xml_bytes)
         scrub_session.claims_count = count
         scrub_session.status = "parsed"
@@ -165,7 +170,7 @@ async def upload_xml(
         db.commit()
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"XML parse error: {exc}",
+            detail=f"{'Excel' if is_excel else 'XML'} parse error: {exc}",
         ) from exc
     except Exception as exc:
         db.rollback()
@@ -173,6 +178,20 @@ async def upload_xml(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Unexpected error during parse: {exc}",
         ) from exc
+
+    # ── Claim queries in the Ghaf template wording ─────────────────────────
+    try:
+        presub_queries.generate(db, scrub_session.id)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        import logging
+        logging.getLogger(__name__).exception(
+            "Claim query generation failed for session %d: %s", scrub_session.id, exc
+        )
+
+    if is_excel:
+        return scrub_session
 
     # ── Run Strawberry XML scrubber (structural + coding checks) ──────────
     # Runs immediately on upload so findings are ready before /run is called.
@@ -530,6 +549,126 @@ def export_session(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+class ScrubQueryOut(BaseModel):
+    id: int
+    claim_id: str
+    patient_id: Optional[str] = None
+    encounter_start: Optional[str] = None
+    receiver: Optional[str] = None
+    rule_code: str
+    query_type: str
+    status: str
+    incharge: str
+    item: Optional[str] = None
+    query_text: str
+    evidence: Optional[str] = None
+
+
+@router.get("/sessions/{session_id}/queries", response_model=List[ScrubQueryOut])
+def session_queries(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Claim queries generated for a session (template wording)."""
+    if db.get(ScrubSession, session_id) is None:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    rows = db.execute(text("""
+        SELECT q.id, sc.claim_id, sc.patient_id, sc.encounter_start::text AS encounter_start,
+               upper(coalesce(nullif(sc.receiver_id,''), sc.payer_id)) AS receiver,
+               q.rule_code, q.query_type, q.status, q.incharge, q.item, q.query_text, q.evidence
+        FROM scrub_queries q JOIN scrub_claims sc ON sc.id = q.scrub_claim_id
+        WHERE q.session_id = :sid ORDER BY sc.encounter_start, sc.claim_id, q.id
+    """), {"sid": session_id}).mappings().all()
+    return [ScrubQueryOut(**r) for r in rows]
+
+
+@router.post("/sessions/{session_id}/queries/regenerate")
+def regenerate_queries(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Re-run the claim query rules (e.g. after the rules were updated)."""
+    try:
+        n = presub_queries.generate(db, session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    db.commit()
+    return {"queries": n}
+
+
+def _query_excel_response(db: Session, session_ids: List[int], batch: Optional[str], audience: str = "ghaf",
+                          date_from: Optional[date] = None, date_to: Optional[date] = None) -> StreamingResponse:
+    sessions = [db.get(ScrubSession, i) for i in session_ids]
+    if not session_ids or any(x is None for x in sessions):
+        raise HTTPException(status_code=404, detail="Session not found.")
+    batch = (batch or "").upper()
+    if batch not in ("1ST", "2ND", "FINAL"):
+        batch = presub_queries.batch_for(date_from, date_to)   # None → label rows by visit day
+    elif not date_from and not date_to:
+        # a chosen batch means its visit-day window (1–10 / 11–20 / 21–end) in the batches' main claim month
+        month_start = db.execute(text("""
+            SELECT date_trunc('month', encounter_start)::date FROM scrub_claims
+            WHERE session_id = ANY(:sids) AND encounter_start IS NOT NULL
+            GROUP BY 1 ORDER BY count(*) DESC LIMIT 1"""), {"sids": session_ids}).scalar()
+        if month_start:
+            date_from, date_to = presub_queries.batch_window(month_start, batch)
+    audience = "facility" if audience == "facility" else "ghaf"
+    wb, _ = presub_queries.to_workbook(db, session_ids, batch, audience, date_from, date_to)
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    names = {(x.facility.facility_name if x.facility else "FACILITY").upper() for x in sessions}
+    fac = names.pop() if len(names) == 1 else "MULTIPLE FACILITIES"
+    first_day = db.execute(text("""
+        SELECT date_trunc('month', encounter_start)::date FROM scrub_claims
+        WHERE session_id = ANY(:sids) AND encounter_start IS NOT NULL
+        GROUP BY 1 ORDER BY count(*) DESC LIMIT 1"""), {"sids": session_ids}).scalar()
+    month = (first_day or datetime.utcnow()).strftime("%B %Y").upper()
+    span = f" {date_from:%d}-{date_to:%d}" if date_from and date_to and not batch else ""
+    label = f"{batch} BATCH" if batch else "BATCH"
+    review = " (GHAF REVIEW)" if audience == "ghaf" else ""
+    filename = f"{fac} {month} QUERIES {label}{span}{review}.xlsx".replace("/", "-").encode("ascii", "ignore").decode()
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/sessions/{session_id}/query-excel")
+def export_queries(
+    session_id: int,
+    batch: Optional[str] = None,
+    audience: str = "ghaf",
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Download the claim queries as the batch query Excel (Ghaf claim-query template layout)."""
+    return _query_excel_response(db, [session_id], batch, audience, date_from, date_to)
+
+
+@router.get("/query-excel")
+def export_queries_combined(
+    session_ids: str,
+    batch: Optional[str] = None,
+    audience: str = "ghaf",
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """One query Excel for several uploaded batches (session_ids comma-separated)."""
+    try:
+        ids = sorted({int(x) for x in session_ids.split(",") if x.strip()})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="session_ids must be comma-separated numbers.") from exc
+    return _query_excel_response(db, ids, batch, audience, date_from, date_to)
 
 
 # ---------------------------------------------------------------------------

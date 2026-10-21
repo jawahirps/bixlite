@@ -78,7 +78,7 @@ function FacilityRow({ facility, onSaved }) {
           <div className="flex items-center gap-2 flex-wrap">
             <h3 className="truncate font-semibold text-slate-900">{facility.facility_name}</h3>
             <Badge live={isLive} />
-            {facility.riayati_username && <RiayatiBadge />}
+            {(facility.riayati_username || facility.riayati_accounts?.length > 0) && <RiayatiBadge />}
             {!facility.is_active && (
               <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500">
                 Inactive
@@ -105,6 +105,10 @@ function FacilityRow({ facility, onSaved }) {
             <Field label="Riayati Username (MOH)" value={facility.riayati_username} />
           )}
         </div>
+      )}
+
+      {!editing && (facility.riayati_username || facility.riayati_accounts?.length > 0) && (
+        <RiayatiAccounts facility={facility} onChanged={onSaved} />
       )}
 
       {editing && (
@@ -142,6 +146,108 @@ function FacilityRow({ facility, onSaved }) {
               className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
             >
               {saving ? "Saving…" : "Save"}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Extra Riayati logins for one facility — e.g. the SHA licence after a move from RHA. The nightly fetch pulls
+// every active account into this facility, so RAs match their claims by claim ID whichever account sends them.
+const EMPTY_ACCOUNT = { label: "", username: "", password: "", license_id: "", active_from: "" };
+
+function RiayatiAccounts({ facility, onChanged }) {
+  const [form, setForm] = useState(null);          // null = closed; {id?, ...} = adding / editing
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const accounts = facility.riayati_accounts || [];
+
+  const change = (e) => setForm((f) => ({ ...f, [e.target.name]: e.target.value }));
+  const refresh = async () => onChanged((await apiClient.get(`/facilities/${facility.id}`)).data);
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    const body = { ...form, active_from: form.active_from || null };
+    delete body.id;
+    try {
+      if (form.id) await apiClient.put(`/facilities/${facility.id}/riayati-accounts/${form.id}`, body);
+      else await apiClient.post(`/facilities/${facility.id}/riayati-accounts`, body);
+      await refresh();
+      setForm(null);
+    } catch (err) {
+      setError(err.response?.data?.detail || "Save failed.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const toggle = async (a) => {
+    await apiClient.put(`/facilities/${facility.id}/riayati-accounts/${a.id}`, { is_active: !a.is_active });
+    await refresh();
+  };
+
+  const remove = async (a) => {
+    if (!window.confirm(`Remove Riayati account "${a.label}" (${a.username})? Data already fetched is kept.`)) return;
+    await apiClient.delete(`/facilities/${facility.id}/riayati-accounts/${a.id}`);
+    await refresh();
+  };
+
+  return (
+    <div className="mt-4 border-t border-slate-100 pt-3">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium text-slate-400">Additional Riayati accounts (same facility, fetched together)</span>
+        {!form && (
+          <button onClick={() => setForm(EMPTY_ACCOUNT)}
+            className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50">
+            + Add account
+          </button>
+        )}
+      </div>
+      {accounts.length === 0 && !form && <p className="mt-1 text-xs text-slate-400">None</p>}
+      {accounts.map((a) => (
+        <div key={a.id} className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2 text-sm">
+          <div>
+            <span className="font-medium text-slate-800">{a.label}</span>
+            <span className="ml-2 text-slate-600">{a.username}</span>
+            {a.license_id && <span className="ml-2 text-xs text-slate-400">Licence {a.license_id}</span>}
+            {a.active_from && <span className="ml-2 text-xs text-slate-400">from {a.active_from}</span>}
+            {!a.has_password && <span className="ml-2 text-xs text-amber-600">no password</span>}
+            {!a.is_active && <span className="ml-2 rounded-full bg-slate-200 px-2 py-0.5 text-xs text-slate-500">Inactive</span>}
+          </div>
+          <div className="flex gap-1">
+            <button onClick={() => setForm({ ...EMPTY_ACCOUNT, ...a, password: "", license_id: a.license_id || "", active_from: a.active_from || "" })}
+              className="rounded px-2 py-1 text-xs text-slate-600 hover:bg-white">Edit</button>
+            <button onClick={() => toggle(a)} className="rounded px-2 py-1 text-xs text-slate-600 hover:bg-white">
+              {a.is_active ? "Deactivate" : "Activate"}
+            </button>
+            <button onClick={() => remove(a)} className="rounded px-2 py-1 text-xs text-red-600 hover:bg-white">Remove</button>
+          </div>
+        </div>
+      ))}
+      {form && (
+        <div className="mt-3 space-y-3 rounded-lg border border-slate-200 p-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <Input label="Label (e.g. SHA)" name="label" value={form.label} onChange={change} />
+            <Input label="Riayati Username" name="username" value={form.username} onChange={change} />
+            <Input label={form.id ? "Password (API key — leave blank to keep current)" : "Password (API key)"}
+              name="password" value={form.password} onChange={change} type="password" showToggle />
+            <Input label="Licence (e.g. HF-YYYY-NNNNNN)" name="license_id" value={form.license_id} onChange={change} />
+            <div>
+              <label className="mb-1 block text-xs font-medium text-slate-500">Licence used from (first visit date)</label>
+              <input type="date" name="active_from" value={form.active_from} onChange={change}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+            </div>
+          </div>
+          {error && <p className="text-sm text-red-600">{error}</p>}
+          <div className="flex justify-end gap-2">
+            <button onClick={() => { setForm(null); setError(null); }}
+              className="rounded-lg border border-slate-200 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50">Cancel</button>
+            <button onClick={save} disabled={saving}
+              className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50">
+              {saving ? "Saving…" : "Save account"}
             </button>
           </div>
         </div>

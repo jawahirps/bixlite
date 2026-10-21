@@ -58,7 +58,7 @@ from sqlalchemy.orm import Session
 
 from ..models import (
     Claim, ClaimActivity, ClaimDiagnosis, ClaimObservation,
-    Facility, FetchLog, RawXmlStore,
+    Facility, FacilityRiayatiAccount, FetchLog, RawXmlStore,
     Remittance, RemittanceActivityDetail,
 )
 
@@ -694,6 +694,20 @@ class RiayatiJsonParser:
 # ---------------------------------------------------------------------------
 # Sync service
 # ---------------------------------------------------------------------------
+def riayati_accounts(db: Session, facility: Facility) -> List[tuple]:
+    """(label, username, password, license_id) for the facility's primary Riayati login plus every active
+    extra account (facility_riayati_accounts)."""
+    out = []
+    if facility.riayati_username and facility.riayati_password:
+        out.append(("primary", facility.riayati_username, facility.riayati_password, facility.license_id))
+    for acc in (db.query(FacilityRiayatiAccount)
+                .filter_by(facility_id=facility.id, is_active=True)
+                .order_by(FacilityRiayatiAccount.id)):
+        if acc.username and acc.password:
+            out.append((acc.label, acc.username, acc.password, acc.license_id))
+    return out
+
+
 class RiayatiSyncService:
     """
     Orchestrates a Riayati fetch cycle for one facility + date window.
@@ -725,7 +739,8 @@ class RiayatiSyncService:
         facility = self.db.get(Facility, facility_id)
         if not facility:
             raise ValueError(f"Facility {facility_id} not found")
-        if not facility.riayati_username or not facility.riayati_password:
+        accounts = riayati_accounts(self.db, facility)
+        if not accounts:
             raise ValueError(
                 f"Facility {facility_id} ({facility.facility_name}) "
                 "has no Riayati credentials configured."
@@ -744,10 +759,55 @@ class RiayatiSyncService:
         self.db.add(fetch_log)
         self.db.commit()
 
-        client = RiayatiClient(facility.riayati_username, facility.riayati_password)
         parser = RiayatiJsonParser(self.db)
         errors = []
+        inactive = []
 
+        # Every account (e.g. old RHA licence + new SHA licence) is staged under this facility, so RAs and
+        # resubmissions match their claims by claim ID whichever account they arrive on.
+        for label, username, password, license_id in accounts:
+            client = RiayatiClient(username, password)
+            try:
+                self._fetch_account(client, facility_id, label, date_from, date_to, fetch_log, errors)
+            except RiayatiInactiveFacilityError as exc:
+                log.warning("Riayati facility=%d account=%s INACTIVE: %s", facility_id, label, exc)
+                inactive.append((label, license_id or facility.license_id, str(exc)))
+
+        if inactive and len(inactive) == len(accounts):
+            fetch_log.completed_at = datetime.utcnow()
+            fetch_log.status       = "inactive"
+            fetch_log.error_detail = {
+                "error": "; ".join(f"{lbl}: {msg}" for lbl, _, msg in inactive),
+                "action": (
+                    "Email RiayatiPO@mohap.gov.ae to reactivate facility license "
+                    + ", ".join(lic for _, lic, _ in inactive) + " after API key regeneration."
+                ),
+            }
+            self.db.commit()
+            return fetch_log
+        for lbl, lic, msg in inactive:
+            errors.append(f"Account {lbl} ({lic}) inactive: {msg}")
+
+        # Parse all pending Riayati records for this facility
+        parsed = parser.run_pending(facility_id=facility_id)
+        fetch_log.records_parsed = parsed
+        if parser.quarantined:
+            # Parse failures must not hide behind a 'success' status
+            fetch_log.records_failed += parser.quarantined
+            errors.append(f"{parser.quarantined} file(s) failed to parse (quarantined)")
+
+        fetch_log.completed_at = datetime.utcnow()
+        fetch_log.status       = "success" if not errors else "partial"
+        if errors:
+            fetch_log.error_detail = {"errors": errors}
+        self.db.commit()
+
+        return fetch_log
+
+    def _fetch_account(self, client, facility_id: int, label: str, date_from: date, date_to: date,
+                       fetch_log: FetchLog, errors: list) -> None:
+        """Search + stage one account's transactions (both directions) under `facility_id`.
+        Transaction IDs are unique on the Riayati server, so a file already staged by another account is skipped."""
         # Fetch both directions: remittance (received) + claims (sent)
         for direction, xml_type in [
             (DIRECTION_RECEIVED, "RiayatiRemittanceAdvice"),
@@ -762,8 +822,8 @@ class RiayatiSyncService:
                     seen_ids=set(),
                 )
                 log.info(
-                    "Riayati facility=%d %s -> %d entities (%s -> %s)",
-                    facility_id, xml_type, len(entities), date_from, date_to,
+                    "Riayati facility=%d account=%s %s -> %d entities (%s -> %s)",
+                    facility_id, label, xml_type, len(entities), date_from, date_to,
                 )
 
                 for ent in entities:
@@ -807,46 +867,20 @@ class RiayatiSyncService:
                         self.db.commit()
 
                     except RiayatiInactiveFacilityError:
-                        raise   # bubble up -- caught below
+                        raise   # bubble up -- handled per account in run_sync_pipeline
                     except Exception as exc:
-                        log.error("Riayati View tx %s failed: %s", tx_id, exc)
-                        errors.append(f"View {tx_id}: {exc}")
+                        log.error("Riayati account=%s View tx %s failed: %s", label, tx_id, exc)
+                        errors.append(f"[{label}] View {tx_id}: {exc}")
                         fetch_log.records_failed += 1
                         self.db.commit()
 
-            except RiayatiInactiveFacilityError as exc:
-                log.warning("Riayati facility=%d INACTIVE: %s", facility_id, exc)
-                fetch_log.completed_at = datetime.utcnow()
-                fetch_log.status       = "inactive"
-                fetch_log.error_detail = {
-                    "error": str(exc),
-                    "action": (
-                        "Email RiayatiPO@mohap.gov.ae to reactivate facility "
-                        f"license {facility.license_id} after API key regeneration."
-                    ),
-                }
-                self.db.commit()
-                return fetch_log
+            except RiayatiInactiveFacilityError:
+                raise
 
             except Exception as exc:
-                log.error("Riayati Search direction=%d failed: %s", direction, exc)
-                errors.append(f"Search direction={direction}: {exc}")
+                log.error("Riayati account=%s Search direction=%d failed: %s", label, direction, exc)
+                errors.append(f"[{label}] Search direction={direction}: {exc}")
 
-        # Parse all pending Riayati records for this facility
-        parsed = parser.run_pending(facility_id=facility_id)
-        fetch_log.records_parsed = parsed
-        if parser.quarantined:
-            # Parse failures must not hide behind a 'success' status
-            fetch_log.records_failed += parser.quarantined
-            errors.append(f"{parser.quarantined} file(s) failed to parse (quarantined)")
-
-        fetch_log.completed_at = datetime.utcnow()
-        fetch_log.status       = "success" if not errors else "partial"
-        if errors:
-            fetch_log.error_detail = {"errors": errors}
-        self.db.commit()
-
-        return fetch_log
 
     # -- Bulk (historical) backfill --------------------------------------------
     def run_bulk_fetch(

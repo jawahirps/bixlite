@@ -95,7 +95,9 @@ def main() -> None:
                    facility_code,
                    facility_name,
                    COALESCE(eclaimlink_username, '') AS dha_user,
-                   riayati_username IS NOT NULL       AS has_riayati
+                   (riayati_username IS NOT NULL
+                    OR EXISTS (SELECT 1 FROM facility_riayati_accounts a
+                               WHERE a.facility_id = facilities.id AND a.is_active)) AS has_riayati
             FROM   facilities
             WHERE  is_active = true
               AND  facility_code NOT IN :skip_codes

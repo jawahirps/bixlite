@@ -59,8 +59,38 @@ class Facility(Base):
     daily_receipts   : Mapped[List["DailyReceipt"]]  = relationship(back_populates="facility")
     payer_mappings   : Mapped[List["ReceiptPayerMapping"]] = relationship(back_populates="facility")
 
+    riayati_accounts : Mapped[List["FacilityRiayatiAccount"]] = relationship(
+        back_populates="facility", cascade="all, delete-orphan", order_by="FacilityRiayatiAccount.id")
+
     def __repr__(self) -> str:
         return f"<Facility {self.facility_code} — {self.facility_name}>"
+
+
+class FacilityRiayatiAccount(Base):
+    """
+    Extra Riayati Post Office account for a facility (the primary one is facilities.riayati_username /
+    riayati_password). Used when a facility moves regulator but keeps one claim history — e.g. Sabah Al Noor,
+    RHA licence until Aug 2026, SHA licence from 1 Sep 2026. The fetch pulls every active account into the same
+    facility, so RAs and resubmissions match their claims by claim ID whichever account they arrive on.
+    """
+    __tablename__ = "facility_riayati_accounts"
+
+    id               : Mapped[int]           = mapped_column(Integer, primary_key=True)
+    facility_id      : Mapped[int]           = mapped_column(Integer, ForeignKey("facilities.id", ondelete="CASCADE"), nullable=False)
+    label            : Mapped[str]           = mapped_column(String(50), nullable=False)        # e.g. "SHA"
+    username         : Mapped[str]           = mapped_column(String(100), nullable=False)
+    password         : Mapped[str]           = mapped_column(String(100), nullable=False)
+    license_id       : Mapped[Optional[str]] = mapped_column(String(50))
+    active_from      : Mapped[Optional[date]]= mapped_column(Date)      # first visit date on this licence (info)
+    is_active        : Mapped[bool]          = mapped_column(Boolean, nullable=False, default=True)
+    created_at       : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now())
+    updated_at       : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now(), onupdate=func.now())
+
+    facility         : Mapped["Facility"]    = relationship(back_populates="riayati_accounts")
+
+    __table_args__ = (
+        Index("idx_riayati_accounts_facility", "facility_id"),
+    )
 
 
 # ---------------------------------------------------------------------------

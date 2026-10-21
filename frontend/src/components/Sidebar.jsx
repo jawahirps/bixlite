@@ -14,24 +14,33 @@ const navItems = [
 ];
 
 const linkClasses = ({ isActive }) =>
-  `block rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
-    isActive ? "bg-ghaf-600 text-white" : "text-slate-300 hover:bg-slate-800 hover:text-white"
+  `flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-ghaf-600 ${
+    isActive ? "bg-sage-mint font-semibold text-ghaf-600" : "text-ink hover:bg-sage-mint"
   }`;
 
 export default function Sidebar() {
   return (
-    <aside className="flex h-full w-64 flex-col bg-slate-900 px-4 py-6">
-      <div className="mb-8 px-2">
-        <p className="text-lg font-bold tracking-wide text-white">Ghaf App</p>
-        <p className="text-xs text-slate-400">RCM &amp; Clinical Platform</p>
+    <aside className="flex h-full w-64 flex-col bg-sage px-3 py-6">
+      <div className="mb-8 flex items-center gap-2.5 px-3">
+        <img src="/ghaf-mark.png" alt="" className="h-8 w-8" />
+        <div className="leading-tight text-ink">
+          <p className="text-sm font-semibold tracking-[0.16em]">GHAF</p>
+          <p className="text-[10px] font-semibold tracking-[0.12em]">BUSINESS SERVICES</p>
+        </div>
       </div>
-      <nav className="flex flex-1 flex-col gap-1">
-        {navItems.map((item) => (
+      <nav className="flex flex-1 flex-col gap-0.5 overflow-y-auto" aria-label="Main">
+        {navItems.map((item, i) => (
           <NavLink key={item.to} to={item.to} end={item.end} className={linkClasses}>
+            <span className="w-5 text-[10px] font-semibold tracking-[0.1em] text-ghaf-600">
+              {String(i + 1).padStart(2, "0")}
+            </span>
             {item.label}
           </NavLink>
         ))}
       </nav>
+      <p className="px-3 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-600">
+        Rooted in healthcare
+      </p>
     </aside>
   );
 }

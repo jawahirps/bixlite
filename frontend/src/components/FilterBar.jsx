@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import apiClient from "../api/client";
 
 const selectClass =
-  "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm focus:border-ghaf-400 focus:outline-none focus:ring-1 focus:ring-ghaf-400";
+  "w-full rounded border border-sage-line bg-white px-3 py-2 text-sm text-ink focus:border-ghaf-600 focus:outline-none focus:ring-2 focus:ring-ghaf-600/20";
 
-const labelClass = "mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500";
+const labelClass = "mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-600";
 
 // ── Multi-select facility dropdown ────────────────────────────────────────
 function FacilityMultiSelect({ facilities, selectedIds, onChange }) {
@@ -40,7 +40,7 @@ function FacilityMultiSelect({ facilities, selectedIds, onChange }) {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm focus:border-ghaf-400 focus:outline-none focus:ring-1 focus:ring-ghaf-400 flex items-center justify-between gap-2"
+        className="w-full rounded border border-sage-line bg-white px-3 py-2 text-sm text-ink focus:border-ghaf-600 focus:outline-none focus:ring-2 focus:ring-ghaf-600/20 flex items-center justify-between gap-2"
       >
         <span className={selectedIds.length === 0 ? "text-slate-400" : "text-slate-700"}>
           {label}
@@ -55,7 +55,7 @@ function FacilityMultiSelect({ facilities, selectedIds, onChange }) {
       </button>
 
       {open && (
-        <div className="absolute z-30 mt-1 w-full min-w-[260px] rounded-xl border border-slate-200 bg-white shadow-xl">
+        <div className="absolute z-30 mt-1 w-full min-w-[260px] rounded-lg border border-hairline bg-white shadow-[0_8px_24px_rgba(11,34,51,0.10)]">
           {/* All Facilities option */}
           <button
             type="button"
@@ -156,7 +156,7 @@ export default function FilterBar({ filters, onChange }) {
   const reset = () => onChange({});
 
   return (
-    <div className="rounded-xl bg-white p-4 shadow-sm">
+    <div className="rounded-lg border border-hairline bg-sage p-5">
       {/* Row 1: Entity filters */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
         <div>
@@ -273,10 +273,10 @@ export default function FilterBar({ filters, onChange }) {
       </div>
 
       <div className="mt-3 flex items-center justify-between">
-        <p className="text-xs text-slate-400">
+        <p className="text-xs text-slate-600">
           {filters.date_field === "remittance_date"
-            ? "📅 Filtering by Remittance Transaction Date"
-            : "📅 Filtering by Treatment Date"}
+            ? "Filtering by remittance transaction date"
+            : "Filtering by treatment date"}
           {selectedFacilityIds.length > 0 && (
             <span className="ml-2 text-ghaf-600 font-medium">
               · {selectedFacilityIds.length} {selectedFacilityIds.length === 1 ? "facility" : "facilities"} selected
@@ -286,7 +286,7 @@ export default function FilterBar({ filters, onChange }) {
         <button
           type="button"
           onClick={reset}
-          className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
+          className="rounded border border-sage-line bg-white px-3 py-1.5 text-xs font-medium text-ink hover:bg-sage-mint"
         >
           Clear filters
         </button>

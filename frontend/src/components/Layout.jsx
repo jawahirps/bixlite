@@ -9,8 +9,8 @@ export default function Layout() {
     <div className="flex h-screen w-screen overflow-hidden">
       <Sidebar />
       <div className="flex flex-1 flex-col overflow-hidden">
-        <header className="flex items-center justify-between border-b border-slate-200 bg-white px-6 py-3">
-          <div />
+        <header className="flex items-center justify-between border-b border-hairline bg-white px-8 py-3">
+          <p className="gh-eyebrow">Revenue cycle · by Ghaf</p>
           <div className="flex items-center gap-4">
             <div className="text-right">
               <p className="text-sm font-semibold text-slate-800">{user?.full_name}</p>
@@ -18,13 +18,13 @@ export default function Layout() {
             </div>
             <button
               onClick={logout}
-              className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-100"
+              className="gh-btn-secondary py-1.5"
             >
               Sign out
             </button>
           </div>
         </header>
-        <main className="flex-1 overflow-y-auto bg-slate-100 p-6">
+        <main className="flex-1 overflow-y-auto bg-white px-8 py-8">
           <Outlet />
         </main>
       </div>

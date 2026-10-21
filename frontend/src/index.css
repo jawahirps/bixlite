@@ -3,5 +3,23 @@
 @tailwind utilities;
 
 body {
-  @apply bg-slate-100 text-slate-900;
+  @apply bg-white font-sans text-ink antialiased;
+}
+
+@layer components {
+  .gh-eyebrow {
+    @apply text-[11px] font-semibold uppercase leading-[14px] tracking-[0.14em] text-ghaf-600;
+  }
+  .gh-h1 {
+    @apply mt-2 font-display text-[30px] font-medium leading-[38px] tracking-[-0.015em] text-ink;
+  }
+  .gh-card {
+    @apply rounded-lg border border-hairline bg-white;
+  }
+  .gh-btn {
+    @apply rounded px-4 py-2.5 text-[13px] font-medium bg-ink-deep text-white hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ghaf-600 disabled:opacity-50;
+  }
+  .gh-btn-secondary {
+    @apply rounded border border-sage-line px-4 py-2.5 text-[13px] font-medium text-ink hover:bg-sage focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ghaf-600;
+  }
 }

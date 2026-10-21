@@ -196,7 +196,8 @@ export default function ClinicalProfiles() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Clinical Profiles</h1>
+          <p className="gh-eyebrow">02 — Patients</p>
+          <h1 className="gh-h1">Clinical Profiles</h1>
           <p className="text-sm text-slate-500">Patient demographic, payer, and clinical setup.</p>
         </div>
         <button

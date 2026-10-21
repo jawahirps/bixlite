@@ -118,7 +118,8 @@ export default function Dashboard() {
     <div className="space-y-8">
       {/* ── Page Header ── */}
       <div>
-        <h1 className="text-2xl font-bold text-slate-900">Overview</h1>
+        <p className="gh-eyebrow">01 — Overview</p>
+        <h1 className="gh-h1">Overview</h1>
         <p className="text-sm text-slate-500 mt-0.5">
           Live snapshot of claims, collections, and pipeline health.
         </p>

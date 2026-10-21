@@ -137,7 +137,8 @@ export default function Calibration() {
     <div className="space-y-6">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-slate-900">Denial Intelligence</h1>
+        <p className="gh-eyebrow">09 — Denials</p>
+        <h1 className="gh-h1">Denial Intelligence</h1>
         <p className="text-sm text-slate-500">
           Layer 3 — Correlates scrub findings with RA denial outcomes to calibrate rule weights
           and surface resubmission candidates.

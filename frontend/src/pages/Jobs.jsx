@@ -246,7 +246,8 @@ export default function Jobs() {
       {/* Header */}
       <div className="mb-6 flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Background Jobs</h1>
+          <p className="gh-eyebrow">07 — Data sync</p>
+          <h1 className="gh-h1">Background Jobs</h1>
           <p className="text-sm text-slate-500 mt-1">
             Trigger data sync and re-parse jobs manually. Nightly fetch runs automatically at 2 AM.
           </p>

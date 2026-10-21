@@ -326,7 +326,8 @@ export default function Analytics() {
       {/* Page header */}
       <div className="flex items-start justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Analytics &amp; Financial Insights</h1>
+          <p className="gh-eyebrow">04 — Revenue intelligence</p>
+          <h1 className="gh-h1">Analytics &amp; Financial Insights</h1>
           <p className="text-sm text-slate-500">
             Submission, resubmission, remittance, and denial performance — filterable by facility,
             receiver, payer, encounter type, and department.

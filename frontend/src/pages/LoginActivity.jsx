@@ -17,7 +17,8 @@ export default function LoginActivity() {
   return (
     <div className="space-y-4">
       <div>
-        <h1 className="text-2xl font-bold text-slate-900">Login Activity</h1>
+        <p className="gh-eyebrow">06 — Audit</p>
+        <h1 className="gh-h1">Login Activity</h1>
         <p className="text-sm text-slate-500">Audit trail of authentication attempts across the platform.</p>
       </div>
 

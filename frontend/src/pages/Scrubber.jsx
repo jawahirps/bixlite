@@ -974,7 +974,8 @@ export default function Scrubber() {
     <div className="mx-auto max-w-7xl space-y-6 p-6">
       {/* Page header */}
       <div>
-        <h1 className="text-2xl font-bold text-slate-800">Claim Scrubber</h1>
+        <p className="gh-eyebrow">08 — Pre-submission</p>
+        <h1 className="gh-h1">Claim Scrubber</h1>
         <p className="mt-1 text-sm text-slate-500">
           Upload the batch (ERP test XML or Excel) — generates the claim query Excel in the Ghaf template, plus DHA
           business rules and XML / coding checks.

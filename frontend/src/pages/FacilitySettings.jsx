@@ -218,7 +218,8 @@ export default function FacilitySettings() {
     <div className="space-y-6">
       <div className="flex items-start justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Facility Settings</h1>
+          <p className="gh-eyebrow">05 — Setup</p>
+          <h1 className="gh-h1">Facility Settings</h1>
           <p className="text-sm text-slate-500">
             Manage eClaimLink credentials for live data sync. Fields shown in amber need real values.
           </p>

@@ -271,7 +271,8 @@ export default function DhaSync() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-slate-900">XML Scrub Monitor</h1>
+        <p className="gh-eyebrow">03 — Submission quality</p>
+        <h1 className="gh-h1">XML Scrub Monitor</h1>
         <p className="text-sm text-slate-500">
           Quality check on fetched ClaimSubmission files — click any row to see per-claim findings.
         </p>

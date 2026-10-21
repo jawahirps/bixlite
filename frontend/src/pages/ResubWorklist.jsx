@@ -194,7 +194,8 @@ export default function ResubWorklist() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-slate-900">Resubmission Worklist</h1>
+        <p className="gh-eyebrow">10 — Resubmission</p>
+        <h1 className="gh-h1">Resubmission Worklist</h1>
         <p className="text-sm text-slate-500">
           {facilityView
             ? "Claims where the Ghaf team needs your input to resubmit before the payer deadline."

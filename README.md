@@ -63,7 +63,7 @@ On first run, the app creates SQLite tables (or your configured Postgres DB)
 and seeds:
 
 - A demo facility (`GHAF-001`)
-- An admin user: `admin@ghafapp.local` / `ChangeMe123!` — **change this immediately**
+- An admin user, only if `SEED_ADMIN_EMAIL` and `SEED_ADMIN_PASSWORD` are set in `backend/.env`
 
 API docs: http://localhost:8000/docs
 

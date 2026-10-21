@@ -111,8 +111,8 @@ Never commit `.env` to source control — it's already in `.gitignore`.
 
 3. On first start, `app.main` calls `init_db()` (creates all tables from
    `models.py`) and `run_seed()` (creates a default facility `GHAF-001`
-   and an admin user `admin@ghafapp.local` / `ChangeMe123!` **only if the
-   database is empty**).
+   if the database is empty, plus an admin user only when `SEED_ADMIN_EMAIL`
+   and `SEED_ADMIN_PASSWORD` are set in `backend/.env`).
 
    **Change the seeded admin password immediately after first login**, or
    create your own admin user and remove/disable the seed step before

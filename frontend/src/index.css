@@ -13,9 +13,9 @@ body {
   .gh-h1 {
     @apply mt-2 font-display text-[30px] font-medium leading-[38px] tracking-[-0.015em] text-ink;
   }
-  /* Product mark, as on ghafservices.com: "Bi" in brand teal, the rest in ink. */
+  /* BIX wordmark, as on bix.ghafservices.com: Geist 800, tight tracking. */
   .gh-product {
-    @apply font-product font-bold tracking-[-0.04em] text-ink-deep;
+    @apply font-product font-extrabold tracking-[-0.035em] text-ink-deep;
   }
   .gh-card {
     @apply rounded-lg border border-hairline bg-white;

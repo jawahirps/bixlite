@@ -1,4 +1,5 @@
 import { NavLink } from "react-router-dom";
+import BixLogo from "./BixLogo";
 
 const navItems = [
   { to: "/", label: "Dashboard", end: true },
@@ -21,14 +22,8 @@ const linkClasses = ({ isActive }) =>
 export default function Sidebar() {
   return (
     <aside className="flex h-full w-64 flex-col bg-sage px-3 py-6">
-      <div className="mb-8 flex items-center gap-2.5 px-3">
-        <img src="/ghaf-mark.png" alt="" className="h-8 w-8" />
-        <div className="leading-tight">
-          <p className="gh-product text-xl">
-            <span className="text-ghaf-600">Bi</span>x Lite
-          </p>
-          <p className="mt-0.5 text-[10px] font-semibold tracking-[0.12em] text-slate-600">BY GHAF</p>
-        </div>
+      <div className="mb-8 px-3">
+        <BixLogo caption="Business intelligence · by Ghaf" />
       </div>
       <nav className="flex flex-1 flex-col gap-0.5 overflow-y-auto" aria-label="Main">
         {navItems.map((item, i) => (

@@ -1,3 +1,4 @@
+import BixLogo from "../components/BixLogo";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
@@ -28,14 +29,8 @@ export default function Login() {
   return (
     <div className="flex h-screen w-screen items-center justify-center bg-slate-900">
       <div className="w-full max-w-sm rounded-2xl bg-white p-8 shadow-xl">
-        <div className="mb-6 text-center">
-          <img src="/ghaf-mark.png" alt="" className="mx-auto mb-3 h-10 w-10" />
-          <h1 className="gh-product text-3xl">
-            <span className="text-ghaf-600">Bi</span>x Lite
-          </h1>
-          <p className="mt-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-600">
-            Revenue intelligence · by Ghaf
-          </p>
+        <div className="mb-6 flex justify-center">
+          <BixLogo size="lg" caption="Business intelligence · by Ghaf" />
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">

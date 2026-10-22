@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="60" height="60" viewBox="10 1 60 60">
+  <!-- BIX cube mark (resting state), from bix.ghafservices.com -->
+  <g transform="translate(40,43.3) scale(.955) translate(-40,-43.3)">
+    <polygon points="40,56 29,49.65 29,36.95 40,43.3" fill="#00596F"/>
+    <polygon points="40,56 51,49.65 51,36.95 40,43.3" fill="#3D9CB2"/>
+  </g>
+  <g transform="translate(51,36.95) scale(.955) translate(-51,-36.95)">
+    <polygon points="51,49.65 62,43.3 62,30.6 51,36.95" fill="#2E8A9E"/>
+  </g>
+  <g transform="translate(29,36.95) scale(.955) translate(-29,-36.95)">
+    <polygon points="29,49.65 18,43.3 18,30.6 29,36.95" fill="#014356"/>
+  </g>
+  <g transform="translate(40,30.6) scale(.955) translate(-40,-30.6)">
+    <polygon points="40,43.3 29,36.95 29,24.25 40,30.6" fill="#014356"/>
+    <polygon points="40,43.3 51,36.95 51,24.25 40,30.6" fill="#2E8A9E"/>
+    <polygon points="40,30.6 51,24.25 40,17.9 29,24.25" fill="#8CD3DF"/>
+  </g>
+  <g transform="translate(51,24.25) scale(.955) translate(-51,-24.25)">
+    <polygon points="51,36.95 62,30.6 62,17.9 51,24.25" fill="#3D9CB2"/>
+    <polygon points="51,24.25 62,17.9 51,11.55 40,17.9" fill="#76C3D2"/>
+  </g>
+  <g transform="translate(29,24.25) scale(.955) translate(-29,-24.25)">
+    <polygon points="29,36.95 18,30.6 18,17.9 29,24.25" fill="#00596F"/>
+    <polygon points="29,24.25 40,17.9 29,11.55 18,17.9" fill="#76C3D2"/>
+  </g>
+  <g transform="translate(40,17.9) scale(.955) translate(-40,-17.9)">
+    <polygon points="40,17.9 51,11.55 40,5.2 29,11.55" fill="#8CD3DF"/>
+  </g>
+</svg>

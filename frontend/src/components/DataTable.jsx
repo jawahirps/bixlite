@@ -11,7 +11,7 @@ export default function DataTable({ columns, rows, emptyLabel }) {
             {columns.map((col) => (
               <th
                 key={col.key}
-                className="whitespace-nowrap px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.06em] text-slate-600"
+                className="sticky top-0 z-10 bg-sage-mint whitespace-nowrap px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.06em] text-slate-600"
               >
                 {col.label}
               </th>

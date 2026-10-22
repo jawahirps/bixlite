@@ -38,9 +38,9 @@ function fmtDate(s) {
 }
 
 function DaysChip({ d, bucket }) {
-  if (bucket === "expired" || d < 0) return <span className="rounded-full bg-slate-200 px-2 py-0.5 text-xs text-slate-500">Expired</span>;
-  if (d <= 5) return <span className="rounded-full bg-orange-100 px-2 py-0.5 text-xs font-bold text-orange-700">{d}d left</span>;
-  return <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs text-emerald-700">{d}d left</span>;
+  if (bucket === "expired" || d < 0) return <span className="gh-chip gh-chip-neutral">Expired</span>;
+  if (d <= 5) return <span className="gh-chip gh-chip-pending font-bold">{d}d left</span>;
+  return <span className="gh-chip gh-chip-paid">{d}d left</span>;
 }
 
 function CopyButton({ text }) {
@@ -48,7 +48,7 @@ function CopyButton({ text }) {
   return (
     <button
       onClick={() => { navigator.clipboard.writeText(text || ""); setDone(true); setTimeout(() => setDone(false), 1500); }}
-      className="rounded border border-slate-300 px-2 py-0.5 text-xs text-slate-600 hover:bg-slate-50">
+      className="gh-btn-secondary gh-btn-sm">
       {done ? "Copied" : "Copy"}
     </button>
   );
@@ -204,33 +204,33 @@ export default function ResubWorklist() {
       </div>
 
       {/* Facility + actions */}
-      <div className="flex flex-wrap items-end gap-3 rounded-xl bg-white p-4 shadow-sm">
+      <div className="gh-card p-4 flex flex-wrap items-end gap-3">
         <div className="min-w-48 flex-1">
           <label className="mb-1 block text-xs font-medium text-slate-600">Facility</label>
           <select value={facilityId} disabled={facilityView}
             onChange={e => changeFacility(Number(e.target.value))}
-            className="w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm focus:border-ghaf-500 focus:outline-none focus:ring-1 focus:ring-ghaf-500">
+            className="gh-input w-full py-1.5">
             {facilities.filter(f => f.facility_code !== "GHAF-001").map(f => (
               <option key={f.id} value={f.id}>{f.facility_name}</option>
             ))}
           </select>
         </div>
         <button onClick={() => load(facilityId)} disabled={loading}
-          className="rounded-lg bg-ghaf-600 px-4 py-1.5 text-sm font-semibold text-white hover:bg-ghaf-700 disabled:opacity-60">
+          className="gh-btn gh-btn-sm">
           {loading ? "Loading…" : "Refresh"}
         </button>
         {!facilityView && (
           <button onClick={() => exportExcel("ghaf")}
-            className="rounded-lg border border-slate-300 px-4 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50">
+            className="gh-btn-secondary gh-btn-sm">
             Excel — Ghaf team
           </button>
         )}
         <button onClick={() => exportExcel("reconciliation")}
-          className="rounded-lg border border-slate-300 px-4 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50">
+          className="gh-btn-secondary gh-btn-sm">
           Excel — Reconciliation
         </button>
         <button onClick={() => exportExcel("facility")}
-          className="rounded-lg border border-slate-300 px-4 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50">
+          className="gh-btn-secondary gh-btn-sm">
           Excel — Facility requests
         </button>
       </div>
@@ -248,7 +248,7 @@ export default function ResubWorklist() {
             { label: "Needs facility", v: s.facility, c: "bg-indigo-50 text-indigo-800" },
             { label: "Reconciliation", v: s.reconciliation, c: "bg-rose-50 text-rose-800" },
           ].map(k => (
-            <div key={k.label} className={`rounded-xl p-4 shadow-sm ${k.c}`}>
+            <div key={k.label} className={`rounded-lg border border-hairline p-4 ${k.c}`}>
               <p className="text-2xl font-bold">{k.v.count.toLocaleString()}</p>
               <p className="mt-0.5 text-xs font-medium opacity-80">{k.label}</p>
               <p className="mt-1 text-xs opacity-70">AED {fmt(k.v.denied)} denied · ~{fmt(k.v.expected)} expected</p>
@@ -283,10 +283,10 @@ export default function ResubWorklist() {
           <div className="flex flex-wrap gap-2">
             <input placeholder="Search claim, code, receiver, payer, auth ID, clinician, member…" value={filters.q}
               onChange={e => setFilters(f => ({ ...f, q: e.target.value }))}
-              className="min-w-64 flex-1 rounded-lg border border-slate-300 px-3 py-1.5 text-sm" />
+              className="gh-input min-w-64 flex-1 py-1.5" />
             {!facilityView && (
               <select value={filters.owner} onChange={e => setFilters(f => ({ ...f, owner: e.target.value }))}
-                className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm">
+                className="gh-input px-2 py-1.5">
                 <option value="">All owners</option><option>Ghaf</option><option>Facility</option>
               </select>
             )}
@@ -295,17 +295,17 @@ export default function ResubWorklist() {
               Group by claim
             </label>
             <select value={filters.priority} onChange={e => setFilters(f => ({ ...f, priority: e.target.value }))}
-              className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm">
+              className="gh-input px-2 py-1.5">
               <option value="">All priorities</option><option>P1</option><option>P2</option><option>P3</option>
             </select>
             <select value={filters.category} onChange={e => setFilters(f => ({ ...f, category: e.target.value }))}
-              className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm">
+              className="gh-input px-2 py-1.5">
               <option value="">All categories</option>
               {categories.map(c => <option key={c}>{c}</option>)}
             </select>
           </div>
 
-          <div className="overflow-hidden rounded-xl bg-white shadow-sm">
+          <div className="gh-card overflow-hidden">
             <div className="overflow-x-auto">
               <table className="min-w-full divide-y divide-slate-200 text-sm">
                 <thead className="bg-slate-50">
@@ -337,7 +337,7 @@ export default function ResubWorklist() {
                         statuses={data.statuses} facilityView={facilityView} />
                     ))}
                   {shown.length === 0 && (
-                    <tr><td colSpan={9} className="px-3 py-8 text-center text-slate-400">
+                    <tr><td colSpan={9} className="px-3 py-8 text-center text-slate-600">
                       {loading ? "Loading…" : "Nothing here."}
                     </td></tr>
                   )}
@@ -375,19 +375,19 @@ function Row({ x, expanded, onToggle, onSave, saving, statuses, facilityView, ne
         </td>
         <td className="whitespace-nowrap px-3 py-2">
           <DaysChip d={x.days_left} bucket={x.bucket} />
-          <div className="mt-0.5 text-xs text-slate-400">{fmtDate(x.deadline)}</div>
+          <div className="mt-0.5 text-xs text-slate-600">{fmtDate(x.deadline)}</div>
         </td>
         <td className={`px-3 py-2 ${nested ? "pl-8" : ""}`}>
           {nested
-            ? <div className="font-medium text-slate-700">↳ {x.activity_code} <span className="text-xs font-normal text-slate-400">· activity {x.activity_id}</span></div>
+            ? <div className="font-medium text-slate-700">↳ {x.activity_code} <span className="text-xs font-normal text-slate-600">· activity {x.activity_id}</span></div>
             : <>
                 <div className="font-medium text-slate-800">{x.claim_id}</div>
-                <div className="text-xs text-slate-400">{x.activity_code} · {x.activity_id}</div>
+                <div className="text-xs text-slate-600">{x.activity_code} · {x.activity_id}</div>
               </>}
         </td>
         <td className="max-w-[220px] px-3 py-2 text-xs">
           <div className="truncate text-slate-700" title={x.receiver}>{x.receiver || "—"}</div>
-          <div className="truncate text-slate-400" title={x.payer}>{x.payer || "—"}</div>
+          <div className="truncate text-slate-600" title={x.payer}>{x.payer || "—"}</div>
         </td>
         <td className="max-w-xs px-3 py-2">
           <div className="font-mono text-xs font-semibold text-slate-700">{x.denial_code}</div>
@@ -402,21 +402,21 @@ function Row({ x, expanded, onToggle, onSave, saving, statuses, facilityView, ne
         {!facilityView && (
           <>
             <td className="px-3 py-2 text-right text-xs tabular-nums text-slate-500">
-              {fmt(x.expected_recovery)}<div className="text-slate-400">{x.recovery_pct}%</div>
+              {fmt(x.expected_recovery)}<div className="text-slate-600">{x.recovery_pct}%</div>
             </td>
             <td className="px-3 py-2">
               <span className={`rounded px-2 py-0.5 text-xs font-medium ${OWNER_STYLE[x.owner]}`}>{x.owner}</span>
-              {x.owner === "Facility" && x.facility_role && <div className="mt-0.5 text-xs text-slate-400">{x.facility_role}</div>}
+              {x.owner === "Facility" && x.facility_role && <div className="mt-0.5 text-xs text-slate-600">{x.facility_role}</div>}
             </td>
           </>
         )}
         <td className="px-3 py-2 text-xs" onClick={e => e.stopPropagation()}>
           <select value={x.status} disabled={saving || x.bucket === "closed_resubmitted"}
             onChange={e => onSave({ status: e.target.value })}
-            className="rounded border border-slate-300 px-1.5 py-1 text-xs">
+            className="gh-input px-1.5 py-1 text-xs">
             {(facilityView ? [x.status, ...facilityStatuses.filter(s => s !== x.status)] : statuses).map(s => <option key={s}>{s}</option>)}
           </select>
-          {x.updated_by && <div className="mt-0.5 text-[10px] text-slate-400">{x.updated_by}</div>}
+          {x.updated_by && <div className="mt-0.5 text-[10px] text-slate-600">{x.updated_by}</div>}
         </td>
       </tr>
       {expanded && (
@@ -425,14 +425,14 @@ function Row({ x, expanded, onToggle, onSave, saving, statuses, facilityView, ne
             <div className="grid gap-4 text-sm lg:grid-cols-2">
               <div className="space-y-2">
                 <Field label="Denial reason (from payer)">{x.denial_reason || "—"}</Field>
-                <div className="grid grid-cols-2 gap-x-4 gap-y-2 rounded-lg border border-slate-200 bg-white p-3 sm:grid-cols-3">
+                <div className="gh-card grid grid-cols-2 gap-x-4 gap-y-2 p-3 sm:grid-cols-3">
                   <Field label="Receiver (TPA)">{x.receiver || "—"}</Field>
                   <Field label="Payer (insurer)">{x.payer || "—"}</Field>
                   <Field label="Member ID"><span className="font-mono">{x.member_id || "—"}</span></Field>
                   <Field label="Auth ID">
                     {x.authorization_id
                       ? <span className="flex items-center gap-2 font-mono">{x.authorization_id} <CopyButton text={x.authorization_id} /></span>
-                      : <span className="text-slate-400">none on claim</span>}
+                      : <span className="text-slate-600">none on claim</span>}
                   </Field>
                   <Field label="Treatment / RA">{fmtDate(x.treatment_date)} · {fmtDate(x.ra_date)}</Field>
                   <Field label="Clinician">{x.clinician || "—"}</Field>
@@ -470,7 +470,7 @@ function Row({ x, expanded, onToggle, onSave, saving, statuses, facilityView, ne
                       <label className="text-xs font-medium text-slate-600">Route to
                         <select value={x.owner} disabled={saving}
                           onChange={e => onSave({ owner_override: e.target.value })}
-                          className="ml-2 rounded border border-slate-300 px-1.5 py-1 text-xs">
+                          className="gh-input ml-2 px-1.5 py-1 text-xs">
                           <option>Ghaf</option><option>Facility</option>
                         </select>
                       </label>
@@ -509,20 +509,20 @@ function ClaimGroup({ g, open, onToggle, onSaveAll, facilityView, statuses, chil
         </td>
         <td className="whitespace-nowrap px-3 py-2">
           <DaysChip d={g.days_left} bucket={x.bucket} />
-          <div className="mt-0.5 text-xs text-slate-400">{fmtDate(x.deadline)}</div>
+          <div className="mt-0.5 text-xs text-slate-600">{fmtDate(x.deadline)}</div>
         </td>
         <td className="px-3 py-2">
           <div className="flex items-center gap-2 font-semibold text-slate-800">
-            <span className="text-slate-400">{open ? "▾" : "▸"}</span>{x.claim_id}
+            <span className="text-slate-600">{open ? "▾" : "▸"}</span>{x.claim_id}
           </div>
           <div className="mt-0.5 text-xs">
             <span className="rounded bg-rose-50 px-1.5 py-0.5 font-semibold text-rose-700">{n} of {total} activities denied</span>
-            <span className="ml-2 text-slate-400">claim net AED {fmt(x.claim_net)}</span>
+            <span className="ml-2 text-slate-600">claim net AED {fmt(x.claim_net)}</span>
           </div>
         </td>
         <td className="max-w-[220px] px-3 py-2 text-xs">
           <div className="truncate text-slate-700" title={x.receiver}>{x.receiver || "—"}</div>
-          <div className="truncate text-slate-400" title={x.payer}>{x.payer || "—"}</div>
+          <div className="truncate text-slate-600" title={x.payer}>{x.payer || "—"}</div>
         </td>
         <td className="max-w-xs px-3 py-2">
           <div className="font-mono text-xs font-semibold text-slate-700">{codes.slice(0, 4).join(", ")}{codes.length > 4 ? " …" : ""}</div>
@@ -542,7 +542,7 @@ function ClaimGroup({ g, open, onToggle, onSaveAll, facilityView, statuses, chil
           {allStatus.length === 1 ? <span className="text-slate-600">{allStatus[0]}</span> : <span className="text-slate-500">mixed</span>}
           {!facilityView && (
             <select value="" onChange={e => e.target.value && onSaveAll(e.target.value)}
-              className="mt-1 block rounded border border-slate-300 px-1.5 py-1 text-xs">
+              className="gh-input mt-1 block px-1.5 py-1 text-xs">
               <option value="">Set all lines…</option>
               {statuses.map(st => <option key={st}>{st}</option>)}
             </select>
@@ -557,7 +557,7 @@ function ClaimGroup({ g, open, onToggle, onSaveAll, facilityView, statuses, chil
 function Field({ label, children }) {
   return (
     <div>
-      <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</div>
+      <div className="gh-label">{label}</div>
       <div className="mt-0.5 text-slate-700">{children}</div>
     </div>
   );
@@ -566,13 +566,13 @@ function Field({ label, children }) {
 function TextBox({ label, value, onChange, onSave, saving, single }) {
   return (
     <div>
-      <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</div>
+      <div className="gh-label mb-1">{label}</div>
       <div className="flex gap-2">
         {single
-          ? <input value={value} onChange={e => onChange(e.target.value)} className="flex-1 rounded border border-slate-300 px-2 py-1 text-sm" />
-          : <textarea value={value} onChange={e => onChange(e.target.value)} rows={2} className="flex-1 rounded border border-slate-300 px-2 py-1 text-sm" />}
+          ? <input value={value} onChange={e => onChange(e.target.value)} className="gh-input flex-1 px-2 py-1" />
+          : <textarea value={value} onChange={e => onChange(e.target.value)} rows={2} className="gh-input flex-1 px-2 py-1" />}
         <button onClick={onSave} disabled={saving}
-          className="self-start rounded bg-ghaf-600 px-3 py-1 text-xs font-semibold text-white hover:bg-ghaf-700 disabled:opacity-60">
+          className="gh-btn gh-btn-sm self-start">
           {saving ? "…" : "Save"}
         </button>
       </div>
@@ -607,7 +607,7 @@ function Playbook({ rows, setRows, canEdit, setError }) {
         {!canEdit && " Only admins and billing managers can edit."}
       </div>
       {rows.map(p => (
-        <div key={p.id} className="rounded-xl bg-white p-4 shadow-sm">
+        <div key={p.id} className="gh-card p-4">
           {editing === p.id ? (
             <div className="grid gap-3 md:grid-cols-2">
               {FIELDS.map(([k, label, short]) => (
@@ -615,21 +615,21 @@ function Playbook({ rows, setRows, canEdit, setError }) {
                   {label}
                   {k === "owner" ? (
                     <select value={draft.owner ?? p.owner} onChange={e => setDraft(d => ({ ...d, owner: e.target.value }))}
-                      className="mt-1 block w-full rounded border border-slate-300 px-2 py-1 text-sm">
+                      className="gh-input mt-1 block w-full px-2 py-1">
                       <option>Ghaf</option><option>Facility</option>
                     </select>
                   ) : short ? (
                     <input value={draft[k] ?? p[k] ?? ""} onChange={e => setDraft(d => ({ ...d, [k]: e.target.value }))}
-                      className="mt-1 block w-full rounded border border-slate-300 px-2 py-1 text-sm" />
+                      className="gh-input mt-1 block w-full px-2 py-1" />
                   ) : (
                     <textarea rows={2} value={draft[k] ?? p[k] ?? ""} onChange={e => setDraft(d => ({ ...d, [k]: e.target.value }))}
-                      className="mt-1 block w-full rounded border border-slate-300 px-2 py-1 text-sm" />
+                      className="gh-input mt-1 block w-full px-2 py-1" />
                   )}
                 </label>
               ))}
               <div className="flex gap-2 md:col-span-2">
-                <button onClick={() => save(p.id)} className="rounded bg-ghaf-600 px-4 py-1.5 text-sm font-semibold text-white hover:bg-ghaf-700">Save</button>
-                <button onClick={() => setEditing(null)} className="rounded border border-slate-300 px-4 py-1.5 text-sm">Cancel</button>
+                <button onClick={() => save(p.id)} className="gh-btn gh-btn-sm">Save</button>
+                <button onClick={() => setEditing(null)} className="gh-btn-secondary gh-btn-sm">Cancel</button>
               </div>
             </div>
           ) : (
@@ -652,7 +652,7 @@ function Playbook({ rows, setRows, canEdit, setError }) {
                 {p.facility_request && <Field label="What we ask the facility">{p.facility_request}</Field>}
                 <Field label="Documents">{p.documents || "—"}</Field>
                 <Field label="Draft comment"><span className="italic">{p.draft_comment}</span></Field>
-                {p.updated_by && <div className="text-[10px] text-slate-400">Last edited by {p.updated_by}</div>}
+                {p.updated_by && <div className="text-[10px] text-slate-600">Last edited by {p.updated_by}</div>}
               </div>
             </div>
           )}

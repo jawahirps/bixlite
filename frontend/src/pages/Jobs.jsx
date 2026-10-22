@@ -1,18 +1,19 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import apiClient from "../api/client";
+import { localISODate } from "../utils/format";
 import { useAuth } from "../context/AuthContext";
 
 const statusColors = {
-  success: "bg-emerald-100 text-emerald-700",
-  partial:  "bg-amber-100 text-amber-700",
-  failed:   "bg-red-100 text-red-700",
-  running:  "bg-blue-100 text-blue-700",
-  pending:  "bg-slate-100 text-slate-600",
+  success: "gh-chip-paid",
+  partial:  "gh-chip-pending",
+  failed:   "gh-chip-denied",
+  running:  "gh-chip-brand",
+  pending:  "gh-chip-neutral",
 };
 
 function StatusBadge({ status }) {
   return (
-    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${statusColors[status] || "bg-slate-200 text-slate-600"}`}>
+    <span className={`gh-chip ${statusColors[status] || "gh-chip-neutral"}`}>
       {status}
     </span>
   );
@@ -20,14 +21,14 @@ function StatusBadge({ status }) {
 
 function JobCard({ title, description, buttonLabel, onRun, loading, result, error, children }) {
   return (
-    <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+    <div className="gh-section">
       <h3 className="mb-1 text-base font-semibold text-slate-800">{title}</h3>
       <p className="mb-4 text-sm text-slate-500">{description}</p>
       {children}
       <button
         onClick={onRun}
         disabled={loading}
-        className="rounded-lg bg-ghaf-600 px-4 py-2 text-sm font-medium text-white hover:bg-ghaf-700 disabled:opacity-50 disabled:cursor-not-allowed"
+        className="gh-btn disabled:cursor-not-allowed"
       >
         {loading ? "Running…" : buttonLabel}
       </button>
@@ -74,11 +75,11 @@ export default function Jobs() {
   const [fetchResult,     setFetchResult]     = useState(null);
   const [fetchError,      setFetchError]      = useState(null);
   const [dateFrom,        setDateFrom]        = useState("");
-  const [dateTo,          setDateTo]          = useState(() => new Date().toISOString().slice(0, 10));
+  const [dateTo,          setDateTo]          = useState(() => localISODate());
 
   // Riayati (MOH / TMB API) fetch state
   const [riayatiFrom,     setRiayatiFrom]     = useState("");
-  const [riayatiTo,       setRiayatiTo]       = useState(() => new Date().toISOString().slice(0, 10));
+  const [riayatiTo,       setRiayatiTo]       = useState(() => localISODate());
   const [riayatiLoading,  setRiayatiLoading]  = useState(false);
   const [riayatiResult,   setRiayatiResult]   = useState(null);
   const [riayatiError,    setRiayatiError]    = useState(null);
@@ -122,10 +123,16 @@ export default function Jobs() {
 
   const facParam = selectedFac ? `?facility_id=${selectedFac}` : "";
 
+  // Tracks the latest logs request so a slow response for a previously selected
+  // facility cannot overwrite the current one.
+  const logsReqId = useRef(0);
+
   async function loadLogs() {
+    const reqId = ++logsReqId.current;
     setLogsLoading(true);
     try {
       const r = await apiClient.get(`/dha-sync/fetch-logs${facParam ? facParam + "&" : "?"}limit=50`);
+      if (reqId !== logsReqId.current) return;
       setLogs(r.data);
     } catch { /* silent */ }
     finally { setLogsLoading(false); }
@@ -242,9 +249,9 @@ export default function Jobs() {
   const uniqueStatuses = [...new Set(logs.map(l => l.status))].sort();
 
   return (
-    <div className="p-8">
+    <div className="space-y-6">
       {/* Header */}
-      <div className="mb-6 flex items-center justify-between">
+      <div className="flex items-center justify-between">
         <div>
           <p className="gh-eyebrow">07 — Data sync</p>
           <h1 className="gh-h1">Background Jobs</h1>
@@ -256,7 +263,7 @@ export default function Jobs() {
           <select
             value={selectedFac}
             onChange={e => setSelectedFac(Number(e.target.value))}
-            className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+            className="gh-input"
           >
             <option value="">All facilities</option>
             {facilities.map(f => (
@@ -267,15 +274,15 @@ export default function Jobs() {
       </div>
 
       {/* Shared reparse date filter */}
-      <div className="mb-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-        <p className="text-xs font-semibold text-slate-500 uppercase mb-3">
-          Re-parse Date Filter <span className="font-normal text-slate-400">(optional — leave blank to reparse all dates)</span>
+      <div className="gh-card p-4">
+        <p className="gh-label mb-3">
+          Re-parse Date Filter <span className="font-normal text-slate-600">(optional — leave blank to reparse all dates)</span>
         </p>
         <div className="flex flex-wrap items-center gap-3">
           <select
             value={reparseDateField}
             onChange={e => setReparseDateField(e.target.value)}
-            className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+            className="gh-input"
           >
             <option value="treatment_date">Treatment Date</option>
             <option value="remittance_date">Remittance Transaction Date</option>
@@ -283,18 +290,18 @@ export default function Jobs() {
           <input
             type="date" value={reparseFrom}
             onChange={e => setReparseFrom(e.target.value)}
-            className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+            className="gh-input"
           />
-          <span className="text-slate-400 text-sm">→</span>
+          <span className="text-slate-600 text-sm">→</span>
           <input
             type="date" value={reparseTo}
             onChange={e => setReparseTo(e.target.value)}
-            className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+            className="gh-input"
           />
           {(reparseFrom || reparseTo) && (
             <button
               onClick={() => { setReparseFrom(""); setReparseTo(""); }}
-              className="text-xs text-slate-400 hover:text-red-500"
+              className="text-xs text-slate-600 hover:text-red-500"
             >✕ Clear</button>
           )}
           {reparseFrom && reparseTo && (
@@ -306,7 +313,7 @@ export default function Jobs() {
       </div>
 
       {/* Job cards */}
-      <div className="mb-8 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <JobCard
           title="Re-parse Remittances"
           description="Re-processes RemittanceAdvice XMLs already in the database. Fills payment amounts, denial codes, RA file names, and TPA comments. Safe to re-run."
@@ -318,7 +325,7 @@ export default function Jobs() {
         />
 
         {/* Fetch Latest Data */}
-        <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+        <div className="gh-section">
           <h3 className="mb-1 text-base font-semibold text-slate-800">Fetch Latest Data</h3>
           <p className="mb-4 text-sm text-slate-500">
             Pull new ClaimSubmission and RemittanceAdvice files from DHA eClaimLink for a date range, then parse them.
@@ -327,19 +334,19 @@ export default function Jobs() {
             <input
               type="date" value={dateFrom}
               onChange={e => setDateFrom(e.target.value)}
-              className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm"
+              className="gh-input flex-1"
             />
             <input
               type="date" value={dateTo}
               onChange={e => setDateTo(e.target.value)}
-              className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm"
+              className="gh-input flex-1"
             />
           </div>
           <div className="flex gap-2">
             <button
               onClick={() => runFetch()}
               disabled={fetchLoading || fetchAllLoading}
-              className="rounded-lg bg-ghaf-600 px-4 py-2 text-sm font-medium text-white hover:bg-ghaf-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="gh-btn disabled:cursor-not-allowed"
             >
               {fetchLoading ? "Fetching…" : "Fetch & Parse"}
             </button>
@@ -347,7 +354,7 @@ export default function Jobs() {
               <button
                 onClick={runFetchAll}
                 disabled={fetchLoading || fetchAllLoading}
-                className="rounded-lg border border-ghaf-600 px-4 py-2 text-sm font-medium text-ghaf-700 hover:bg-ghaf-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="gh-btn-secondary disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {fetchAllLoading ? "Fetching all…" : `All ${facilities.length} Facilities`}
               </button>
@@ -383,9 +390,9 @@ export default function Jobs() {
           </p>
           <div className="mb-3 flex gap-2">
             <input type="date" value={riayatiFrom} onChange={e => setRiayatiFrom(e.target.value)}
-              className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+              className="gh-input flex-1" />
             <input type="date" value={riayatiTo} onChange={e => setRiayatiTo(e.target.value)}
-              className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+              className="gh-input flex-1" />
           </div>
           <button
             onClick={runRiayatiFetch}
@@ -404,7 +411,7 @@ export default function Jobs() {
       </div>
 
       {/* Nightly info */}
-      <div className="mb-8 rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800">
+      <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800">
         <span className="font-semibold">🕑 Nightly Fetch</span> — Automatically runs every night at 2:00 AM via launchd.
         Fetches the last 7 days of data from DHA eClaimLink for all active facilities.
         Log: <code className="rounded bg-blue-100 px-1">/tmp/ghaf_nightly_fetch.log</code>
@@ -419,7 +426,7 @@ export default function Jobs() {
             <select
               value={filterType}
               onChange={e => setFilterType(e.target.value)}
-              className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs text-slate-600"
+              className="gh-input px-3 py-1.5 text-xs"
             >
               <option value="">All Types</option>
               {uniqueTypes.map(t => <option key={t} value={t}>{t}</option>)}
@@ -428,7 +435,7 @@ export default function Jobs() {
             <select
               value={filterStatus}
               onChange={e => setFilterStatus(e.target.value)}
-              className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs text-slate-600"
+              className="gh-input px-3 py-1.5 text-xs"
             >
               <option value="">All Statuses</option>
               {uniqueStatuses.map(s => <option key={s} value={s}>{s}</option>)}
@@ -442,9 +449,9 @@ export default function Jobs() {
           </div>
         </div>
 
-        <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
+        <div className="gh-card overflow-x-auto">
           <table className="w-full text-sm">
-            <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+            <thead className="bg-sage-mint gh-label">
               <tr>
                 {["ID","Type","Facility","Date Range","Status","Fetched","Parsed","Failed","HTTP Err","Val Err","Started","Completed"].map(h => (
                   <th key={h} className="px-4 py-3 text-left font-medium whitespace-nowrap">{h}</th>
@@ -453,7 +460,7 @@ export default function Jobs() {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {filteredLogs.length === 0 ? (
-                <tr><td colSpan={12} className="px-4 py-6 text-center text-slate-400">
+                <tr><td colSpan={12} className="px-4 py-6 text-center text-slate-600">
                   {logsLoading ? "Loading…" : "No job history found"}
                 </td></tr>
               ) : filteredLogs.map(log => (
@@ -483,10 +490,10 @@ export default function Jobs() {
                     <td className={`px-4 py-3 text-right ${log.validation_errors > 0 ? "text-amber-600 font-medium" : "text-slate-400"}`}>
                       {log.validation_errors ?? "—"}
                     </td>
-                    <td className="px-4 py-3 whitespace-nowrap text-slate-400 text-xs">
+                    <td className="px-4 py-3 whitespace-nowrap text-slate-600 text-xs">
                       {log.started_at ? new Date(log.started_at).toLocaleString() : "—"}
                     </td>
-                    <td className="px-4 py-3 whitespace-nowrap text-slate-400 text-xs">
+                    <td className="px-4 py-3 whitespace-nowrap text-slate-600 text-xs">
                       {log.completed_at ? new Date(log.completed_at).toLocaleString() : "—"}
                     </td>
                   </tr>
@@ -502,7 +509,7 @@ export default function Jobs() {
                   )}
                   {expandedRow === log.id && !log.error_detail && (
                     <tr key={`${log.id}-nodetail`} className="bg-slate-50">
-                      <td colSpan={12} className="px-6 py-2 text-xs text-slate-400 italic">
+                      <td colSpan={12} className="px-6 py-2 text-xs text-slate-600 italic">
                         No error detail recorded for this job.
                       </td>
                     </tr>
@@ -512,7 +519,7 @@ export default function Jobs() {
             </tbody>
           </table>
         </div>
-        <p className="mt-2 text-xs text-slate-400">
+        <p className="mt-2 text-xs text-slate-600">
           Showing {filteredLogs.length} of {logs.length} jobs. Click a row to see error detail.
         </p>
       </div>

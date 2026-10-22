@@ -23,13 +23,13 @@ const compact = (v) => {
 // ─── KPI Stat Card ────────────────────────────────────────────────────────────
 function StatCard({ label, value, sub, accent, icon }) {
   return (
-    <div className="rounded-xl bg-white p-5 shadow-sm border border-slate-100 flex flex-col gap-1">
+    <div className="gh-section flex flex-col gap-1">
       <div className="flex items-center justify-between">
-        <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">{label}</p>
+        <p className="gh-label">{label}</p>
         {icon && <span className="text-lg">{icon}</span>}
       </div>
       <p className={`text-2xl font-bold ${accent || "text-slate-900"}`}>{value}</p>
-      {sub && <p className="text-xs text-slate-400">{sub}</p>}
+      {sub && <p className="text-xs text-slate-600">{sub}</p>}
     </div>
   );
 }
@@ -37,7 +37,7 @@ function StatCard({ label, value, sub, accent, icon }) {
 // ─── Section Header ───────────────────────────────────────────────────────────
 function SectionTitle({ children }) {
   return (
-    <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-3">
+    <h2 className="gh-label mb-3">
       {children}
     </h2>
   );
@@ -115,7 +115,7 @@ export default function Dashboard() {
     : [];
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       {/* ── Page Header ── */}
       <div>
         <p className="gh-eyebrow">01 — Overview</p>
@@ -192,9 +192,9 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
 
         {/* Monthly Submission Trend — takes 2/3 width */}
-        <div className="xl:col-span-2 rounded-xl bg-white p-5 shadow-sm border border-slate-100">
+        <div className="xl:col-span-2 gh-section">
           <h3 className="text-sm font-semibold text-slate-900">Monthly Submission Trend</h3>
-          <p className="text-xs text-slate-400 mt-0.5 mb-4">
+          <p className="text-xs text-slate-600 mt-0.5 mb-4">
             Claimed vs collected vs denied (last 12 months, AED)
           </p>
           {trend.length > 0 ? (
@@ -271,9 +271,9 @@ export default function Dashboard() {
         </div>
 
         {/* Financial Breakdown — takes 1/3 width */}
-        <div className="rounded-xl bg-white p-5 shadow-sm border border-slate-100">
+        <div className="gh-section">
           <h3 className="text-sm font-semibold text-slate-900">Financial Summary</h3>
-          <p className="text-xs text-slate-400 mt-0.5 mb-4">All-time totals (AED)</p>
+          <p className="text-xs text-slate-600 mt-0.5 mb-4">All-time totals (AED)</p>
           {finBar.length > 0 ? (
             <ResponsiveContainer width="100%" height={260}>
               <BarChart
@@ -332,7 +332,7 @@ export default function Dashboard() {
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
           <Link
             to="/clinical-profiles"
-            className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-ghaf-400 hover:shadow-md"
+            className="gh-section transition hover:border-ghaf-400 hover:shadow-md"
           >
             <div className="text-xl mb-1">👤</div>
             <h2 className="font-semibold text-slate-900">Clinical Profiles</h2>
@@ -342,7 +342,7 @@ export default function Dashboard() {
           </Link>
           <Link
             to="/dha-sync"
-            className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-ghaf-400 hover:shadow-md"
+            className="gh-section transition hover:border-ghaf-400 hover:shadow-md"
           >
             <div className="text-xl mb-1">🔄</div>
             <h2 className="font-semibold text-slate-900">DHA XML Sync</h2>
@@ -352,7 +352,7 @@ export default function Dashboard() {
           </Link>
           <Link
             to="/analytics"
-            className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-ghaf-400 hover:shadow-md"
+            className="gh-section transition hover:border-ghaf-400 hover:shadow-md"
           >
             <div className="text-xl mb-1">📊</div>
             <h2 className="font-semibold text-slate-900">Analytics &amp; Reports</h2>

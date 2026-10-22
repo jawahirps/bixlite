@@ -26,4 +26,31 @@ body {
   .gh-btn-secondary {
     @apply rounded border border-sage-line px-4 py-2.5 text-[13px] font-medium text-ink hover:bg-sage focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ghaf-600;
   }
+  .gh-btn-sm {
+    @apply px-3 py-1.5 text-xs;
+  }
+  .gh-btn-danger {
+    @apply rounded px-4 py-2.5 text-[13px] font-medium bg-denied text-white hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-denied disabled:opacity-50;
+  }
+  .gh-input {
+    @apply rounded border border-sage-line bg-white px-3 py-2 text-sm text-ink placeholder:text-slate-400 focus:border-ghaf-600 focus:outline-none focus:ring-2 focus:ring-ghaf-600/20 disabled:opacity-60;
+  }
+  .gh-label {
+    @apply text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-600;
+  }
+  .gh-section {
+    @apply gh-card p-5 sm:p-6;
+  }
+  .gh-section-title {
+    @apply font-display text-[17px] font-semibold leading-6 text-ink;
+  }
+  .gh-chip {
+    @apply inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium;
+  }
+  .gh-chip-paid { @apply bg-paid/10 text-paid; }
+  .gh-chip-denied { @apply bg-denied/10 text-denied; }
+  .gh-chip-pending { @apply bg-pending/10 text-pending; }
+  .gh-chip-brand { @apply bg-ghaf-600/10 text-ghaf-600; }
+  .gh-chip-neutral { @apply bg-slate-100 text-slate-600; }
 }
+

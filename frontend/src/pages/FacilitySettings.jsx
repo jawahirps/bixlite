@@ -11,11 +11,11 @@ const isRiayatiOnly = (facility) =>
 
 function Badge({ live }) {
   return live ? (
-    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">
+    <span className="gh-chip gh-chip-paid">
       <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> Live
     </span>
   ) : (
-    <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700">
+    <span className="gh-chip gh-chip-pending">
       <span className="h-1.5 w-1.5 rounded-full bg-amber-500" /> Needs setup
     </span>
   );
@@ -23,7 +23,7 @@ function Badge({ live }) {
 
 function RiayatiBadge() {
   return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700">
+    <span className="gh-chip gh-chip-brand">
       MOH / Riayati
     </span>
   );
@@ -72,7 +72,7 @@ function FacilityRow({ facility, onSaved }) {
   };
 
   return (
-    <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+    <div className="gh-section">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
@@ -80,16 +80,16 @@ function FacilityRow({ facility, onSaved }) {
             <Badge live={isLive} />
             {(facility.riayati_username || facility.riayati_accounts?.length > 0) && <RiayatiBadge />}
             {!facility.is_active && (
-              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500">
+              <span className="gh-chip gh-chip-neutral">
                 Inactive
               </span>
             )}
           </div>
-          <p className="mt-0.5 text-xs text-slate-400">Code: {facility.facility_code}</p>
+          <p className="mt-0.5 text-xs text-slate-600">Code: {facility.facility_code}</p>
         </div>
         <button
           onClick={() => setEditing((e) => !e)}
-          className="shrink-0 rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50"
+          className="gh-btn-secondary gh-btn-sm shrink-0"
         >
           {editing ? "Cancel" : "Edit"}
         </button>
@@ -136,7 +136,7 @@ function FacilityRow({ facility, onSaved }) {
           <div className="flex justify-end gap-2">
             <button
               onClick={() => setEditing(false)}
-              className="rounded-lg border border-slate-200 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50"
+              className="gh-btn-secondary"
             >
               Cancel
             </button>
@@ -198,24 +198,24 @@ function RiayatiAccounts({ facility, onChanged }) {
   return (
     <div className="mt-4 border-t border-slate-100 pt-3">
       <div className="flex items-center justify-between">
-        <span className="text-xs font-medium text-slate-400">Additional Riayati accounts (same facility, fetched together)</span>
+        <span className="text-xs font-medium text-slate-600">Additional Riayati accounts (same facility, fetched together)</span>
         {!form && (
           <button onClick={() => setForm(EMPTY_ACCOUNT)}
-            className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50">
+            className="gh-btn-secondary gh-btn-sm">
             + Add account
           </button>
         )}
       </div>
-      {accounts.length === 0 && !form && <p className="mt-1 text-xs text-slate-400">None</p>}
+      {accounts.length === 0 && !form && <p className="mt-1 text-xs text-slate-600">None</p>}
       {accounts.map((a) => (
         <div key={a.id} className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2 text-sm">
           <div>
             <span className="font-medium text-slate-800">{a.label}</span>
             <span className="ml-2 text-slate-600">{a.username}</span>
-            {a.license_id && <span className="ml-2 text-xs text-slate-400">Licence {a.license_id}</span>}
-            {a.active_from && <span className="ml-2 text-xs text-slate-400">from {a.active_from}</span>}
+            {a.license_id && <span className="ml-2 text-xs text-slate-600">Licence {a.license_id}</span>}
+            {a.active_from && <span className="ml-2 text-xs text-slate-600">from {a.active_from}</span>}
             {!a.has_password && <span className="ml-2 text-xs text-amber-600">no password</span>}
-            {!a.is_active && <span className="ml-2 rounded-full bg-slate-200 px-2 py-0.5 text-xs text-slate-500">Inactive</span>}
+            {!a.is_active && <span className="ml-2 gh-chip gh-chip-neutral">Inactive</span>}
           </div>
           <div className="flex gap-1">
             <button onClick={() => setForm({ ...EMPTY_ACCOUNT, ...a, password: "", license_id: a.license_id || "", active_from: a.active_from || "" })}
@@ -238,13 +238,13 @@ function RiayatiAccounts({ facility, onChanged }) {
             <div>
               <label className="mb-1 block text-xs font-medium text-slate-500">Licence used from (first visit date)</label>
               <input type="date" name="active_from" value={form.active_from} onChange={change}
-                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+                className="gh-input w-full" />
             </div>
           </div>
           {error && <p className="text-sm text-red-600">{error}</p>}
           <div className="flex justify-end gap-2">
             <button onClick={() => { setForm(null); setError(null); }}
-              className="rounded-lg border border-slate-200 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50">Cancel</button>
+              className="gh-btn-secondary">Cancel</button>
             <button onClick={save} disabled={saving}
               className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50">
               {saving ? "Saving…" : "Save account"}
@@ -260,7 +260,7 @@ function Field({ label, value, placeholder, secret }) {
   const display = secret && !placeholder ? "••••••••••••" : value;
   return (
     <div>
-      <span className="text-xs font-medium text-slate-400">{label}</span>
+      <span className="text-xs font-medium text-slate-600">{label}</span>
       <p className={`mt-0.5 truncate text-sm ${placeholder ? "italic text-amber-600" : "text-slate-800"}`}>
         {display}
       </p>
@@ -279,13 +279,13 @@ function Input({ label, name, value, onChange, type = "text", showToggle }) {
           name={name}
           value={value}
           onChange={onChange}
-          className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-emerald-400 focus:outline-none focus:ring-1 focus:ring-emerald-400"
+          className="gh-input w-full"
         />
         {showToggle && (
           <button
             type="button"
             onClick={() => setShow((s) => !s)}
-            className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-slate-400 hover:text-slate-600"
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-slate-600 hover:text-slate-600"
           >
             {show ? "Hide" : "Show"}
           </button>
@@ -331,7 +331,7 @@ export default function FacilitySettings() {
           </p>
         </div>
         {!loading && (
-          <div className="rounded-xl bg-white px-4 py-3 shadow-sm border border-slate-200 text-center">
+          <div className="gh-card px-4 py-3 text-center">
             <p className="text-2xl font-bold text-slate-900">{liveCount}/{facilities.length}</p>
             <p className="text-xs text-slate-500">Facilities live</p>
           </div>

@@ -15,7 +15,7 @@ export default function LoginActivity() {
   }, []);
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       <div>
         <p className="gh-eyebrow">06 — Audit</p>
         <h1 className="gh-h1">Login Activity</h1>
@@ -24,7 +24,7 @@ export default function LoginActivity() {
 
       {error && <p className="text-sm text-red-600">{error}</p>}
 
-      <div className="overflow-hidden rounded-xl bg-white shadow-sm">
+      <div className="gh-card overflow-hidden">
         <table className="min-w-full divide-y divide-slate-200 text-sm">
           <thead className="bg-slate-50">
             <tr>
@@ -38,12 +38,12 @@ export default function LoginActivity() {
           <tbody className="divide-y divide-slate-100">
             {loading && (
               <tr>
-                <td colSpan={5} className="px-4 py-6 text-center text-slate-400">Loading…</td>
+                <td colSpan={5} className="px-4 py-6 text-center text-slate-600">Loading…</td>
               </tr>
             )}
             {!loading && logs.length === 0 && (
               <tr>
-                <td colSpan={5} className="px-4 py-6 text-center text-slate-400">No login activity recorded yet.</td>
+                <td colSpan={5} className="px-4 py-6 text-center text-slate-600">No login activity recorded yet.</td>
               </tr>
             )}
             {logs.map((log) => (

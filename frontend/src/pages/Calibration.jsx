@@ -29,7 +29,7 @@ function fmt(n) {
 }
 
 function PrecisionBar({ pct }) {
-  if (pct == null) return <span className="text-slate-400 text-xs">no RA yet</span>;
+  if (pct == null) return <span className="text-slate-600 text-xs">no RA yet</span>;
   const color = pct >= 70 ? "bg-red-500" : pct >= 40 ? "bg-amber-400" : "bg-emerald-400";
   return (
     <div className="flex items-center gap-2">
@@ -65,12 +65,9 @@ export default function Calibration() {
   const [exportingExcel, setExportingExcel] = useState(false);
 
   useEffect(() => {
-    fetch("/api/facilities", {
-      headers: { Authorization: `Bearer ${localStorage.getItem("ghaf_token")}` },
-    })
-      .then(r => r.json())
-      .then(d => setFacilities(Array.isArray(d) ? d : []))
-      .catch(() => {});
+    apiClient.get("/facilities")
+      .then(r => setFacilities(Array.isArray(r.data) ? r.data : []))
+      .catch(err => console.error("Failed to load facilities", err));
     loadAll(facilityId);
   }, []);
 
@@ -146,14 +143,14 @@ export default function Calibration() {
       </div>
 
       {/* Facility + refresh */}
-      <div className="rounded-xl bg-white p-4 shadow-sm flex flex-wrap items-end gap-3">
+      <div className="gh-card p-4 flex flex-wrap items-end gap-3">
         <div className="flex-1 min-w-48">
           <label className="mb-1 block text-xs font-medium text-slate-600">Facility</label>
           {facilities.length > 0 ? (
             <select
               value={facilityId}
               onChange={e => handleFacilityChange(Number(e.target.value))}
-              className="w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm focus:border-ghaf-500 focus:outline-none focus:ring-1 focus:ring-ghaf-500"
+              className="gh-input w-full py-1.5"
             >
               {facilities.map(f => (
                 <option key={f.id} value={f.id}>{f.facility_name} ({f.dhpo_provider_id || "—"})</option>
@@ -162,13 +159,13 @@ export default function Calibration() {
           ) : (
             <input type="number" value={facilityId}
               onChange={e => handleFacilityChange(Number(e.target.value))}
-              className="w-40 rounded-lg border border-slate-300 px-3 py-1.5 text-sm" />
+              className="gh-input w-40 py-1.5" />
           )}
         </div>
         <button
           onClick={() => loadAll(facilityId)}
           disabled={loading}
-          className="rounded-lg bg-ghaf-600 px-4 py-1.5 text-sm font-semibold text-white hover:bg-ghaf-700 disabled:opacity-60"
+          className="gh-btn gh-btn-sm"
         >
           {loading ? "Loading…" : "Refresh"}
         </button>
@@ -184,7 +181,7 @@ export default function Calibration() {
           { label: "Recall Queue",      value: denialQueue.length,     color: denialQueue.length > 0 ? "bg-orange-50 text-orange-700" : "bg-slate-50 text-slate-400" },
           { label: "AED Denied",        value: fmt(totalDenied),       color: totalDenied > 0 ? "bg-rose-50 text-rose-700" : "bg-slate-50 text-slate-400" },
         ].map(s => (
-          <div key={s.label} className={`rounded-xl p-4 shadow-sm ${s.color}`}>
+          <div key={s.label} className={`rounded-lg border border-hairline p-4 ${s.color}`}>
             <p className="text-2xl font-bold">{s.value}</p>
             <p className="text-xs font-medium mt-0.5 opacity-70">{s.label}</p>
           </div>
@@ -222,11 +219,11 @@ export default function Calibration() {
           </div>
 
           {fileSummary.length === 0 && !loading ? (
-            <div className="rounded-xl bg-white p-6 text-center text-slate-400 text-sm shadow-sm">
+            <div className="gh-card p-6 text-center text-slate-600 text-sm">
               No files with denied claims found — either no RA data yet or all claims were paid.
             </div>
           ) : (
-            <div className="rounded-xl bg-white shadow-sm overflow-hidden">
+            <div className="gh-card overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="min-w-full divide-y divide-slate-200 text-sm">
                   <thead className="bg-slate-50">
@@ -251,19 +248,19 @@ export default function Calibration() {
                         f.window_status === "expired" ? "bg-slate-50"    : "";
 
                       const daysChip = (() => {
-                        if (f.days_remaining == null)  return <span className="text-slate-400 text-xs">no RA</span>;
-                        if (f.days_remaining < 0)      return <span className="rounded-full bg-slate-200 text-slate-500 px-2 py-0.5 text-xs font-medium">Expired</span>;
-                        if (f.days_remaining <= 5)     return <span className="rounded-full bg-red-100 text-red-700 px-2 py-0.5 text-xs font-bold">{f.days_remaining}d left ⚠</span>;
-                        return <span className="rounded-full bg-emerald-100 text-emerald-700 px-2 py-0.5 text-xs font-medium">{f.days_remaining}d left</span>;
+                        if (f.days_remaining == null)  return <span className="text-slate-600 text-xs">no RA</span>;
+                        if (f.days_remaining < 0)      return <span className="gh-chip gh-chip-neutral">Expired</span>;
+                        if (f.days_remaining <= 5)     return <span className="gh-chip gh-chip-denied font-bold">{f.days_remaining}d left ⚠</span>;
+                        return <span className="gh-chip gh-chip-paid">{f.days_remaining}d left</span>;
                       })();
 
                       return (
                         <tr key={f.raw_xml_id} className={`hover:brightness-95 ${windowStyle}`}>
                           <td className="px-3 py-2">
-                            {f.window_status === "urgent"  && <span className="rounded-full bg-red-100 text-red-700 px-2 py-0.5 text-xs font-bold">URGENT</span>}
-                            {f.window_status === "open"    && <span className="rounded-full bg-amber-100 text-amber-700 px-2 py-0.5 text-xs font-medium">OPEN</span>}
-                            {f.window_status === "expired" && <span className="rounded-full bg-slate-200 text-slate-500 px-2 py-0.5 text-xs">EXPIRED</span>}
-                            {f.window_status === "no_ra"   && <span className="rounded-full bg-blue-100 text-blue-600 px-2 py-0.5 text-xs">NO RA</span>}
+                            {f.window_status === "urgent"  && <span className="gh-chip gh-chip-denied font-bold">URGENT</span>}
+                            {f.window_status === "open"    && <span className="gh-chip gh-chip-pending">OPEN</span>}
+                            {f.window_status === "expired" && <span className="gh-chip gh-chip-neutral">EXPIRED</span>}
+                            {f.window_status === "no_ra"   && <span className="gh-chip gh-chip-brand">NO RA</span>}
                           </td>
                           <td className="px-3 py-2 text-slate-800 text-xs max-w-xs truncate font-medium" title={f.source_filename}>
                             {f.source_filename || `raw_${f.raw_xml_id}`}
@@ -277,10 +274,10 @@ export default function Calibration() {
                           <td className="px-3 py-2">
                             <div className="flex flex-wrap gap-1">
                               {(f.denial_codes || []).slice(0, 3).map(c => (
-                                <span key={c} className="rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-800 font-medium">{c}</span>
+                                <span key={c} className="gh-chip gh-chip-pending">{c}</span>
                               ))}
                               {(f.denial_codes || []).length > 3 && (
-                                <span className="text-xs text-slate-400">+{f.denial_codes.length - 3}</span>
+                                <span className="text-xs text-slate-600">+{f.denial_codes.length - 3}</span>
                               )}
                             </div>
                           </td>
@@ -290,7 +287,7 @@ export default function Calibration() {
                                 <span key={r} className="rounded bg-slate-100 px-1.5 py-0.5 text-xs font-mono text-slate-600">{r}</span>
                               ))}
                               {(f.scrub_rules || []).length > 2 && (
-                                <span className="text-xs text-slate-400">+{f.scrub_rules.length - 2}</span>
+                                <span className="text-xs text-slate-600">+{f.scrub_rules.length - 2}</span>
                               )}
                             </div>
                           </td>
@@ -313,9 +310,9 @@ export default function Calibration() {
 
       {/* ── Tab: Rule Precision ─────────────────────────────────────────────── */}
       {tab === "rules" && (
-        <div className="rounded-xl bg-white shadow-sm overflow-hidden">
+        <div className="gh-card overflow-hidden">
           {ruleStats.length === 0 && !loading ? (
-            <p className="p-6 text-center text-slate-400 text-sm">
+            <p className="p-6 text-center text-slate-600 text-sm">
               No scrub findings matched to RA outcomes yet — fetch more dates and re-scrub.
             </p>
           ) : (
@@ -375,29 +372,29 @@ export default function Calibration() {
       {tab === "queue" && (
         <div className="space-y-3">
           {/* Date filter + view toggle + Excel download toolbar */}
-          <div className="rounded-xl bg-white p-4 shadow-sm flex flex-wrap items-end gap-3">
+          <div className="gh-card p-4 flex flex-wrap items-end gap-3">
             <div>
               <label className="mb-1 block text-xs text-slate-500">RA Date From</label>
               <input type="date" value={queueDateFrom}
                 onChange={e => setQueueDateFrom(e.target.value)}
-                className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm focus:border-ghaf-500 focus:outline-none focus:ring-1 focus:ring-ghaf-500" />
+                className="gh-input py-1.5" />
             </div>
             <div>
               <label className="mb-1 block text-xs text-slate-500">RA Date To</label>
               <input type="date" value={queueDateTo}
                 onChange={e => setQueueDateTo(e.target.value)}
-                className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm focus:border-ghaf-500 focus:outline-none focus:ring-1 focus:ring-ghaf-500" />
+                className="gh-input py-1.5" />
             </div>
             <button
               onClick={() => loadQueue(facilityId, queueDateFrom, queueDateTo)}
               disabled={queueLoading}
-              className="rounded-lg bg-ghaf-600 px-4 py-1.5 text-sm font-semibold text-white hover:bg-ghaf-700 disabled:opacity-60"
+              className="gh-btn gh-btn-sm"
             >
               {queueLoading ? "Loading…" : "Apply"}
             </button>
             {(queueDateFrom || queueDateTo) && (
               <button onClick={() => { setQueueDateFrom(""); setQueueDateTo(""); loadQueue(facilityId, "", ""); }}
-                className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs text-slate-500 hover:bg-slate-50">
+                className="gh-btn-secondary gh-btn-sm">
                 Clear
               </button>
             )}
@@ -423,7 +420,7 @@ export default function Calibration() {
 
           {/* ── By Claim view ── */}
           {queueView === "claims" && (
-            <div className="rounded-xl bg-white shadow-sm overflow-hidden">
+            <div className="gh-card overflow-hidden">
               <div className="px-4 py-3 border-b border-amber-100 bg-amber-50">
                 <p className="text-xs text-amber-900">
                   Claims <strong>denied by payer AND flagged by the scrubber</strong> — sorted by RA date (newest first).
@@ -431,7 +428,7 @@ export default function Calibration() {
                 </p>
               </div>
               {denialQueue.length === 0 && !queueLoading ? (
-                <p className="p-6 text-center text-slate-400 text-sm">No recall claims found for the selected period.</p>
+                <p className="p-6 text-center text-slate-600 text-sm">No recall claims found for the selected period.</p>
               ) : (
                 <div className="overflow-x-auto">
                   <table className="min-w-full divide-y divide-slate-200 text-sm">
@@ -451,7 +448,7 @@ export default function Calibration() {
                     </thead>
                     <tbody className="divide-y divide-slate-100">
                       {queueLoading ? (
-                        <tr><td colSpan={10} className="px-3 py-6 text-center text-slate-400">Loading…</td></tr>
+                        <tr><td colSpan={10} className="px-3 py-6 text-center text-slate-600">Loading…</td></tr>
                       ) : denialQueue.map(d => (
                         <tr key={`${d.claim_id}-${d.remittance_date}`} className="hover:bg-slate-50">
                           <td className="px-3 py-2">
@@ -474,7 +471,7 @@ export default function Calibration() {
                           <td className="px-3 py-2 font-mono text-xs text-slate-800">{d.claim_id}</td>
                           <td className="px-3 py-2 text-slate-600 text-xs">
                             {d.encounter_date}<br />
-                            <span className="text-slate-400">{d.encounter_type || "—"}</span>
+                            <span className="text-slate-600">{d.encounter_type || "—"}</span>
                           </td>
                           <td className="px-3 py-2 text-slate-600 text-xs">{d.payer_id}</td>
                           <td className="px-3 py-2 text-slate-600 text-xs font-medium">{d.remittance_date || "—"}</td>
@@ -496,7 +493,7 @@ export default function Calibration() {
                                 <span key={code} className="text-xs text-amber-700 font-medium">{code}</span>
                               ))}
                               {(d.denial_descriptions || []).slice(0, 1).map(desc => (
-                                <span key={desc} className="text-xs text-slate-400 truncate max-w-xs" title={desc}>{desc}</span>
+                                <span key={desc} className="text-xs text-slate-600 truncate max-w-xs" title={desc}>{desc}</span>
                               ))}
                             </div>
                           </td>
@@ -546,14 +543,14 @@ export default function Calibration() {
                   {groups.length} RA files · {denialQueue.length} recall claims · grouped by remittance file, newest first
                 </p>
                 {queueLoading ? (
-                  <div className="rounded-xl bg-white p-6 text-center text-slate-400 text-sm shadow-sm">Loading…</div>
+                  <div className="gh-card p-6 text-center text-slate-600 text-sm">Loading…</div>
                 ) : groups.length === 0 ? (
-                  <div className="rounded-xl bg-white p-6 text-center text-slate-400 text-sm shadow-sm">No recall claims found for the selected period.</div>
+                  <div className="gh-card p-6 text-center text-slate-600 text-sm">No recall claims found for the selected period.</div>
                 ) : groups.map(g => {
                   const isOpen = expandedFiles.has(g.ra_file_id);
                   const prio = topPriority(g);
                   return (
-                    <div key={g.ra_file_id} className="rounded-xl bg-white shadow-sm overflow-hidden">
+                    <div key={g.ra_file_id} className="gh-card overflow-hidden">
                       {/* File header row — clickable to expand */}
                       <button
                         className="w-full text-left px-4 py-3 flex flex-wrap items-center gap-3 hover:bg-slate-50 transition-colors"
@@ -570,7 +567,7 @@ export default function Calibration() {
                         </span>
                         <span className="text-xs text-slate-500">{g.ra_date || "—"}</span>
                         <span className="text-xs text-slate-500">{g.payer_id}</span>
-                        <span className="rounded-full bg-slate-100 text-slate-600 px-2 py-0.5 text-xs font-medium">
+                        <span className="gh-chip gh-chip-neutral">
                           {g.claims.length} claim{g.claims.length !== 1 ? "s" : ""}
                         </span>
                         <span className="text-xs text-slate-500">Claimed: <span className="font-semibold text-slate-700">{fmt(g.total_claimed)}</span></span>
@@ -578,13 +575,13 @@ export default function Calibration() {
                         {/* Denial codes + scrub rules chips */}
                         <div className="flex flex-wrap gap-1">
                           {[...g.denial_codes].slice(0, 3).map(c => (
-                            <span key={c} className="rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-800 font-medium">{c}</span>
+                            <span key={c} className="gh-chip gh-chip-pending">{c}</span>
                           ))}
-                          {g.denial_codes.size > 3 && <span className="text-xs text-slate-400">+{g.denial_codes.size - 3}</span>}
+                          {g.denial_codes.size > 3 && <span className="text-xs text-slate-600">+{g.denial_codes.size - 3}</span>}
                           {[...g.scrub_rules].slice(0, 2).map(r => (
                             <span key={r} className="rounded bg-slate-100 px-1.5 py-0.5 text-xs font-mono text-slate-600">{r}</span>
                           ))}
-                          {g.scrub_rules.size > 2 && <span className="text-xs text-slate-400">+{g.scrub_rules.size - 2}</span>}
+                          {g.scrub_rules.size > 2 && <span className="text-xs text-slate-600">+{g.scrub_rules.size - 2}</span>}
                         </div>
                       </button>
 
@@ -614,7 +611,7 @@ export default function Calibration() {
                                   <td className="px-3 py-2 font-mono text-xs text-slate-800">{d.claim_id}</td>
                                   <td className="px-3 py-2 text-slate-600 text-xs">
                                     {d.encounter_date}<br />
-                                    <span className="text-slate-400">{d.encounter_type || "—"}</span>
+                                    <span className="text-slate-600">{d.encounter_type || "—"}</span>
                                   </td>
                                   <td className="px-3 py-2 text-slate-600 text-xs">{d.payer_id}</td>
                                   <td className="px-3 py-2 text-slate-600 text-xs">{d.remittance_date || "—"}</td>
@@ -660,9 +657,9 @@ export default function Calibration() {
 
       {/* ── Tab: Top Denial Codes ──────────────────────────────────────────── */}
       {tab === "codes" && (
-        <div className="rounded-xl bg-white shadow-sm overflow-hidden">
+        <div className="gh-card overflow-hidden">
           {denialCodes.length === 0 && !loading ? (
-            <p className="p-6 text-center text-slate-400 text-sm">
+            <p className="p-6 text-center text-slate-600 text-sm">
               No denial codes found in RA data — fetch RemittanceAdvice files first.
             </p>
           ) : (

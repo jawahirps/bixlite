@@ -3,18 +3,18 @@ import apiClient from "../api/client";
 import { useAuth } from "../context/AuthContext";
 
 const statusColors = {
-  pending: "bg-amber-100 text-amber-700",
-  parsed: "bg-emerald-100 text-emerald-700",
-  failed: "bg-red-100 text-red-700",
-  quarantined: "bg-red-100 text-red-700",
-  running: "bg-blue-100 text-blue-700",
-  success: "bg-emerald-100 text-emerald-700",
-  partial: "bg-amber-100 text-amber-700",
+  pending: "gh-chip-pending",
+  parsed: "gh-chip-paid",
+  failed: "gh-chip-denied",
+  quarantined: "gh-chip-denied",
+  running: "gh-chip-brand",
+  success: "gh-chip-paid",
+  partial: "gh-chip-pending",
 };
 
 function StatusBadge({ status }) {
   return (
-    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${statusColors[status] || "bg-slate-200 text-slate-600"}`}>
+    <span className={`gh-chip ${statusColors[status] || "gh-chip-neutral"}`}>
       {status}
     </span>
   );
@@ -40,13 +40,13 @@ function ScrubBadge({ rawId }) {
   }, [rawId]);
 
   if (!summary) return <span className="text-slate-300 text-xs">—</span>;
-  if (!summary.scrubbed) return <span className="text-slate-400 text-xs">not scrubbed</span>;
+  if (!summary.scrubbed) return <span className="text-slate-600 text-xs">not scrubbed</span>;
 
   const { status, blocks, warnings, risk_level } = summary;
   if (status === "BLOCK") {
     return (
       <span title={`${blocks} block(s) · risk: ${risk_level}`}
-            className="inline-flex items-center gap-1 rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700">
+            className="gh-chip gh-chip-denied">
         ✗ {blocks} block{blocks !== 1 ? "s" : ""}
       </span>
     );
@@ -54,13 +54,13 @@ function ScrubBadge({ rawId }) {
   if (status === "WARN") {
     return (
       <span title={`${warnings} warning(s) · risk: ${risk_level}`}
-            className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700">
+            className="gh-chip gh-chip-pending">
         ⚠ {warnings} warn{warnings !== 1 ? "s" : ""}
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">
+    <span className="gh-chip gh-chip-paid">
       ✓ Pass
     </span>
   );
@@ -143,12 +143,9 @@ export default function DhaSync() {
   };
 
   useEffect(() => {
-    fetch("/api/facilities", {
-      headers: { Authorization: `Bearer ${localStorage.getItem("ghaf_token")}` },
-    })
-      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
-      .then(data => setFacilities(Array.isArray(data) ? data : []))
-      .catch(err => { setFacilitiesError(err.message); });
+    apiClient.get("/facilities")
+      .then(r => setFacilities(Array.isArray(r.data) ? r.data : []))
+      .catch(err => { setFacilitiesError(err.response ? `HTTP ${err.response.status}` : err.message); });
     loadTables(selectedFacilityId);
   }, []);
 
@@ -263,9 +260,9 @@ export default function DhaSync() {
   const passCount    = scrubbedRows.filter(r => scrubCache[r.id]?.status === "PASS").length;
 
   const SEVERITY_STYLE = {
-    BLOCK: "bg-red-100 text-red-700",
-    WARN:  "bg-amber-100 text-amber-700",
-    PASS:  "bg-emerald-100 text-emerald-700",
+    BLOCK: "gh-chip-denied",
+    WARN:  "gh-chip-pending",
+    PASS:  "gh-chip-paid",
   };
 
   return (
@@ -279,7 +276,7 @@ export default function DhaSync() {
       </div>
 
       {/* Facility selector + actions */}
-      <div className="rounded-xl bg-white p-4 shadow-sm">
+      <div className="gh-card p-4">
         <label className="mb-1 block text-xs font-medium text-slate-600">Facility</label>
         {facilitiesError && (
           <p className="mb-2 text-xs text-red-600">Could not load facilities: {facilitiesError}</p>
@@ -289,7 +286,7 @@ export default function DhaSync() {
             <select
               value={selectedFacilityId}
               onChange={e => handleFacilityChange(Number(e.target.value))}
-              className="w-full max-w-sm rounded-lg border border-slate-300 px-3 py-1.5 text-sm focus:border-ghaf-500 focus:outline-none focus:ring-1 focus:ring-ghaf-500"
+              className="gh-input w-full max-w-sm py-1.5"
             >
               {facilities.map(f => (
                 <option key={f.id} value={f.id}>
@@ -303,13 +300,13 @@ export default function DhaSync() {
               placeholder="Facility ID"
               value={selectedFacilityId}
               onChange={e => handleFacilityChange(Number(e.target.value))}
-              className="w-full max-w-xs rounded-lg border border-slate-300 px-3 py-1.5 text-sm focus:border-ghaf-500 focus:outline-none focus:ring-1 focus:ring-ghaf-500"
+              className="gh-input w-full max-w-xs py-1.5"
             />
           )}
           <button
             onClick={() => loadTables(selectedFacilityId)}
             disabled={loadingTables}
-            className="rounded-lg bg-ghaf-600 px-4 py-1.5 text-sm font-semibold text-white hover:bg-ghaf-700 disabled:opacity-60"
+            className="gh-btn gh-btn-sm"
           >
             {loadingTables ? "Loading…" : "Refresh"}
           </button>
@@ -317,7 +314,7 @@ export default function DhaSync() {
             onClick={runBatchScrub}
             disabled={batchScrubbing}
             title="Scrub all ClaimSubmission files that haven't been checked yet"
-            className="rounded-lg border border-ghaf-600 px-4 py-1.5 text-sm font-semibold text-ghaf-700 hover:bg-ghaf-50 disabled:opacity-60"
+            className="gh-btn-secondary gh-btn-sm disabled:opacity-60"
           >
             {batchScrubbing ? "Scrubbing…" : "Re-scrub All"}
           </button>
@@ -343,7 +340,7 @@ export default function DhaSync() {
             { label: "Warnings", value: warnCount, color: warnCount > 0 ? "bg-amber-50 text-amber-700" : "bg-slate-50 text-slate-400" },
             { label: "Pass", value: passCount, color: passCount > 0 ? "bg-emerald-50 text-emerald-700" : "bg-slate-50 text-slate-400" },
           ].map(s => (
-            <div key={s.label} className={`rounded-xl p-4 shadow-sm ${s.color}`}>
+            <div key={s.label} className={`rounded-lg border border-hairline p-4 ${s.color}`}>
               <p className="text-2xl font-bold">{s.value}</p>
               <p className="text-xs font-medium mt-0.5 opacity-70">{s.label}</p>
             </div>
@@ -354,8 +351,8 @@ export default function DhaSync() {
       {error && <div className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</div>}
 
       {/* Date filter */}
-      <div className="rounded-xl bg-white p-4 shadow-sm">
-        <p className="mb-2 text-xs font-semibold text-slate-600 uppercase tracking-wide">Filter by Submission Date</p>
+      <div className="gh-card p-4">
+        <p className="gh-label mb-2">Filter by Submission Date</p>
         <div className="flex flex-wrap items-end gap-3">
           <div>
             <label className="mb-1 block text-xs text-slate-500">From</label>
@@ -363,7 +360,7 @@ export default function DhaSync() {
               type="date"
               value={dateFrom}
               onChange={e => setDateFrom(e.target.value)}
-              className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm focus:border-ghaf-500 focus:outline-none focus:ring-1 focus:ring-ghaf-500"
+              className="gh-input py-1.5"
             />
           </div>
           <div>
@@ -372,18 +369,18 @@ export default function DhaSync() {
               type="date"
               value={dateTo}
               onChange={e => setDateTo(e.target.value)}
-              className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm focus:border-ghaf-500 focus:outline-none focus:ring-1 focus:ring-ghaf-500"
+              className="gh-input py-1.5"
             />
           </div>
           {(dateFrom || dateTo) && (
             <button
               onClick={() => { setDateFrom(""); setDateTo(""); }}
-              className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs text-slate-500 hover:bg-slate-50"
+              className="gh-btn-secondary gh-btn-sm"
             >
               Clear dates
             </button>
           )}
-          <p className="text-xs text-slate-400 self-end pb-1.5">
+          <p className="text-xs text-slate-600 self-end pb-1.5">
             Showing {filteredRaw.length} of {rawXml.length} files
             {scrubFilter !== "all" && ` (${scrubFilter.replace("_", " ")} filter active)`}
           </p>
@@ -409,7 +406,7 @@ export default function DhaSync() {
       </div>
 
       {/* Main table */}
-      <div className="rounded-xl bg-white shadow-sm overflow-hidden">
+      <div className="gh-card overflow-hidden">
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-slate-200 text-sm">
             <thead className="bg-slate-50">
@@ -438,7 +435,7 @@ export default function DhaSync() {
             <tbody className="divide-y divide-slate-100">
               {filteredRaw.length === 0 && (
                 <tr>
-                  <td colSpan={10} className="px-3 py-6 text-center text-slate-400">
+                  <td colSpan={10} className="px-3 py-6 text-center text-slate-600">
                     {loadingTables ? "Loading…" : "No files match the current filter."}
                   </td>
                 </tr>
@@ -465,7 +462,7 @@ export default function DhaSync() {
                         ) : null}
                       </td>
                       {/* Expand toggle */}
-                      <td className="pl-1 text-slate-400 text-xs cursor-pointer"
+                      <td className="pl-1 text-slate-600 text-xs cursor-pointer"
                           onClick={() => isClaimSub && toggleFindings(r.id)}>
                         {isClaimSub ? (isExpanded ? "▾" : "▸") : ""}
                       </td>
@@ -500,9 +497,9 @@ export default function DhaSync() {
                       <tr key={`${r.id}-findings`} className="bg-slate-50">
                         <td colSpan={10} className="px-6 py-3">
                           {rowFindings.length === 0 ? (
-                            <p className="text-xs text-slate-400 italic">Loading findings…</p>
+                            <p className="text-xs text-slate-600 italic">Loading findings…</p>
                           ) : rowFindings.length === 0 ? (
-                            <p className="text-xs text-slate-400 italic">No findings (file passed scrub).</p>
+                            <p className="text-xs text-slate-600 italic">No findings (file passed scrub).</p>
                           ) : (
                             <table className="w-full text-xs">
                               <thead>
@@ -569,7 +566,7 @@ export default function DhaSync() {
 
       {/* Fetch Coverage */}
       {fetchLogs.length > 0 && (
-        <div className="rounded-xl bg-white p-5 shadow-sm">
+        <div className="gh-section">
           <h2 className="mb-1 font-semibold text-slate-900">Fetch Coverage</h2>
           <p className="mb-3 text-xs text-slate-500">
             Each row = one fetch run. Green = success, amber = partial, red = failed.
@@ -611,7 +608,7 @@ export default function DhaSync() {
                       <td className="px-3 py-2 text-right text-slate-700">
                         {f.records_failed > 0
                           ? <span className="text-red-600 font-medium">{f.records_failed}</span>
-                          : <span className="text-slate-400">0</span>}
+                          : <span className="text-slate-600">0</span>}
                       </td>
                       <td className="px-3 py-2 text-slate-500 text-xs">
                         {f.completed_at ? `${new Date(f.completed_at).toLocaleString()} (${duration}s)` : "—"}
@@ -626,7 +623,7 @@ export default function DhaSync() {
       )}
 
       {/* Sync Run History */}
-      <div className="rounded-xl bg-white p-5 shadow-sm">
+      <div className="gh-section">
         <h2 className="mb-3 font-semibold text-slate-900">Sync Run History</h2>
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-slate-200 text-sm">
@@ -645,12 +642,12 @@ export default function DhaSync() {
             <tbody className="divide-y divide-slate-100">
               {fetchLogs.length === 0 && (
                 <tr>
-                  <td colSpan={8} className="px-3 py-4 text-center text-slate-400">No sync runs yet.</td>
+                  <td colSpan={8} className="px-3 py-4 text-center text-slate-600">No sync runs yet.</td>
                 </tr>
               )}
               {fetchLogs.map(f => (
                 <tr key={f.id} className="hover:bg-slate-50">
-                  <td className="px-3 py-2 text-slate-400 text-xs">#{f.id}</td>
+                  <td className="px-3 py-2 text-slate-600 text-xs">#{f.id}</td>
                   <td className="px-3 py-2 font-mono text-slate-700">{f.date_from}</td>
                   <td className="px-3 py-2 font-mono text-slate-700">{f.date_to}</td>
                   <td className="px-3 py-2 text-slate-600">{new Date(f.started_at).toLocaleString()}</td>

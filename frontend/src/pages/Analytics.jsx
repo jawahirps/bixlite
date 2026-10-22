@@ -166,7 +166,7 @@ function JobRow({ job, onDownload, onCancel }) {
           <button
             onClick={() => onDownload(job)}
             title={`Download ${job.filename}`}
-            className="inline-flex items-center gap-1 rounded-lg bg-ghaf-600 px-2.5 py-1 text-xs font-semibold text-white hover:bg-ghaf-700 transition"
+            className="gh-btn gh-btn-sm inline-flex items-center gap-1"
           >
             <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" viewBox="0 0 20 20" fill="currentColor">
               <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clipRule="evenodd" />
@@ -177,7 +177,7 @@ function JobRow({ job, onDownload, onCancel }) {
           <button
             onClick={() => onCancel(job)}
             title="Cancel this job"
-            className="inline-flex items-center gap-1 rounded-lg bg-red-100 px-2.5 py-1 text-xs font-semibold text-red-700 hover:bg-red-200 transition"
+            className="gh-btn-danger gh-btn-sm inline-flex items-center gap-1"
           >
             <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" viewBox="0 0 20 20" fill="currentColor">
               <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
@@ -185,7 +185,7 @@ function JobRow({ job, onDownload, onCancel }) {
             Cancel
           </button>
         ) : (
-          <span className="text-xs text-slate-400 italic">
+          <span className="text-xs text-slate-600 italic">
             {job.status === "failed" ? "Cancelled" : job.error ? "Error" : "No file"}
           </span>
         )}
@@ -282,32 +282,19 @@ export default function Analytics() {
   const cancelJob = async (job) => {
     if (!window.confirm(`Cancel job #${String(job.id).padStart(4, "0")} — ${job.report_label}?`)) return;
     try {
-      const token = localStorage.getItem("ghaf_token");
-      const res = await fetch(`/api/reports/jobs/${job.id}/cancel`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        alert(`Cancel failed: ${err.detail || res.status}`);
-        return;
-      }
+      await apiClient.post(`/reports/jobs/${job.id}/cancel`);
       // Refresh queue
       loadJobs();
     } catch (err) {
-      alert(`Cancel failed: ${err.message}`);
+      alert(`Cancel failed: ${err.response?.data?.detail || err.response?.status || err.message}`);
     }
   };
 
   // Download a completed job
   const downloadJob = async (job) => {
     try {
-      const token = localStorage.getItem("ghaf_token");
-      const res = await fetch(`/api/reports/jobs/${job.id}/download`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const blob = await res.blob();
+      const res = await apiClient.get(`/reports/jobs/${job.id}/download`, { responseType: "blob" });
+      const blob = res.data;
       const href = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = href;
@@ -315,7 +302,8 @@ export default function Analytics() {
       document.body.appendChild(a);
       a.click();
       a.remove();
-      URL.revokeObjectURL(href);
+      // Revoking immediately can cancel the download in Safari.
+      setTimeout(() => URL.revokeObjectURL(href), 5000);
     } catch (err) {
       alert(`Download failed: ${err.message}`);
     }
@@ -339,7 +327,7 @@ export default function Analytics() {
           <button
             onClick={loadJobs}
             disabled={jobsLoading}
-            className="flex items-center gap-2 rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50 transition disabled:opacity-50"
+            className="gh-btn-secondary flex items-center gap-2 disabled:opacity-50"
           >
             <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
               <path d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" />
@@ -352,7 +340,7 @@ export default function Analytics() {
             <button
               onClick={() => setShowReports((v) => !v)}
               disabled={generating !== null}
-              className="flex items-center gap-2 rounded-lg bg-ghaf-600 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-ghaf-700 transition disabled:opacity-60"
+              className="gh-btn flex items-center gap-2"
             >
               {generating ? (
                 <>
@@ -375,10 +363,10 @@ export default function Analytics() {
             {showReports && (
               <div className="absolute right-0 z-20 mt-2 w-72 rounded-xl border border-slate-200 bg-white shadow-xl">
                 <div className="px-4 py-3 border-b border-slate-100">
-                  <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
+                  <p className="gh-label">
                     Advanced Excel Reports
                   </p>
-                  <p className="text-xs text-slate-400 mt-0.5">
+                  <p className="text-xs text-slate-600 mt-0.5">
                     Generates with current filters — saved to Report Queue
                   </p>
                 </div>
@@ -392,7 +380,7 @@ export default function Analytics() {
                         <span className="text-xl leading-none mt-0.5">{r.icon}</span>
                         <span className="flex-1 min-w-0">
                           <span className="block text-sm font-medium text-slate-800">{r.label}</span>
-                          <span className="block text-xs text-slate-400 truncate">{r.description}</span>
+                          <span className="block text-xs text-slate-600 truncate">{r.description}</span>
                         </span>
                         <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-slate-400 mt-1 flex-shrink-0" viewBox="0 0 20 20" fill="currentColor">
                           <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-8.707l-3-3a1 1 0 00-1.414 1.414L10.586 9H7a1 1 0 100 2h3.586l-1.293 1.293a1 1 0 101.414 1.414l3-3a1 1 0 000-1.414z" clipRule="evenodd" />
@@ -404,7 +392,7 @@ export default function Analytics() {
                 <div className="px-4 py-2 border-t border-slate-100">
                   <button
                     onClick={() => setShowReports(false)}
-                    className="text-xs text-slate-400 hover:text-slate-600"
+                    className="text-xs text-slate-600 hover:text-slate-600"
                   >
                     Close
                   </button>
@@ -419,20 +407,20 @@ export default function Analytics() {
 
       {/* Report Job Queue */}
       {showQueue && (
-        <div className="rounded-xl bg-white shadow-sm overflow-hidden">
+        <div className="gh-card overflow-hidden">
           <div className="flex items-center justify-between px-5 py-3 border-b border-slate-100">
             <div className="flex items-center gap-2">
               <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-ghaf-600" viewBox="0 0 20 20" fill="currentColor">
                 <path d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" />
               </svg>
               <h2 className="text-sm font-semibold text-slate-800">Report Queue</h2>
-              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500">
+              <span className="gh-chip gh-chip-neutral">
                 {reportJobs.length} report{reportJobs.length !== 1 ? "s" : ""}
               </span>
             </div>
             <button
               onClick={() => setShowQueue(false)}
-              className="text-xs text-slate-400 hover:text-slate-600"
+              className="text-xs text-slate-600 hover:text-slate-600"
             >
               Hide
             </button>
@@ -449,14 +437,14 @@ export default function Analytics() {
               </button>
             </div>
           ) : reportJobs.length === 0 ? (
-            <div className="px-5 py-8 text-center text-sm text-slate-400">
+            <div className="px-5 py-8 text-center text-sm text-slate-600">
               No reports generated yet. Use &ldquo;Generate Report&rdquo; above to create one.
             </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full min-w-[800px] text-sm">
                 <thead>
-                  <tr className="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  <tr className="bg-sage-mint gh-label">
                     <th className="px-3 py-2 text-left w-16">ID</th>
                     <th className="px-3 py-2 text-left">Report</th>
                     <th className="px-3 py-2 text-left">Facility</th>

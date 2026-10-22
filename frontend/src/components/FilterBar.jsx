@@ -1,10 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import apiClient from "../api/client";
 
-const selectClass =
-  "w-full rounded border border-sage-line bg-white px-3 py-2 text-sm text-ink focus:border-ghaf-600 focus:outline-none focus:ring-2 focus:ring-ghaf-600/20";
+const selectClass = "gh-input w-full";
 
-const labelClass = "mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-600";
+const labelClass = "gh-label mb-1.5 block";
 
 // ── Multi-select facility dropdown ────────────────────────────────────────
 function FacilityMultiSelect({ facilities, selectedIds, onChange }) {
@@ -40,7 +39,7 @@ function FacilityMultiSelect({ facilities, selectedIds, onChange }) {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="w-full rounded border border-sage-line bg-white px-3 py-2 text-sm text-ink focus:border-ghaf-600 focus:outline-none focus:ring-2 focus:ring-ghaf-600/20 flex items-center justify-between gap-2"
+        className="gh-input w-full flex items-center justify-between gap-2"
       >
         <span className={selectedIds.length === 0 ? "text-slate-400" : "text-slate-700"}>
           {label}
@@ -100,7 +99,7 @@ function FacilityMultiSelect({ facilities, selectedIds, onChange }) {
 
           {selectedIds.length > 0 && (
             <div className="border-t border-slate-100 px-3 py-2 flex justify-between items-center">
-              <span className="text-xs text-slate-400">{selectedIds.length} selected</span>
+              <span className="text-xs text-slate-600">{selectedIds.length} selected</span>
               <button
                 type="button"
                 onClick={selectAll}
@@ -286,7 +285,7 @@ export default function FilterBar({ filters, onChange }) {
         <button
           type="button"
           onClick={reset}
-          className="rounded border border-sage-line bg-white px-3 py-1.5 text-xs font-medium text-ink hover:bg-sage-mint"
+          className="gh-btn-secondary gh-btn-sm bg-white"
         >
           Clear filters
         </button>

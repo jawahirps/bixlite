@@ -64,7 +64,7 @@ function ProfileForm({ initial, onCancel, onSaved, facilityId }) {
         type={type}
         value={form[name] ?? ""}
         onChange={update(name)}
-        className="w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm focus:border-ghaf-500 focus:outline-none focus:ring-1 focus:ring-ghaf-500"
+        className="gh-input w-full py-1.5"
         {...extra}
       />
     </div>
@@ -77,7 +77,7 @@ function ProfileForm({ initial, onCancel, onSaved, facilityId }) {
         rows={2}
         value={form[name] ?? ""}
         onChange={update(name)}
-        className="w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm focus:border-ghaf-500 focus:outline-none focus:ring-1 focus:ring-ghaf-500"
+        className="gh-input w-full py-1.5"
       />
     </div>
   );
@@ -99,7 +99,7 @@ function ProfileForm({ initial, onCancel, onSaved, facilityId }) {
               <select
                 value={form.gender ?? ""}
                 onChange={update("gender")}
-                className="w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm focus:border-ghaf-500 focus:outline-none focus:ring-1 focus:ring-ghaf-500"
+                className="gh-input w-full py-1.5"
               >
                 <option value="">—</option>
                 <option value="Male">Male</option>
@@ -132,14 +132,14 @@ function ProfileForm({ initial, onCancel, onSaved, facilityId }) {
             <button
               type="button"
               onClick={onCancel}
-              className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+              className="gh-btn-secondary"
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={saving}
-              className="rounded-lg bg-ghaf-600 px-4 py-2 text-sm font-semibold text-white hover:bg-ghaf-700 disabled:opacity-60"
+              className="gh-btn"
             >
               {saving ? "Saving…" : "Save Profile"}
             </button>
@@ -193,7 +193,7 @@ export default function ClinicalProfiles() {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <p className="gh-eyebrow">02 — Patients</p>
@@ -205,7 +205,7 @@ export default function ClinicalProfiles() {
             setEditing(null);
             setShowForm(true);
           }}
-          className="rounded-lg bg-ghaf-600 px-4 py-2 text-sm font-semibold text-white hover:bg-ghaf-700"
+          className="gh-btn"
         >
           + New Profile
         </button>
@@ -216,16 +216,16 @@ export default function ClinicalProfiles() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search by name, member ID, or Emirates ID"
-          className="w-full max-w-sm rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-ghaf-500 focus:outline-none focus:ring-1 focus:ring-ghaf-500"
+          className="gh-input w-full max-w-sm"
         />
-        <button type="submit" className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50">
+        <button type="submit" className="gh-btn-secondary">
           Search
         </button>
       </form>
 
       {error && <p className="text-sm text-red-600">{error}</p>}
 
-      <div className="overflow-hidden rounded-xl bg-white shadow-sm">
+      <div className="gh-card overflow-hidden">
         <table className="min-w-full divide-y divide-slate-200 text-sm">
           <thead className="bg-slate-50">
             <tr>
@@ -241,12 +241,12 @@ export default function ClinicalProfiles() {
           <tbody className="divide-y divide-slate-100">
             {loading && (
               <tr>
-                <td colSpan={7} className="px-4 py-6 text-center text-slate-400">Loading…</td>
+                <td colSpan={7} className="px-4 py-6 text-center text-slate-600">Loading…</td>
               </tr>
             )}
             {!loading && profiles.length === 0 && (
               <tr>
-                <td colSpan={7} className="px-4 py-6 text-center text-slate-400">No clinical profiles found.</td>
+                <td colSpan={7} className="px-4 py-6 text-center text-slate-600">No clinical profiles found.</td>
               </tr>
             )}
             {profiles.map((p) => (

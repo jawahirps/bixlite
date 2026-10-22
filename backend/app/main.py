@@ -7,7 +7,7 @@ Run with:
 import os
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -135,8 +135,14 @@ def serve_root():
 @app.get("/{full_path:path}", include_in_schema=False)
 def serve_spa(full_path: str):
     """Catch-all: serve index.html for any non-API route (SPA routing)."""
-    file_path = _DIST / full_path
-    if file_path.exists() and file_path.is_file():
+    # Unknown API paths get a JSON 404, never the SPA shell.
+    if full_path.startswith("api/"):
+        raise HTTPException(status_code=404, detail="Not found")
+    # Resolve and contain inside dist/ so encoded "../" can't read files elsewhere
+    # on disk (e.g. backend/.env).
+    dist_root = _DIST.resolve()
+    file_path = (dist_root / full_path).resolve()
+    if file_path.is_relative_to(dist_root) and file_path.is_file():
         return FileResponse(str(file_path), headers=_NO_CACHE)
     index = _DIST / "index.html"
     if index.exists():

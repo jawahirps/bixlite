@@ -30,7 +30,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import DateTime, Integer, String, Text, func
-from sqlalchemy.orm import Mapped, Session, mapped_column
+from sqlalchemy.orm import Mapped, Session, mapped_column, object_session
 
 from ..database import SessionLocal, get_db
 from ..models import Base, Facility, User
@@ -220,12 +220,29 @@ class RunIn(BaseModel):
     date_to: Optional[str] = None
 
 
+def _download_name(fac: Optional[Facility], path: str) -> str:
+    """File name for the user's download: starts with the facility name, not the internal code."""
+    name = os.path.basename(path)
+    if not fac:
+        return name
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", fac.facility_name).strip("-")
+    if name.lower().startswith(slug.lower()):
+        return name
+    for prefix in (fac.facility_code, re.sub(r"[^A-Za-z0-9]+", "_", fac.facility_name).strip("_")[:40]):
+        if prefix and name.startswith(prefix + "_"):
+            name = name[len(prefix) + 1:]
+            break
+    return f"{slug}_{name}"
+
+
 def _out(j: PackJob) -> dict:
     files = json.loads(j.files_json or "[]")
+    sess = object_session(j)
+    fac = sess.get(Facility, j.facility_id) if sess and j.facility_id else None
     return {
         "id": j.id, "kind": j.kind, "label": j.label, "facility_id": j.facility_id,
         "status": j.status, "log_tail": j.log_tail,
-        "files": [{"path": f, "name": os.path.basename(f),
+        "files": [{"path": f, "name": _download_name(fac, f),
                    "folder": os.path.relpath(os.path.dirname(f), OUT_ROOT)} for f in files],
         "created_at": j.created_at, "started_at": j.started_at, "completed_at": j.completed_at,
     }
@@ -271,4 +288,4 @@ def download(job_id: int, path: str, db: Session = Depends(get_db), current_user
     p = Path(path).resolve()
     if OUT_ROOT.resolve() not in p.parents or not p.is_file():
         raise HTTPException(404, "File no longer exists")
-    return FileResponse(str(p), filename=p.name)
+    return FileResponse(str(p), filename=_download_name(db.get(Facility, job.facility_id), str(p)))

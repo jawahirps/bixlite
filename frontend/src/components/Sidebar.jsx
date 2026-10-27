@@ -28,6 +28,7 @@ const ICONS = {
   denial: ["M12 3l9 16H3z", "M12 10v4", "M12 17h.01"],
   resub: ["M4 4v5h5", "M20 20v-5h-5", "M5.5 15a7 7 0 0 0 12.9 1.5", "M18.5 9A7 7 0 0 0 5.6 7.5"],
   analytics: ["M4 20V10", "M10 20V4", "M16 20v-7", "M3 20h18"],
+  packs: ["M6 3h9l4 4v14H6z", "M14 3v5h5", "M9 13h7", "M9 17h5"],
   profiles: ["M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8z", "M4 21a8 8 0 0 1 16 0"],
   jobs: ["M21 12a9 9 0 1 1-3-6.7", "M21 4v5h-5", "M12 8v4l3 2"],
   settings: ["M4 21v-7", "M4 10V3", "M12 21v-9", "M12 8V3", "M20 21v-5", "M20 12V3", "M2 14h4", "M10 8h4", "M18 16h4"],
@@ -52,6 +53,7 @@ export const NAV_SECTIONS = [
     label: "Reports & analytics",
     items: [
       { to: "/analytics", label: "Analytics & reports", icon: "analytics" },
+      { to: "/report-packs", label: "Client report packs", icon: "packs" },
       { to: "/clinical-profiles", label: "Clinical profiles", icon: "profiles" },
     ],
   },

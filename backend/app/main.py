@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse
 
 from .config import get_settings
 from .database import SessionLocal, init_db
-from .routers import analytics, auth, calibration, clinical_profiles, dha_sync, facilities, reports, portal, receipts, resub, scrub
+from .routers import analytics, auth, bulk_resub, calibration, clinical_profiles, dha_sync, facilities, packs, reports, portal, receipts, resub, scrub
 from .seed import run_seed
 
 settings = get_settings()
@@ -35,6 +35,19 @@ app.add_middleware(
 )
 
 
+def _prepare_bulk_resub() -> None:
+    """Create the import tables; imports left mid-fetch by a restart are marked failed."""
+    from .services import bulk_resub as br
+    db = SessionLocal()
+    try:
+        br.ensure_tables(db.get_bind())
+        for b in db.query(br.ReconImportBatch).filter(br.ReconImportBatch.status.in_(("Queued", "Fetching", "Matching"))):
+            b.status, b.error = "Failed", "Interrupted by app restart — queue the fetch again."
+        db.commit()
+    finally:
+        db.close()
+
+
 @app.on_event("startup")
 def on_startup() -> None:
     init_db()
@@ -44,6 +57,8 @@ def on_startup() -> None:
         _cleanup_stale_jobs(db)
     finally:
         db.close()
+    packs.resume_on_startup()
+    _prepare_bulk_resub()
 
 
 def _cleanup_stale_jobs(db) -> None:
@@ -128,6 +143,8 @@ app.include_router(receipts.router)               # /api/receipts/* — JWT-prot
 app.include_router(scrub.router)                  # /api/scrub/*   — JWT-protected
 app.include_router(calibration.router)            # /api/calibration/* — JWT-protected
 app.include_router(resub.router)                  # /api/resub/* — JWT-protected
+app.include_router(bulk_resub.router)             # /api/resub/bulk/* — JWT-protected
+app.include_router(packs.router)                  # /api/packs/* — JWT-protected
 
 # ── Serve React frontend (built with `npm run build`) ────────────────────────
 # Routes are always registered so they survive uvicorn --reload cycles where

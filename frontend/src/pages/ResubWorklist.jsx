@@ -5,10 +5,11 @@
  * Action List; items that need facility input (doctor justification,
  * approvals, documents, eligibility) are routed to the facility, who reply here.
  *
- * Tabs: New Today · Action List · Needs Facility · Closed · Playbook
+ * Tabs: New Today · Action List · Needs Facility · Closed · Playbook · Bulk resubmission
  */
 import { useEffect, useMemo, useState } from "react";
 import apiClient from "../api/client";
+import BulkResub from "./BulkResub";
 import { useAuth } from "../context/AuthContext";
 
 const PRIORITY_STYLE = {
@@ -189,6 +190,7 @@ export default function ResubWorklist() {
         { key: "reconciliation", label: `Reconciliation (${lists.reconciliation.length})` },
         { key: "closed", label: `Closed (${lists.closed.length})` },
         { key: "playbook", label: `Playbook (${playbook.length})` },
+        { key: "bulk", label: "Bulk resubmission" },
       ];
 
   return (
@@ -275,7 +277,9 @@ export default function ResubWorklist() {
         ))}
       </div>
 
-      {tab === "playbook" ? (
+      {tab === "bulk" ? (
+        <BulkResub facilityId={facilityId} facilities={facilities.filter(f => f.facility_code !== "GHAF-001")} />
+      ) : tab === "playbook" ? (
         <Playbook rows={playbook} setRows={setPlaybook} canEdit={canEditPlaybook} setError={setError} />
       ) : (
         <>

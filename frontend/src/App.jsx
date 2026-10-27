@@ -13,6 +13,7 @@ import Jobs from "./pages/Jobs";
 import Scrubber from "./pages/Scrubber";
 import Calibration from "./pages/Calibration";
 import ResubWorklist from "./pages/ResubWorklist";
+import ReportPacks from "./pages/ReportPacks";
 
 export default function App() {
   return (
@@ -28,6 +29,7 @@ export default function App() {
           <Route path="/clinical-profiles" element={<ClinicalProfiles />} />
           <Route path="/dha-sync" element={<DhaSync />} />
           <Route path="/analytics" element={<Analytics />} />
+          <Route path="/report-packs" element={<ReportPacks />} />
           <Route path="/login-activity" element={<LoginActivity />} />
           <Route path="/facility-settings" element={<FacilitySettings />} />
           <Route path="/jobs" element={<Jobs />} />

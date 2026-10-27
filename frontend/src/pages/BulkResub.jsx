@@ -32,6 +32,7 @@ function ImportDetail({ id, onClose, onUseBatch }) {
   const [status, setStatus] = useState("");
   const [page, setPage] = useState(1);
   const [err, setErr] = useState("");
+  const [preparing, setPreparing] = useState(false);
 
   const load = () =>
     apiClient.get(`/resub/bulk/imports/${id}`, { params: { status: status || undefined, page } })
@@ -54,6 +55,14 @@ function ImportDetail({ id, onClose, onUseBatch }) {
     const res = await apiClient.get(`/resub/bulk/imports/${id}/exceptions`, { responseType: "blob" });
     saveBlob(res, `reconciliation-exceptions-${id}.xlsx`);
   };
+  const reconFiles = async () => {
+    setPreparing(true); setErr("");
+    try {
+      const res = await apiClient.post(`/resub/bulk/imports/${id}/reconciliation`, null, { responseType: "blob", timeout: 600000 });
+      saveBlob(res, `reconciliation-import-${id}.zip`);
+    } catch (e) { setErr("Could not prepare the reconciliation files."); }
+    finally { setPreparing(false); }
+  };
 
   return (
     <div className="gh-card space-y-3 p-4">
@@ -72,6 +81,10 @@ function ImportDetail({ id, onClose, onUseBatch }) {
             Fetch missing ({b.fetch_windows} window{b.fetch_windows === 1 ? "" : "s"})
           </button>
           <button className="gh-btn-secondary gh-btn-sm" onClick={exceptions}>Download exceptions</button>
+          <button className="gh-btn-secondary gh-btn-sm" disabled={running || preparing} onClick={reconFiles}
+            title="Exact-amount claims only: XML for DHA, JSON for Riayati, type reconciliation. Nothing is sent.">
+            {preparing ? "Preparing…" : "Prepare reconciliation files"}
+          </button>
           <button className="gh-btn-secondary gh-btn-sm" onClick={onClose}>Close</button>
         </div>
       </div>

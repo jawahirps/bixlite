@@ -10,16 +10,20 @@ bulk_resub.py — Bulk resubmission screen (tab inside the Resubmission worklist
   GET  /api/resub/bulk/imports/{id}      batch + rows (100 per page, ?status=&page=)
   POST /api/resub/bulk/imports/{id}/fetch      queue the bounded DHA / Riayati fetch
   GET  /api/resub/bulk/imports/{id}/exceptions  .xlsx of every row not Matched
+  POST /api/resub/bulk/imports/{id}/reconciliation  .zip of reconciliation XML / JSON + amount check
 
 Facility users are limited to their own facility; import batches are visible only to
 the user who uploaded them. Nothing is transmitted to DHA or Riayati.
 """
 from __future__ import annotations
 
+import io
 import threading
+import zipfile
 import uuid
 from datetime import datetime, timezone
 from math import ceil
+from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -31,6 +35,7 @@ from ..database import get_db
 from ..models import Facility, User
 from ..security import get_current_user
 from ..services import bulk_resub as br
+from ..services import recon_resub
 
 router = APIRouter(prefix="/api/resub/bulk", tags=["bulk resubmission"])
 ACTIVE_STATES = ("Queued", "Fetching", "Matching")
@@ -193,3 +198,18 @@ def exceptions(batch_id: int, db: Session = Depends(get_db), user: User = Depend
                     media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     headers={"Content-Disposition":
                              f'attachment; filename="reconciliation-exceptions-{batch_id}-{datetime.now():%Y%m%d%H%M}.xlsx"'})
+
+
+@router.post("/imports/{batch_id}/reconciliation")
+def reconciliation_files(batch_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    b = _own_batch(db, user, batch_id)
+    if b.status in ACTIVE_STATES:
+        raise HTTPException(409, "Import is still running")
+    res = recon_resub.prepare(db, batch_id)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in Path(res["folder"]).iterdir():
+            zf.write(f, f.name)
+    return Response(buf.getvalue(), media_type="application/zip",
+                    headers={"Content-Disposition":
+                             f'attachment; filename="reconciliation-import-{batch_id}-{datetime.now():%Y%m%d%H%M}.zip"'})

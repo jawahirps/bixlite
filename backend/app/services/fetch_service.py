@@ -175,8 +175,8 @@ class DHPOSoapClient:
             login=login,
             pwd=pwd,
         )
-        return_code   = result.getNewTransactionsResult
-        xml_str       = result.xmlTransactions or ""
+        return_code   = int(result.GetNewTransactionsResult)
+        xml_str       = result.xmlTransaction or ""
         error_msg     = result.errorMessage or ""
 
         if return_code not in DHPO_OK_CODES:

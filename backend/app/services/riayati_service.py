@@ -45,7 +45,7 @@ import socket
 import subprocess
 import threading
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlparse
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional
@@ -416,7 +416,7 @@ class RiayatiJsonParser:
 
         for rec in records:
             try:
-                rec.parsed_at = datetime.utcnow()
+                rec.parsed_at = datetime.now(timezone.utc)
                 if rec.xml_type == "RiayatiClaimSubmission":
                     n = self._parse_claim_submission(rec)
                 else:
@@ -446,6 +446,7 @@ class RiayatiJsonParser:
 
         payer_id    = str(header.get("PayerID", "") or "").strip() or "UNKNOWN"
         receiver_id = str(header.get("ReceiverID", "") or "").strip() or None
+        sender_id   = str(header.get("SenderID", "") or "").strip() or None
         tx_date_str = header.get("TransactionDate", "")
         tx_date     = _parse_date(tx_date_str)
         sub_date    = tx_date or record.submission_date or date.today()
@@ -500,6 +501,7 @@ class RiayatiJsonParser:
                 facility_id         = record.facility_id,
                 raw_xml_id          = record.id,
                 source_channel      = "API",
+                sender_id           = sender_id,
                 claim_id            = claim_id,
                 claim_id_payer      = str(claim_data.get("IDPayer", "") or "").strip() or None,
                 encounter_id        = encounter_id,
@@ -774,7 +776,7 @@ class RiayatiSyncService:
                 inactive.append((label, license_id or facility.license_id, str(exc)))
 
         if inactive and len(inactive) == len(accounts):
-            fetch_log.completed_at = datetime.utcnow()
+            fetch_log.completed_at = datetime.now(timezone.utc)
             fetch_log.status       = "inactive"
             fetch_log.error_detail = {
                 "error": "; ".join(f"{lbl}: {msg}" for lbl, _, msg in inactive),
@@ -796,7 +798,7 @@ class RiayatiSyncService:
             fetch_log.records_failed += parser.quarantined
             errors.append(f"{parser.quarantined} file(s) failed to parse (quarantined)")
 
-        fetch_log.completed_at = datetime.utcnow()
+        fetch_log.completed_at = datetime.now(timezone.utc)
         fetch_log.status       = "success" if not errors else "partial"
         if errors:
             fetch_log.error_detail = {"errors": errors}

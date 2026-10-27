@@ -339,16 +339,29 @@ APOLLO_NETWORK = {
 _spec_cache: Dict[str, str] = {}
 
 
+ASSET_DIRS = ("~/ghaf-report-scripts/assets", "~/Desktop/report-scripts/assets")
+
+
+def asset_path(filename: str) -> str:
+    """Lookup files kept with the report scripts (outside the repo). The home-folder copy comes first because
+    background services (launchd) cannot read the Desktop."""
+    import os
+    for d in ASSET_DIRS:
+        p = os.path.join(os.path.expanduser(d), filename)
+        if os.path.exists(p):
+            return p
+    return os.path.join(os.path.expanduser(ASSET_DIRS[0]), filename)
+
+
 def _specialties() -> Dict[str, str]:
     """Clinician licence -> specialty, from the eClaimLink clinician list kept with the report scripts."""
     if _spec_cache.get("__loaded__"):
         return _spec_cache
     _spec_cache["__loaded__"] = "1"
     import csv, os
-    base = os.path.expanduser("~/Desktop/report-scripts/assets")
     for fn in ("eclaimlink_clinicians.csv", "clinician_names.csv"):
         try:
-            with open(os.path.join(base, fn), newline="") as f:
+            with open(asset_path(fn), newline="") as f:
                 for r in csv.DictReader(f):
                     sp = (r.get("specialty") or "").strip()
                     if sp:

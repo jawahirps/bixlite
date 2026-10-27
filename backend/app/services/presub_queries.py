@@ -44,8 +44,8 @@ AUTH_MIN_LINES, AUTH_MIN_RATE = 5, 0.30
 DENTAL_CODE = re.compile(r"^D\d{4}$")                 # CDT codes — always need approval
 DENTAL_DX = re.compile(r"^K0[0-8]")                    # K00–K08 teeth and gums
 ORAL_DX = re.compile(r"^K(09|1[0-4])")                 # K09–K14 mouth / tongue / lips — dental only with a dentist
-DXAUTH_MIN_RATE = 0.20
-NOAUTH_MIN_LINES, NOAUTH_PAID_RATE = 10, 0.70   # payer pays the code without approval → no partial-approval query      # diagnosis categories a payer wants approved (e.g. maternity, refraction)
+ERP_DUP_MIN_CLAIMS, ERP_DUP_SHARE = 10, 0.50   # ≥ half a day's invoices fully doubled → ERP duplication
+DXAUTH_MIN_RATE = 0.20      # diagnosis categories a payer wants approved (e.g. maternity, refraction)
 # diagnosis–code fit (MNEC-003/004 "without supporting diagnoses"): query only when this payer denies the code
 # with this diagnosis category but pays it with others; payer-wide blanket denials are payer policy, not a query
 DXFIT_MIN_LINES, DXFIT_MIN_RATE = 8, 0.60
@@ -116,11 +116,7 @@ class History:
         bylock = defaultdict(lambda: [0, 0, 0])          # (rcv, code, dx category) -> [lines, mnec-003/004, paid]
         dx_claims = defaultdict(set); dx_ncov = defaultdict(set)
         dx_auth = defaultdict(lambda: [0, 0])            # (rcv, dx category) -> [lines without approval, AUTH-001/002]
-        no_auth = defaultdict(lambda: [0, 0])            # (rcv, code) billed without approval -> [lines, paid]
         for r in db.execute(_HIST_SQL, {"f": fid, "days": HISTORY_DAYS}):
-            if not r.has_auth:
-                na = no_auth[(r.rcv, r.code)]
-                na[0] += 1; na[1] += r.den == ""
             if r.pdx and not r.has_auth:
                 da = dx_auth[(r.rcv, r.pdx[:3])]
                 da[0] += 1; da[1] += r.den in ("AUTH-001", "AUTH-002")
@@ -139,7 +135,6 @@ class History:
                     dx_ncov[(r.rcv, r.pdx)].add(r.cid)
         self.lines = lines
         self.dx_auth = dx_auth
-        self.no_auth = no_auth
         self.blocks = defaultdict(dict)
         for (rcv, code, blk), v in bylock.items():
             self.blocks[(rcv, code)][blk] = v
@@ -150,11 +145,6 @@ class History:
     def auth(self, rcv, code):
         n, a, _, _, _ = self.lines.get((rcv, code), (0, 0, 0, 0, 0))
         return (a, n) if n >= AUTH_MIN_LINES and a / n >= AUTH_MIN_RATE else None
-
-    def paid_without_approval(self, rcv, code):
-        """This payer usually pays the code without an approval number."""
-        n, paid = self.no_auth.get((rcv, code), (0, 0))
-        return n >= NOAUTH_MIN_LINES and paid / n >= NOAUTH_PAID_RATE
 
     def dx_approval(self, rcv, dx):
         """Payer denies services for this diagnosis category when billed without approval → (denied, lines)."""
@@ -215,9 +205,9 @@ FROM scrub_claims sc WHERE sc.session_id = :sid ORDER BY sc.encounter_start, sc.
 """)
 
 
-def _q(rule, qtype, status, item, query, incharge="GENERAL", evidence=None):
+def _q(rule, qtype, status, item, query, incharge="GENERAL", evidence=None, suggested=None):
     return dict(rule_code=rule, query_type=qtype, status=status, item=item, query_text=query.upper(),
-                incharge=incharge, evidence=evidence)
+                incharge=incharge, evidence=evidence, suggested_action=suggested.upper() if suggested else None)
 
 
 def _drug_sequencing(acts) -> List[dict]:
@@ -298,11 +288,48 @@ def generate(db: Session, session_id: int) -> int:
     session_visits: Dict[str, list] = defaultdict(list)   # earlier consults in this same batch
     policy_seen: set = set()
 
+    # days where most invoices are fully doubled point to an ERP problem, not individual billing errors
+    def _fully_doubled(lines):
+        n = defaultdict(int)
+        for a in lines:
+            n[(a.activity_code, float(a.quantity or 1), float(a.net or 0), a.authorization_id, a.clinician_id)] += 1
+        return bool(n) and all(v == 2 for v in n.values())
+    per_day = defaultdict(lambda: [0, 0])
+    for c in claims:
+        if c["d"]:
+            per_day[c["d"]][0] += 1
+            per_day[c["d"]][1] += _fully_doubled(acts[c["id"]])
+    erp_days = {d: v for d, v in per_day.items() if v[1] >= ERP_DUP_MIN_CLAIMS and v[1] / v[0] >= ERP_DUP_SHARE}
+
     rows = []
     for c in claims:
         cid = c["id"]; A = acts[cid]; D = dxs[cid]; rcv = c["rcv"]
-        codes = {a.activity_code for a in A}
         out: List[dict] = []
+
+        # ---- duplicate lines (same code, quantity, net, approval, clinician) ------------------
+        # checked first; the other rules then see each service once, so a doubled parent code is not
+        # also reported as a sequencing error
+        groups: Dict[tuple, list] = defaultdict(list)
+        for a in A:
+            groups[(a.activity_code, float(a.quantity or 1), float(a.net or 0), a.authorization_id, a.clinician_id)].append(a)
+        dups = [(k, v) for k, v in groups.items() if len(v) > 1]
+        if dups:
+            extra = sum(len(v) - 1 for _, v in dups)
+            extra_net = sum(k[2] * (len(v) - 1) for k, v in dups)
+            codes_txt = ", ".join(f"{k[0]}{' x' + str(len(v)) if len(v) > 2 else ''}" for k, v in dups)
+            whole = len(groups) == len(dups)
+            lead = (f"All {len(groups)} services are billed twice on this invoice" if whole and all(len(v) == 2 for _, v in dups)
+                    else f"{len(dups)} service(s) billed more than once with the same quantity and amount")
+            out.append(_q("DUPLICATE_LINES", "Billing mistake (quantity / duplicate / price)", "BILLING MISTAKE",
+                          codes_txt,
+                          f"{lead} ({codes_txt}). Duplicate lines will be rejected (DUPL-001). Kindly remove the "
+                          f"duplicate lines, or bill the quantity on one line if the service was given more than once.",
+                          suggested=(f"Remove {extra} duplicate line(s), net AED {extra_net:.2f}; keep one line per service."
+                                     + (f" ERP issue: {erp_days[c['d']][1]} of {erp_days[c['d']][0]} invoices dated "
+                                        f"{c['d']:%d/%m/%Y} are doubled — report to Simplex HIMES support."
+                                        if c["d"] in erp_days else ""))))
+            A = [v[0] for v in groups.values()]
+        codes = {a.activity_code for a in A}
 
         # ---- coding corrections -------------------------------------------------------
         blocks = {d[:3]: d for d in D}
@@ -356,21 +383,34 @@ def generate(db: Session, session_id: int) -> int:
                           f"Kindly check & update the approval number."))
             done_dental = {a.activity_code for a in dental}
             no_auth = [a for a in no_auth if a.activity_code not in done_dental]
-        if with_auth and no_auth:
-            no_auth = [a for a in no_auth if not hist.paid_without_approval(rcv, a.activity_code)]
-        if with_auth and no_auth:
-            miss = ", ".join(sorted({a.activity_code for a in no_auth}))
+        # an approval exists but does not cover the whole encounter: payers check approval compliance — every
+        # service of the encounter, consultation included, must be on the approval and the dx must match it,
+        # so services without approval go to a separate encounter (the facility splits the invoice)
+        enc_with = [a for a in A if float(a.net or 0) > 0 and a.authorization_id]
+        enc_without = [a for a in A if float(a.net or 0) > 0 and not a.authorization_id and a not in dental]
+        if enc_with and enc_without:
+            miss = ", ".join(sorted({a.activity_code for a in enc_without}))
+            approved = ", ".join(sorted({a.activity_code for a in enc_with}))
+            auths = ", ".join(sorted({a.authorization_id for a in enc_with}))
+            n_ok, n_all = len(enc_with), len(enc_with) + len(enc_without)
+            net_ok = sum(float(a.net or 0) for a in enc_with)
+            net_no = sum(float(a.net or 0) for a in enc_without)
             out.append(_q("APPROVAL_PARTIAL", "Approval missing — not all services", "APPROVAL MISSING", miss,
-                          f"Approval added for all billed services except {miss}. Kindly take approval along with other "
-                          f"services, or bill the unapproved services separately."))
-        elif no_auth and D and hist.dx_approval(rcv, D[0]):
+                          f"Approval {auths} is added only for {approved} ({n_ok} of {n_all} services). {miss} "
+                          f"billed without approval. All services of an encounter, including consultation, must be "
+                          f"covered by the approval and the diagnosis must match the approval. Kindly take approval "
+                          f"along with the other services, or bill the unapproved services separately.",
+                          suggested=f"Split invoice → Invoice 1 (approved): {approved}, approval {auths}, net AED "
+                                    f"{net_ok:.2f} | Invoice 2 (separate encounter, no approval): {miss}, net AED "
+                                    f"{net_no:.2f} — take approval or bill separately."))
+        elif not enc_with and no_auth and D and hist.dx_approval(rcv, D[0]):
             den, n = hist.dx_approval(rcv, D[0])
             miss = ", ".join(sorted({a.activity_code for a in no_auth}))
             out.append(_q("APPROVAL_DX", "Approval missing", "APPROVAL MISSING", f"{D[0]} / {miss}",
                           f"Approval missing for {miss} with dx {D[0]}. This payer requires approval for {D[0][:3]} "
                           f"cases (denied for no approval on {den} of {n} recent lines). Kindly check & update the "
                           f"approval number.", evidence=f"{den}/{n} lines without approval denied AUTH-001/002"))
-        elif no_auth:
+        elif not enc_with and no_auth:
             risky = [(a, hist.auth(rcv, a.activity_code)) for a in no_auth]
             risky = [(a, h) for a, h in risky if h]
             if risky:
@@ -508,11 +548,11 @@ def generate(db: Session, session_id: int) -> int:
 # ---------------------------------------------------------------------------
 
 BASE_HEADERS = ["Batch", "Insurance", "MRN / File no", "Invoice no", "Claim ID", "Date", "Patient name",
-                "Procedure / Code / Dx", "Type", "Query type", "Status", "Query", "In-charge"]
+                "Procedure / Code / Dx", "Type", "Query type", "Status", "Query", "Suggested action", "In-charge"]
 
 # ---- code type (Dental / Consultation / Laboratory / Radiology …) for the "Type" column -------------------
 # CPT groups come from the DHA CPT list, kept outside the repo (AMA-licensed) as code,type in
-# ~/Desktop/report-scripts/assets/cpt_types.csv; without it, CPT number ranges are used.
+# report-scripts assets/cpt_types.csv (see resub_worklist.asset_path); without it, CPT number ranges are used.
 _CPT_TYPES: Optional[Dict[str, str]] = None
 _TOKEN = re.compile(r"\b(D\d{4}|\d{4}-\d{6}-\d{4}|[A-Z]\d{2}(?:\.[0-9A-Z]{1,4})?|[A-Z]\d{4}|\d{4}[FTU]|\d{5}|\d{1,2}(?:\.\d{2})?)\b")
 
@@ -523,7 +563,7 @@ def _cpt_types() -> Dict[str, str]:
         import csv, os
         _CPT_TYPES = {}
         try:
-            with open(os.path.expanduser("~/Desktop/report-scripts/assets/cpt_types.csv"), newline="") as f:
+            with open(rw.asset_path("cpt_types.csv"), newline="") as f:
                 _CPT_TYPES = {r["code"].upper(): r["type"] for r in csv.DictReader(f)}
         except OSError:
             pass
@@ -570,9 +610,11 @@ def item_type(item: Optional[str]) -> str:
     return ", ".join(act or seen)
 GHAF_HEADERS = ["Action by", "Ghaf review", "Ghaf remarks"]
 FACILITY_HEADERS = ["Facility response", "Facility remarks", "Closed (Y/N)"]
-FACILITY_RESPONSES = ["FIXED", "LINE REMOVED", "JUSTIFICATION ADDED", "APPROVAL ATTACHED",
+FACILITY_RESPONSES = ["FIXED", "LINE REMOVED", "JUSTIFICATION ADDED", "APPROVAL ATTACHED", "APPROVAL TAKEN",
+                      "INVOICE SPLIT",
                       "CORRECTION ACCEPTED", "CORRECTION NOT ACCEPTED", "NO ACTION"]
 GHAF_REVIEW = ["APPROVAL FOUND & ENTERED", "CORRECTION APPLIED", "NOT FOUND - SEND TO FACILITY",
+               "NOT FOUND - FACILITY TO SPLIT INVOICE",
                "SEND TO FACILITY", "NO ISSUE - CLOSE"]
 # first pass: Ghaf enters approval numbers from the eClaimLink auth portal and applies coding corrections in the ERP
 GHAF_APPROVAL_RULES = {"APPROVAL_MISSING", "APPROVAL_PARTIAL", "APPROVAL_DX", "APPROVAL_DENTAL"}
@@ -581,6 +623,8 @@ BATCH_DAYS = (("1ST", 1, 10), ("2ND", 11, 20), ("FINAL", 21, 31))
 
 
 def action_by(rule_code: str, status: str) -> str:
+    if rule_code == "APPROVAL_PARTIAL":
+        return "GHAF - CHECK AUTH PORTAL, ELSE FACILITY - SPLIT INVOICE"
     if rule_code in GHAF_APPROVAL_RULES:
         return "GHAF - CHECK AUTH PORTAL"
     if status == "CORRECTION APPLIED":
@@ -624,7 +668,7 @@ def to_workbook(db: Session, session_ids: List[int], batch: Optional[str], audie
     rows = db.execute(text("""
         SELECT sc.claim_id, sc.patient_id, sc.encounter_start AS d,
                upper(coalesce(nullif(sc.receiver_id,''), sc.payer_id,'')) AS rcv,
-               q.rule_code, q.item, q.query_type, q.status, q.query_text, q.incharge
+               q.rule_code, q.item, q.query_type, q.status, q.query_text, q.suggested_action, q.incharge
         FROM scrub_queries q JOIN scrub_claims sc ON sc.id = q.scrub_claim_id
         WHERE q.session_id = ANY(:s) AND q.rule_code <> 'PAYER_POLICY'
           AND (CAST(:d0 AS date) IS NULL OR sc.encounter_start >= CAST(:d0 AS date))
@@ -651,7 +695,7 @@ def to_workbook(db: Session, session_ids: List[int], batch: Optional[str], audie
                 invoice_no(r.claim_id), r.claim_id, r.d, None, r.item,
                 item_type(r.item) or ("Dental" if r.rule_code in ("DENTAL_RULE", "APPROVAL_DENTAL") else None),
                 r.query_type, r.status,
-                r.query_text, r.incharge]
+                r.query_text, r.suggested_action, r.incharge]
         who = action_by(r.rule_code, r.status)
         if ghaf:
             line += [who, None, None]
@@ -659,9 +703,10 @@ def to_workbook(db: Session, session_ids: List[int], batch: Optional[str], audie
         ws.append(line)
         ws.cell(ws.max_row, headers.index("Date") + 1).number_format = "DD/MM/YYYY"
         ws.cell(ws.max_row, headers.index("Query") + 1).alignment = Alignment(wrap_text=True, vertical="top")
+        ws.cell(ws.max_row, headers.index("Suggested action") + 1).alignment = Alignment(wrap_text=True, vertical="top")
         if ghaf and who != "FACILITY":
             ws.cell(ws.max_row, headers.index("Action by") + 1).fill = ghaf_fill
-    widths = [10, 28, 14, 14, 30, 12, 18, 22, 18, 34, 22, 70, 11] + ([24, 28, 30] if ghaf else []) + [22, 30, 10]
+    widths = [10, 28, 14, 14, 30, 12, 18, 22, 18, 34, 22, 70, 50, 11] + ([24, 28, 30] if ghaf else []) + [22, 30, 10]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
     ws.freeze_panes = "A2"

@@ -400,9 +400,11 @@ def _f(v) -> float | str:
         return str(v)
 
 
-def _claim_gateway(source_channel: Optional[str]) -> str:
-    """Return human-readable gateway label from source_channel."""
+def _claim_gateway(source_channel: Optional[str], sender_id: Optional[str] = None) -> str:
+    """Return human-readable gateway label from source_channel (Riayati split by sender licence: HF-… = SHA)."""
     if source_channel == "API":
+        if sender_id:
+            return "Riayati SHA" if sender_id.upper().startswith("HF-") else "Riayati RHA (MOH)"
         return "Riayati (MOH)"
     if source_channel == "FILE":
         return "DHA eClaimLink"
@@ -785,7 +787,7 @@ def _build_claim_summary(db, facility_id, payer_id, encounter_type,
 
         _write_row(ws, row_idx, [
             fac_name,                                                       # Facility Name
-            _claim_gateway(claim.source_channel),                           # Claim Gateway
+            _claim_gateway(claim.source_channel, claim.sender_id),                           # Claim Gateway
             claim.claim_id,                                                 # Claim Number
             _derive_receiver_id(claim.receiver_id, claim.payer_id),        # Receiver Id
             _payer_name(_derive_receiver_id(claim.receiver_id, claim.payer_id)),  # Receiver Name
@@ -900,7 +902,7 @@ def _build_claim_activity(db, facility_id, payer_id, encounter_type,
         fac_name, fac_license = fac_map.get(claim.facility_id, ("", ""))
         _write_row(ws, row_idx, [
             fac_name,
-            _claim_gateway(claim.source_channel),
+            _claim_gateway(claim.source_channel, claim.sender_id),
             claim.claim_id,
             _derive_receiver_id(claim.receiver_id, claim.payer_id),
             _payer_name(_derive_receiver_id(claim.receiver_id, claim.payer_id)),
@@ -1308,6 +1310,8 @@ def _build_remittance_activity(db, facility_id, payer_id, encounter_type,
         if date_to:
             q = q.filter(ra_xml_store.submission_date <= date_to)
 
+    from sqlalchemy.orm import defer as _defer   # file names / dates only, never the XML contents
+    q = q.options(_defer(ra_xml_store.xml_content), _defer(claim_xml_store.xml_content))
     rows = q.order_by(ra_xml_store.submission_date.desc(), Claim.claim_id).all()
 
     wb = openpyxl.Workbook()
@@ -1336,8 +1340,8 @@ def _build_remittance_activity(db, facility_id, payer_id, encounter_type,
         ord_clinician = _clinician_name(ord_clin_id)
 
         _write_row(ws, row_idx, [
-            rem.facility_id, fac_name,
-            _claim_gateway(claim.source_channel),
+            (fac_map.get(rem.facility_id, ("", ""))[1] or rem.facility_id), fac_name,
+            _claim_gateway(claim.source_channel, claim.sender_id),
             _derive_receiver_id(claim.receiver_id, claim.payer_id),
             _payer_name(_derive_receiver_id(claim.receiver_id, claim.payer_id)),
             claim.payer_id, _payer_name(claim.payer_id),
@@ -1465,7 +1469,7 @@ def _build_denial_query(db, facility_id, payer_id, encounter_type,
 
         _write_row(ws, row_idx, [
             ra_history, sub_level, lic_no, fac_name,
-            _claim_gateway(claim.source_channel),
+            _claim_gateway(claim.source_channel, claim.sender_id),
             _derive_receiver_id(claim.receiver_id, claim.payer_id),
             _payer_name(_derive_receiver_id(claim.receiver_id, claim.payer_id)),
             claim.payer_id, _payer_name(claim.payer_id),
@@ -1524,6 +1528,30 @@ REPORT_BUILDERS = {
 _RUNNING_REPORT_PIDS: dict[int, int] = {}
 
 
+def _descriptive_filename(db, filename, facility_id, facility_ids, date_from, date_to):
+    """ReportName_<facility>_<from>_to_<to>_<timestamp>.xlsx — facility and period in the file name."""
+    import re as _re
+    from sqlalchemy import text as _text
+    if not filename:
+        return filename
+    m = _re.match(r"^(.*?)_(\d{8}_\d{4})\.xlsx$", filename)
+    base, ts = (m.group(1), m.group(2)) if m else (filename.rsplit(".", 1)[0], datetime.now().strftime("%Y%m%d_%H%M"))
+    raw = facility_ids if facility_ids else ([facility_id] if facility_id else [])
+    if isinstance(raw, str):                     # "13" or "5,6,7" from the queue
+        raw = raw.split(",")
+    ids = sorted({int(str(i).strip()) for i in raw if str(i).strip()})
+    if len(ids) == 1:
+        name = db.execute(_text("SELECT facility_name FROM facilities WHERE id = :i"), {"i": ids[0]}).scalar() or f"Facility{ids[0]}"
+        fac = _re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-")[:40]
+    elif ids:
+        fac = f"{len(ids)}-facilities"
+    else:
+        fac = "All-facilities"
+    period = f"{date_from}_to_{date_to}" if date_from and date_to else (f"from_{date_from}" if date_from else
+                                                                     (f"to_{date_to}" if date_to else ""))
+    return "_".join(x for x in (base, fac, period, ts) if x) + ".xlsx"
+
+
 def _run_report_background(
     job_id: int,
     builder,
@@ -1543,6 +1571,7 @@ def _run_report_background(
         wb, filename, row_count = builder(
             db, facility_id, payer_id, encounter_type, date_from, date_to, date_field,
             facility_ids=facility_ids)
+        filename = _descriptive_filename(db, filename, facility_id, facility_ids, date_from, date_to)
         file_bytes = _wb_to_bytes(wb)
         status    = "completed"
         error_msg = None
@@ -1947,10 +1976,11 @@ def _build_claim_summary_v2(db, facility_id, payer_id, encounter_type,
         if date_to:
             _scope_q = _scope_q.filter(Remittance.remittance_date <= date_to)
     else:
+        # Range on the raw column (no cast) so the encounter_start index can be used
         if date_from:
-            _scope_q = _scope_q.filter(cast(Claim.encounter_start, Date) >= date_from)
+            _scope_q = _scope_q.filter(Claim.encounter_start >= cast(date_from, Date))
         if date_to:
-            _scope_q = _scope_q.filter(cast(Claim.encounter_start, Date) <= date_to)
+            _scope_q = _scope_q.filter(Claim.encounter_start < cast(date_to, Date) + 1)
     scope_cte = _scope_q.distinct().cte("cs_v2_scope")
 
     def _in_scope(fid_col, cid_col):
@@ -2179,7 +2209,12 @@ def _build_claim_summary_v2(db, facility_id, payer_id, encounter_type,
     q = _apply_filters(q, facility_id, payer_id, encounter_type,
                        date_from, date_to, date_field, rem_model=latest_ra_rem,
                        facility_ids=facility_ids)
+    # Same safety net as Claim Cycle V2: on long periods the planner picks nested loops over the
+    # subqueries and one facility-year ran for over an hour; hash joins finish in minutes.
+    from sqlalchemy import text as _text
+    db.execute(_text("SET LOCAL enable_nestloop = off"))
     rows = q.order_by(Claim.submission_date.desc(), Claim.claim_id).all()
+    db.execute(_text("SET LOCAL enable_nestloop = on"))
 
     # ── Bulk XML filename lookup ──────────────────────────────────────────────
     xml_ids: set = set()
@@ -2301,7 +2336,7 @@ def _build_claim_summary_v2(db, facility_id, payer_id, encounter_type,
 
         _write_row(ws, row_idx, [
             fac_name,                                                          # Facility Name
-            _claim_gateway(claim.source_channel),                              # Claim Gateway
+            _claim_gateway(claim.source_channel, claim.sender_id),                              # Claim Gateway
             claim.claim_id,                                                    # Claim Number
             _derive_receiver_id(claim.receiver_id, claim.payer_id),           # Receiver Id
             _payer_name(_derive_receiver_id(claim.receiver_id, claim.payer_id)), # Receiver Name
@@ -2494,7 +2529,7 @@ def _build_claim_activity_v2(db, facility_id, payer_id, encounter_type,
 
         _write_row(ws, row_idx, [
             fac_name,
-            _claim_gateway(claim.source_channel),
+            _claim_gateway(claim.source_channel, claim.sender_id),
             claim.claim_id,
             _derive_receiver_id(claim.receiver_id, claim.payer_id),
             _payer_name(_derive_receiver_id(claim.receiver_id, claim.payer_id)),
@@ -2671,6 +2706,7 @@ def _build_claim_cycle_v2(db, facility_id, payer_id, encounter_type,
                 c.payer_id,
                 c.receiver_id,
                 c.source_channel,
+                c.sender_id,
                 c.member_id,
                 c.emirates_id,
                 c.encounter_start,
@@ -2888,6 +2924,7 @@ def _build_claim_cycle_v2(db, facility_id, payer_id, encounter_type,
             sr.payer_id,
             sr.receiver_id,
             sr.source_channel,
+            sr.sender_id,
             sr.member_id,
             sr.emirates_id,
             sr.encounter_start,
@@ -3111,7 +3148,7 @@ def _build_claim_cycle_v2(db, facility_id, payer_id, encounter_type,
 
         _write_row(ws, row_idx, [
             fac_name,
-            _claim_gateway(r.source_channel),
+            _claim_gateway(r.source_channel, getattr(r, "sender_id", None)),
             r.claim_id,
             _derive_receiver_id(r.receiver_id, r.payer_id),
             _payer_name(_derive_receiver_id(r.receiver_id, r.payer_id)),
@@ -3383,6 +3420,10 @@ def _build_remittance_activity_v2(db, facility_id, payer_id, encounter_type,
         )
     """))
 
+    # Only the file name and date of each XML are used — never load the file contents (large DHA batch
+    # files once took a one-month Sabah report past 2 GB and macOS killed it).
+    from sqlalchemy.orm import defer as _defer
+    q = q.options(_defer(ra_xml_store.xml_content), _defer(claim_xml_store.xml_content))
     rows = q.order_by(ra_xml_store.submission_date.desc(), Claim.claim_id).all()
 
     wb = openpyxl.Workbook()
@@ -3445,8 +3486,8 @@ def _build_remittance_activity_v2(db, facility_id, payer_id, encounter_type,
 
 
         _write_row(ws, row_idx, [
-            rem.facility_id, fac_name,
-            _claim_gateway(claim.source_channel),
+            (fac_map.get(rem.facility_id, ("", ""))[1] or rem.facility_id), fac_name,
+            _claim_gateway(claim.source_channel, claim.sender_id),
             _derive_receiver_id(claim.receiver_id, claim.payer_id),
             _payer_name(_derive_receiver_id(claim.receiver_id, claim.payer_id)),
             claim.payer_id, _payer_name(claim.payer_id),

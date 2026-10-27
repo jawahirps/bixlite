@@ -15,6 +15,22 @@ npm run build
 if [ $? -ne 0 ]; then echo "Frontend build FAILED"; exit 1; fi
 echo "Frontend build complete → $FRONTEND/dist"
 
+# When the backend and tunnel run as launchd services (com.ghaf.backend / com.ghaf.tunnel, started at login and
+# restarted if they stop), restart those instead of starting a second copy.
+if launchctl print "gui/$(id -u)/com.ghaf.backend" >/dev/null 2>&1; then
+  echo ""
+  echo "=== [2/2] Restarting launchd services (backend + tunnel) ==="
+  launchctl kickstart -k "gui/$(id -u)/com.ghaf.backend"
+  launchctl kickstart -k "gui/$(id -u)/com.ghaf.tunnel" 2>/dev/null || true
+  for i in $(seq 1 20); do
+    sleep 1
+    [ "$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:$BACKEND_PORT/api/health)" = "200" ] && break
+  done
+  echo "Backend: $(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:$BACKEND_PORT/api/health)  (log: ~/Library/Logs/ghaf_backend.log)"
+  echo "Site:    https://reports.ghafservices.com"
+  exit 0
+fi
+
 echo ""
 echo "=== [2/3] Starting backend (port $BACKEND_PORT) ==="
 cd "$BACKEND"

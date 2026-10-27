@@ -85,7 +85,7 @@ function FacilityRow({ facility, onSaved }) {
               </span>
             )}
           </div>
-          <p className="mt-0.5 text-xs text-slate-600">Code: {facility.facility_code}</p>
+          <p className="mt-0.5 text-xs text-slate-600">Facility #{facility.id} · Code: {facility.facility_code}</p>
         </div>
         <button
           onClick={() => setEditing((e) => !e)}
@@ -107,9 +107,22 @@ function FacilityRow({ facility, onSaved }) {
         </div>
       )}
 
+      {!editing && (
+        <div className="mt-3 flex flex-col gap-2">
+          {!isPlaceholder(facility.eclaimlink_username) && facility.eclaimlink_username !== "N/A" && (
+            <TestButton facilityId={facility.id} target="dha" label="Test DHA eClaimLink login" />
+          )}
+          {facility.riayati_username && (
+            <TestButton facilityId={facility.id} target="riayati" label="Test Riayati login (primary)" />
+          )}
+        </div>
+      )}
+
       {!editing && (facility.riayati_username || facility.riayati_accounts?.length > 0) && (
         <RiayatiAccounts facility={facility} onChanged={onSaved} />
       )}
+
+      {!editing && <ChangeHistory key={facility.updated_at || facility.id} facilityId={facility.id} />}
 
       {editing && (
         <div className="mt-4 space-y-3">
@@ -151,6 +164,97 @@ function FacilityRow({ facility, onSaved }) {
         </div>
       )}
     </div>
+  );
+}
+
+// Who changed which setting, when and from where (passwords show only as set / changed / cleared)
+const FIELD_LABELS = {
+  facility_name: "Facility name", license_id: "License ID", eclaimlink_username: "eClaimLink username",
+  credential_key: "Credential key (DHA)", dhpo_provider_id: "DHPO provider ID", riayati_username: "Riayati username",
+  riayati_password: "Riayati password", is_active: "Active", label: "Label", username: "Username",
+  password: "Password", active_from: "Used from",
+};
+
+function ChangeHistory({ facilityId }) {
+  const [open, setOpen] = useState(false);
+  const [rows, setRows] = useState(null);
+  const toggle = async () => {
+    const next = !open;
+    setOpen(next);
+    if (next) {
+      try { setRows((await apiClient.get(`/facilities/${facilityId}/changes`)).data); }
+      catch { setRows([]); }
+    }
+  };
+  const browser = (ua) => (ua || "").match(/(Edg|Chrome|Safari|Firefox)\/[\d.]+/)?.[0]?.split("/")[0] || "browser";
+  return (
+    <div className="mt-3">
+      <button onClick={toggle} className="text-xs font-medium text-slate-500 hover:text-slate-700">
+        {open ? "▾" : "▸"} Change history
+      </button>
+      {open && (
+        rows === null ? <p className="mt-1 text-xs text-slate-400">Loading…</p>
+        : !rows.length ? <p className="mt-1 text-xs text-slate-400">No changes recorded yet (history starts 23 Oct 2026).</p>
+        : (
+          <div className="mt-2 max-h-72 overflow-auto rounded-lg border border-slate-100">
+            <table className="min-w-full text-xs">
+              <thead className="sticky top-0 bg-slate-50 text-left text-slate-500">
+                <tr><th className="px-2 py-1">When</th><th className="px-2 py-1">Who</th><th className="px-2 py-1">What</th>
+                  <th className="px-2 py-1">Change</th></tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {rows.map((r) => (
+                  <tr key={r.id} className="align-top">
+                    <td className="whitespace-nowrap px-2 py-1 text-slate-600">
+                      {new Date(r.changed_at).toLocaleString("en-AE", { dateStyle: "medium", timeStyle: "short" })}
+                    </td>
+                    <td className="px-2 py-1 text-slate-600">
+                      {r.user_email}<div className="text-[10px] text-slate-400">{r.client_ip} · {browser(r.user_agent)}</div>
+                    </td>
+                    <td className="px-2 py-1 text-slate-700">
+                      {r.entity === "riayati_account" ? `Riayati account ${r.entity_label}` : "Facility"}
+                      {r.field ? ` — ${FIELD_LABELS[r.field] || r.field}` : ""}
+                      {r.action !== "update" && <span className="ml-1 text-slate-400">({r.action})</span>}
+                    </td>
+                    <td className="px-2 py-1 text-slate-700">
+                      {r.action === "delete" ? "removed" : <>{r.old_value ?? "—"} → <b>{r.new_value ?? "—"}</b></>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
+// One read-only call to check a login; shows the result next to the button (no credentials are returned)
+function TestButton({ facilityId, target, accountId, label = "Test connection" }) {
+  const [state, setState] = useState(null);   // null | "running" | {ok, message}
+  const run = async () => {
+    setState("running");
+    try {
+      const res = await apiClient.post(`/facilities/${facilityId}/test-connection`,
+        { target, account_id: accountId ?? null });
+      setState(res.data);
+    } catch (err) {
+      setState({ ok: false, message: err.response?.data?.detail || "Test failed." });
+    }
+  };
+  return (
+    <span className="inline-flex flex-wrap items-center gap-2">
+      <button onClick={run} disabled={state === "running"}
+        className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-50">
+        {state === "running" ? "Testing…" : label}
+      </button>
+      {state && state !== "running" && (
+        <span className={`text-xs ${state.ok ? "text-emerald-700" : "text-red-600"}`}>
+          {state.ok ? "✓ " : "✕ "}{state.message}
+        </span>
+      )}
+    </span>
   );
 }
 
@@ -217,7 +321,8 @@ function RiayatiAccounts({ facility, onChanged }) {
             {!a.has_password && <span className="ml-2 text-xs text-amber-600">no password</span>}
             {!a.is_active && <span className="ml-2 gh-chip gh-chip-neutral">Inactive</span>}
           </div>
-          <div className="flex gap-1">
+          <div className="flex flex-wrap items-center gap-1">
+            <TestButton facilityId={facility.id} target="riayati" accountId={a.id} label="Test" />
             <button onClick={() => setForm({ ...EMPTY_ACCOUNT, ...a, password: "", license_id: a.license_id || "", active_from: a.active_from || "" })}
               className="rounded px-2 py-1 text-xs text-slate-600 hover:bg-white">Edit</button>
             <button onClick={() => toggle(a)} className="rounded px-2 py-1 text-xs text-slate-600 hover:bg-white">
@@ -280,6 +385,10 @@ function Input({ label, name, value, onChange, type = "text", showToggle }) {
           value={value}
           onChange={onChange}
           className="gh-input w-full"
+          // stop the browser's password manager filling saved logins into credential fields
+          autoComplete={showToggle ? "new-password" : "off"}
+          data-lpignore="true"
+          data-1p-ignore="true"
         />
         {showToggle && (
           <button
@@ -302,7 +411,7 @@ export default function FacilitySettings() {
 
   useEffect(() => {
     apiClient
-      .get("/facilities")
+      .get("/facilities?include_inactive=true")
       .then((res) => setFacilities(res.data))
       .catch((err) => setError(err.response?.data?.detail || "Failed to load facilities."))
       .finally(() => setLoading(false));
@@ -332,7 +441,7 @@ export default function FacilitySettings() {
         </div>
         {!loading && (
           <div className="gh-card px-4 py-3 text-center">
-            <p className="text-2xl font-bold text-slate-900">{liveCount}/{facilities.length}</p>
+            <p className="text-2xl font-bold text-slate-900">{liveCount}/{facilities.filter((f) => f.is_active).length}</p>
             <p className="text-xs text-slate-500">Facilities live</p>
           </div>
         )}
@@ -342,10 +451,23 @@ export default function FacilitySettings() {
       {error && <p className="text-sm text-red-600">{error}</p>}
 
       <div className="space-y-4">
-        {facilities.map((f) => (
+        {facilities.filter((f) => f.is_active).map((f) => (
           <FacilityRow key={f.id} facility={f} onSaved={handleSaved} />
         ))}
       </div>
+
+      {facilities.some((f) => !f.is_active) && (
+        <details className="gh-card px-4 py-3">
+          <summary className="cursor-pointer text-sm text-slate-600">
+            Inactive / merged facilities ({facilities.filter((f) => !f.is_active).length})
+          </summary>
+          <div className="mt-4 space-y-4">
+            {facilities.filter((f) => !f.is_active).map((f) => (
+              <FacilityRow key={f.id} facility={f} onSaved={handleSaved} />
+            ))}
+          </div>
+        </details>
+      )}
     </div>
   );
 }

@@ -66,6 +66,32 @@ class Facility(Base):
         return f"<Facility {self.facility_code} — {self.facility_name}>"
 
 
+class SettingsChange(Base):
+    """
+    History of facility-settings changes (facility fields and Riayati accounts): who, when, from where,
+    old → new. Secrets (passwords, API / credential keys) are never stored — only "set" / "changed" / "cleared".
+    """
+    __tablename__ = "settings_changes"
+
+    id               : Mapped[int]           = mapped_column(BigInteger, primary_key=True)
+    changed_at       : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now(), nullable=False)
+    facility_id      : Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("facilities.id", ondelete="SET NULL"))
+    entity           : Mapped[str]           = mapped_column(String(30), nullable=False)    # facility | riayati_account
+    entity_label     : Mapped[Optional[str]] = mapped_column(String(120))                   # e.g. "SHA (HF-2026-000612)"
+    action           : Mapped[str]           = mapped_column(String(10), nullable=False)    # create | update | delete
+    field            : Mapped[Optional[str]] = mapped_column(String(60))
+    old_value        : Mapped[Optional[str]] = mapped_column(Text)
+    new_value        : Mapped[Optional[str]] = mapped_column(Text)
+    user_id          : Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"))
+    user_email       : Mapped[Optional[str]] = mapped_column(String(255))
+    client_ip        : Mapped[Optional[str]] = mapped_column(String(64))
+    user_agent       : Mapped[Optional[str]] = mapped_column(String(300))
+
+    __table_args__ = (
+        Index("idx_settings_changes_facility", "facility_id", "changed_at"),
+    )
+
+
 class FacilityRiayatiAccount(Base):
     """
     Extra Riayati Post Office account for a facility (the primary one is facilities.riayati_username /
@@ -242,6 +268,8 @@ class Claim(Base):
 
     # Lineage origin tracker to segment analytical reporting
     source_channel   : Mapped[str]           = mapped_column(String(20), nullable=False, default="API")
+    # Riayati SenderID licence (e.g. 5895 = RHA, HF-… = SHA); NULL for DHA files
+    sender_id        : Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
 
     # DHPO XML identifiers
     claim_id         : Mapped[str]           = mapped_column(String(100), nullable=False)
@@ -927,6 +955,7 @@ class ScrubQuery(Base):
     item             : Mapped[Optional[str]] = mapped_column(String(300))   # Procedure / Code / Dx column
     query_text       : Mapped[str]           = mapped_column(Text, nullable=False)
     evidence         : Mapped[Optional[str]] = mapped_column(Text)          # why the rule fired (not exported)
+    suggested_action : Mapped[Optional[str]] = mapped_column(Text)          # e.g. how to split the invoice
     created_at       : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now())
 
     __table_args__ = (

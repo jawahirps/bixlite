@@ -564,6 +564,7 @@ class ScrubQueryOut(BaseModel):
     item: Optional[str] = None
     query_text: str
     evidence: Optional[str] = None
+    suggested_action: Optional[str] = None
 
 
 @router.get("/sessions/{session_id}/queries", response_model=List[ScrubQueryOut])
@@ -578,7 +579,7 @@ def session_queries(
     rows = db.execute(text("""
         SELECT q.id, sc.claim_id, sc.patient_id, sc.encounter_start::text AS encounter_start,
                upper(coalesce(nullif(sc.receiver_id,''), sc.payer_id)) AS receiver,
-               q.rule_code, q.query_type, q.status, q.incharge, q.item, q.query_text, q.evidence
+               q.rule_code, q.query_type, q.status, q.incharge, q.item, q.query_text, q.evidence, q.suggested_action
         FROM scrub_queries q JOIN scrub_claims sc ON sc.id = q.scrub_claim_id
         WHERE q.session_id = :sid ORDER BY sc.encounter_start, sc.claim_id, q.id
     """), {"sid": session_id}).mappings().all()

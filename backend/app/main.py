@@ -74,22 +74,40 @@ def _cleanup_stale_jobs(db) -> None:
         db.commit()
         print(f"[startup] Cleaned up {len(stale)} stale fetch job(s).")
 
-    # ── ReportJob cleanup ────────────────────────────────────────────────────
-    # Any report_job stuck in 'pending' for >10 min means the server restarted
-    # mid-generation. Mark as 'error' so the frontend stops polling.
-    report_cutoff = now - timedelta(minutes=10)
-    stale_reports = (
-        db.query(ReportJob)
-        .filter(ReportJob.status == "pending", ReportJob.created_at < report_cutoff)
-        .all()
-    )
-    if stale_reports:
-        for rj in stale_reports:
+    # ── ReportJob recovery ───────────────────────────────────────────────────
+    # A report still 'pending' at startup was queued but never built (the server restarted first).
+    # Recent ones (< 1 day) are rebuilt in the background; older ones are marked interrupted.
+    report_cutoff = now - timedelta(days=1)
+    pending = db.query(ReportJob).filter(ReportJob.status == "pending").all()
+    # Only one automatic retry: a report that was already resumed and is pending again most likely killed
+    # the server itself (e.g. out of memory), so resuming it again would crash the backend in a loop.
+    RESUMED_MARK = "resumed after restart"
+    resume = [rj for rj in pending if rj.created_at and rj.created_at.replace(tzinfo=None) >= report_cutoff
+              and RESUMED_MARK not in (rj.error_message or "")]
+    for rj in pending:
+        if rj in resume:
+            rj.error_message = RESUMED_MARK      # cleared when the job completes
+        else:
             rj.status        = "error"
-            rj.error_message = "Report generation was interrupted (server restart). Please regenerate."
+            rj.error_message = ("Report generation was interrupted twice (server restart / out of memory). "
+                                "Please regenerate with a shorter date range or fewer facilities.")
             rj.completed_at  = now
-        db.commit()
-        print(f"[startup] Cleaned up {len(stale_reports)} stale report job(s).")
+    db.commit()
+    if resume:
+        import json, threading
+        from .routers.reports import REPORT_BUILDERS, _run_report_background
+        for rj in resume:
+            builder = REPORT_BUILDERS.get(rj.report_type)
+            if not builder:
+                continue
+            f = json.loads(rj.filters_json or "{}")
+            threading.Thread(
+                target=_run_report_background, daemon=True,
+                args=(rj.id, builder, f.get("facility_id"), f.get("payer_id"), f.get("encounter_type"),
+                      f.get("date_from"), f.get("date_to"), f.get("date_field") or "treatment_date"),
+                kwargs={"facility_ids": f.get("facility_ids")},
+            ).start()
+        print(f"[startup] Resumed {len(resume)} queued report job(s).")
 
 
 @app.get("/api/health", tags=["health"])

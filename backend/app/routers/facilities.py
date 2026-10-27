@@ -6,16 +6,18 @@ GET  /api/facilities/{id}     — get one facility
 PUT  /api/facilities/{id}     — update credentials / settings (admin only)
 GET/POST/PUT/DELETE /api/facilities/{id}/riayati-accounts[/{account_id}]
                               — extra Riayati accounts (e.g. SHA licence after a regulator change)
+POST /api/facilities/{id}/test-connection
+                              — one read-only call to check a DHA eClaimLink or Riayati login
 """
-from datetime import date
+from datetime import date, datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..models import Facility, FacilityRiayatiAccount, User
+from ..models import Facility, FacilityRiayatiAccount, SettingsChange, User
 from ..security import get_current_user
 
 router = APIRouter(prefix="/api/facilities", tags=["facilities"])
@@ -105,6 +107,32 @@ class FacilityUpdate(BaseModel):
     is_active: Optional[bool] = None
 
 
+SECRET_FIELDS = {"riayati_password", "credential_key", "password"}
+
+
+def _show(field: str, value):
+    """Value as stored in the change history; secrets are reduced to set / cleared."""
+    if field in SECRET_FIELDS:
+        return "(set)" if value else "(empty)"
+    return None if value is None else str(value)
+
+
+def _log_changes(db: Session, request: Request, user: User, facility_id: int, entity: str, label: str,
+                 action: str, changes: list):
+    """changes: [(field, old, new)] — writes one history row per field (one row with no field for delete)."""
+    ip = request.headers.get("cf-connecting-ip") or request.headers.get("x-forwarded-for", "").split(",")[0].strip() \
+        or (request.client.host if request.client else None)
+    ua = (request.headers.get("user-agent") or "")[:300]
+    for field, old, new in changes or [(None, None, None)]:
+        if field in SECRET_FIELDS and action == "update" and old != new:
+            old_s, new_s = _show(field, old), ("(changed)" if old and new else _show(field, new))
+        else:
+            old_s, new_s = _show(field or "", old), _show(field or "", new)
+        db.add(SettingsChange(facility_id=facility_id, entity=entity, entity_label=label, action=action,
+                              field=field, old_value=old_s, new_value=new_s, user_id=user.id,
+                              user_email=user.email, client_ip=ip, user_agent=ua))
+
+
 def _require_admin(user: User):
     if user.role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required.")
@@ -115,11 +143,15 @@ def _require_admin(user: User):
 # ---------------------------------------------------------------------------
 @router.get("", response_model=list[FacilityOut])
 def list_facilities(
+    include_inactive: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     _require_admin(current_user)
-    facilities = db.query(Facility).order_by(Facility.facility_name).all()
+    q = db.query(Facility)
+    if not include_inactive:  # merged / switched-off facilities only show on Facility settings
+        q = q.filter(Facility.is_active.is_(True))
+    facilities = q.order_by(Facility.facility_name).all()
     return [FacilityOut.from_orm_facility(f) for f in facilities]
 
 
@@ -157,6 +189,7 @@ def get_facility(
 def update_facility(
     facility_id: int,
     payload: FacilityUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -166,8 +199,15 @@ def update_facility(
         raise HTTPException(status_code=404, detail="Facility not found.")
 
     update_data = payload.model_dump(exclude_unset=True)
+    # secrets are write-only: a blank password / key in the form means "keep the current one"
+    for secret in ("riayati_password", "credential_key"):
+        if not (update_data.get(secret) or "").strip():
+            update_data.pop(secret, None)
+    changes = [(f, getattr(fac, f), v) for f, v in update_data.items() if getattr(fac, f) != v]
     for field, value in update_data.items():
         setattr(fac, field, value)
+    if changes:
+        _log_changes(db, request, current_user, fac.id, "facility", fac.facility_name, "update", changes)
 
     db.commit()
     db.refresh(fac)
@@ -206,6 +246,7 @@ def list_riayati_accounts(
 def add_riayati_account(
     facility_id: int,
     payload: RiayatiAccountIn,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -219,6 +260,8 @@ def add_riayati_account(
         active_from=payload.active_from, is_active=True if payload.is_active is None else payload.is_active,
     )
     db.add(acc)
+    _log_changes(db, request, current_user, facility_id, "riayati_account", f"{acc.label} ({acc.username})", "create",
+                 [(f, None, getattr(acc, f)) for f in ("label", "username", "password", "license_id", "active_from", "is_active")])
     db.commit()
     db.refresh(acc)
     return RiayatiAccountOut.from_account(acc)
@@ -229,6 +272,7 @@ def update_riayati_account(
     facility_id: int,
     account_id: int,
     payload: RiayatiAccountIn,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -237,8 +281,13 @@ def update_riayati_account(
     data = payload.model_dump(exclude_unset=True)
     if not (data.get("password") or "").strip():
         data.pop("password", None)          # blank password keeps the current one
+    data = {f: (v.strip() if isinstance(v, str) else v) for f, v in data.items()}
+    changes = [(f, getattr(acc, f), v) for f, v in data.items() if getattr(acc, f) != v]
     for field, value in data.items():
-        setattr(acc, field, value.strip() if isinstance(value, str) else value)
+        setattr(acc, field, value)
+    if changes:
+        _log_changes(db, request, current_user, facility_id, "riayati_account", f"{acc.label} ({acc.username})",
+                     "update", changes)
     db.commit()
     db.refresh(acc)
     return RiayatiAccountOut.from_account(acc)
@@ -248,10 +297,127 @@ def update_riayati_account(
 def delete_riayati_account(
     facility_id: int,
     account_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     _require_admin(current_user)
     acc = _account_or_404(db, facility_id, account_id)
+    _log_changes(db, request, current_user, facility_id, "riayati_account", f"{acc.label} ({acc.username})",
+                 "delete", [])
     db.delete(acc)
     db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Connection test (one read-only call per login; credentials are never returned)
+# ---------------------------------------------------------------------------
+class ConnectionTestIn(BaseModel):
+    target: str                         # "dha" | "riayati"
+    account_id: Optional[int] = None    # extra Riayati account; None = primary login
+
+
+class ConnectionTestOut(BaseModel):
+    ok: bool
+    target: str
+    label: str
+    message: str
+
+
+DEMO_FACILITY_CODES = {"GHAF-001"}       # never used against real DHPO
+
+
+def _test_dha(fac: Facility) -> ConnectionTestOut:
+    from ..services.fetch_service import DHPO_LIVE_WSDL, DHPOSoapClient
+    label = f"DHA eClaimLink ({fac.eclaimlink_username})"
+    if fac.facility_code in DEMO_FACILITY_CODES:
+        return ConnectionTestOut(ok=False, target="dha", label=label, message="Demo facility — not tested against DHPO.")
+    if not fac.eclaimlink_username or fac.eclaimlink_username.upper() == "N/A" or not fac.credential_key:
+        return ConnectionTestOut(ok=False, target="dha", label=label, message="No DHA eClaimLink login set.")
+    try:
+        files = DHPOSoapClient(DHPO_LIVE_WSDL, timeout=30).get_new_transactions(fac.eclaimlink_username, fac.credential_key)
+        return ConnectionTestOut(ok=True, target="dha", label=label,
+                                 message=f"Login OK — {len(files)} new transaction file(s) waiting.")
+    except Exception as exc:                      # DHPO puts the reason in the error text
+        return ConnectionTestOut(ok=False, target="dha", label=label, message=str(exc)[:300])
+
+
+def _test_riayati(db: Session, fac: Facility, account_id: Optional[int]) -> ConnectionTestOut:
+    from datetime import timedelta
+    import requests as _requests
+    from ..services.riayati_service import (DIRECTION_RECEIVED, RiayatiClient, RiayatiInactiveFacilityError)
+    if account_id:
+        acc = _account_or_404(db, fac.id, account_id)
+        username, password, label = acc.username, acc.password, f"Riayati {acc.label} ({acc.username})"
+    else:
+        username, password, label = fac.riayati_username, fac.riayati_password, f"Riayati primary ({fac.riayati_username})"
+    if not username or not password:
+        return ConnectionTestOut(ok=False, target="riayati", label=label, message="Username or password not set.")
+    today = date.today()
+    try:
+        found = RiayatiClient(username, password, timeout=60).search(today - timedelta(days=1), today, DIRECTION_RECEIVED)
+        return ConnectionTestOut(ok=True, target="riayati", label=label,
+                                 message=f"Login OK — {len(found)} remittance transaction(s) in the last 2 days.")
+    except RiayatiInactiveFacilityError as exc:
+        return ConnectionTestOut(ok=False, target="riayati", label=label,
+                                 message=f"Facility licence inactive on Riayati: {exc}")
+    except _requests.HTTPError as exc:
+        msg = ""
+        try:
+            msg = exc.response.json().get("Message") or ""
+        except Exception:
+            pass
+        code = exc.response.status_code if exc.response is not None else "?"
+        return ConnectionTestOut(ok=False, target="riayati", label=label,
+                                 message=f"Rejected by Riayati ({code}){': ' + msg if msg else ''}")
+    except Exception as exc:
+        return ConnectionTestOut(ok=False, target="riayati", label=label,
+                                 message=f"Could not reach Riayati (tunnel / network): {str(exc)[:200]}")
+
+
+@router.post("/{facility_id}/test-connection", response_model=ConnectionTestOut)
+def test_connection(
+    facility_id: int,
+    payload: ConnectionTestIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _require_admin(current_user)
+    fac = _facility_or_404(db, facility_id)
+    if payload.target == "dha":
+        return _test_dha(fac)
+    if payload.target == "riayati":
+        return _test_riayati(db, fac, payload.account_id)
+    raise HTTPException(status_code=422, detail="target must be 'dha' or 'riayati'.")
+
+
+# ---------------------------------------------------------------------------
+# Settings change history
+# ---------------------------------------------------------------------------
+class SettingsChangeOut(BaseModel):
+    id: int
+    changed_at: datetime
+    entity: str
+    entity_label: Optional[str] = None
+    action: str
+    field: Optional[str] = None
+    old_value: Optional[str] = None
+    new_value: Optional[str] = None
+    user_email: Optional[str] = None
+    client_ip: Optional[str] = None
+    user_agent: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
+@router.get("/{facility_id}/changes", response_model=list[SettingsChangeOut])
+def facility_changes(
+    facility_id: int,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _require_admin(current_user)
+    _facility_or_404(db, facility_id)
+    return (db.query(SettingsChange).filter_by(facility_id=facility_id)
+            .order_by(SettingsChange.changed_at.desc(), SettingsChange.id.desc()).limit(min(limit, 500)).all())

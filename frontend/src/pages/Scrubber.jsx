@@ -907,6 +907,11 @@ function ClaimQueriesPanel({ sessionId }) {
                   </td>
                   <td className="px-3 py-2 text-slate-700">
                     {r.query_text}
+                    {r.suggested_action && (
+                      <div className="mt-1 rounded bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-800">
+                        Suggested: {r.suggested_action}
+                      </div>
+                    )}
                     {r.evidence && <div className="mt-1 text-[10px] text-slate-400">Why: {r.evidence}</div>}
                   </td>
                 </tr>

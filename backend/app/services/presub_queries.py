@@ -35,7 +35,8 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.models import ScrubQuery, ScrubSession
-from app.services import dental_rules, resub_worklist as rw
+from app.services import dental_rules, doc_review, resub_worklist as rw
+from app.services.claim_scrubber import dx_support
 
 HISTORY_DAYS = 180
 LICENCE_DAYS = 90
@@ -200,6 +201,7 @@ class History:
 
 _SESSION_SQL = text("""
 SELECT sc.id, sc.claim_id, sc.patient_id, coalesce(sc.member_id,'') AS member_id, sc.encounter_start AS d,
+       sc.case_sheet, sc.obs_codes,
        upper(coalesce(nullif(sc.receiver_id,''), sc.payer_id, '')) AS rcv
 FROM scrub_claims sc WHERE sc.session_id = :sid ORDER BY sc.encounter_start, sc.id
 """)
@@ -279,6 +281,7 @@ def generate(db: Session, session_id: int) -> int:
         dxs[d.scrub_claim_id].append(d.code)
 
     hist = History(db, fid)
+    doc_learned, doc_pref = doc_review.cached_model(fid)
     d0 = min(c["d"] for c in claims if c["d"]) if any(c["d"] for c in claims) else None
     d1 = max(c["d"] for c in claims if c["d"]) if d0 else None
     ctx = rw.ConsultContext(db, fid, d0 - timedelta(days=rw.REPEAT_DAYS), d1) if d0 else None
@@ -534,6 +537,17 @@ def generate(db: Session, session_id: int) -> int:
             for k in ("P:" + (c["patient_id"] or ""), "M:" + c["member_id"]):
                 if k not in ("P:", "M:"):
                     session_visits[k].append(v)
+
+        # ---- case sheet does not support a coded Dx: Tier A only (B / C go to Documentation review) -------
+        if D and (c["case_sheet"] or any(dx_support.CONSULT.match(a.activity_code) for a in A)):
+            for f in dx_support.evaluate([(d, None) for d in D], c["case_sheet"], set((c["obs_codes"] or "").split(",")),
+                                         [(a.activity_code, a.net) for a in A], doc_learned, doc_pref):
+                if f["tier"] != "A":
+                    continue
+                risk = f" Services at risk: {f['services']} (AED {f['amount_at_risk']:g})." if f["services"] else ""
+                out.append(_q("DX_DOC", "Diagnosis not supported by case sheet", "CLINICAL JUSTIFICATION",
+                              f"{f['code']} {f['description']}", f"{f['query']}.{risk}", incharge="DOCTOR",
+                              evidence=f["reason"], suggested=f["suggestion"]))
 
         for o in out:
             rows.append(ScrubQuery(session_id=session_id, scrub_claim_id=cid, **o))

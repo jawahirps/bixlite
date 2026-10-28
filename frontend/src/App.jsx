@@ -10,6 +10,7 @@ import LoginActivity from "./pages/LoginActivity";
 import FacilitySettings from "./pages/FacilitySettings";
 import RemittancePortal from "./pages/portal/RemittancePortal";
 import Jobs from "./pages/Jobs";
+import DocReview from "./pages/DocReview";
 import Scrubber from "./pages/Scrubber";
 import Calibration from "./pages/Calibration";
 import ResubWorklist from "./pages/ResubWorklist";
@@ -34,6 +35,7 @@ export default function App() {
           <Route path="/facility-settings" element={<FacilitySettings />} />
           <Route path="/jobs" element={<Jobs />} />
           <Route path="/scrubber" element={<Scrubber />} />
+          <Route path="/doc-review" element={<DocReview />} />
           <Route path="/calibration" element={<Calibration />} />
           <Route path="/resub-worklist" element={<ResubWorklist />} />
         </Route>

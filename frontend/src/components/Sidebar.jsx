@@ -25,6 +25,7 @@ const ICONS = {
   dashboard: ["M3 3h7v9H3z", "M14 3h7v5h-7z", "M14 12h7v9h-7z", "M3 16h7v5H3z"],
   scrubber: ["M9 11l3 3 8-8", "M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9"],
   monitor: ["M4 4h16v12H4z", "M8 20h8", "M12 16v4", "M7 10h2l1.5-3 3 6 1.5-3h2"],
+  docreview: ["M6 3h9l4 4v14H6z", "M14 3v5h5", "M9 14l2 2 4-4"],
   denial: ["M12 3l9 16H3z", "M12 10v4", "M12 17h.01"],
   resub: ["M4 4v5h5", "M20 20v-5h-5", "M5.5 15a7 7 0 0 0 12.9 1.5", "M18.5 9A7 7 0 0 0 5.6 7.5"],
   analytics: ["M4 20V10", "M10 20V4", "M16 20v-7", "M3 20h18"],
@@ -44,6 +45,7 @@ export const NAV_SECTIONS = [
     label: "Claim scrubbing & analysis",
     items: [
       { to: "/scrubber", label: "Claim scrubber", icon: "scrubber" },
+      { to: "/doc-review", label: "Documentation review", icon: "docreview" },
       { to: "/dha-sync", label: "XML scrub monitor", icon: "monitor" },
       { to: "/calibration", label: "Denial intelligence", icon: "denial" },
       { to: "/resub-worklist", label: "Resubmission worklist", icon: "resub" },

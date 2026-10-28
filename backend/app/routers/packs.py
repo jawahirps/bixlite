@@ -66,6 +66,9 @@ CATALOG = {
     "monthly":        {"section": "performance", "label": "Monthly pack",
                        "help": "Performance report, AR ageing & resubmission tracker, clinician scorecards",
                        "fields": ["month"]},
+    "submission":     {"section": "performance", "label": "Monthly submission report",
+                       "help": "Claims submitted for one treatment month (same report as in the monthly pack)",
+                       "fields": ["month"]},
     "quarterly":      {"section": "performance", "label": "Quarterly report",
                        "help": "Quarter or full year (DHA eClaimLink facilities)",
                        "fields": ["quarter"]},
@@ -109,6 +112,9 @@ def _command(kind: str, fac: Facility, p: dict) -> tuple[list[str], str]:
     if kind == "monthly":
         m = need("month", r"\d{4}-\d{2}", "Month must be YYYY-MM")
         return ["monthly_pack.py", "--month", m, "--facility", fac.facility_code], m
+    if kind == "submission":
+        m = need("month", r"\d{4}-\d{2}", "Month must be YYYY-MM")
+        return ["monthly_pack.py", "--month", m, "--facility", fac.facility_code, "--submission-only"], m
     if kind == "quarterly":
         q = need("period", r"(Q[1-4]|annual)-\d{4}", "Period must be Q1-YYYY … Q4-YYYY or annual-YYYY")
         return ["quarterly_report_generator.py", "--period", q], q

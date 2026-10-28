@@ -93,6 +93,15 @@ class ScrubXmlExtractor:
         # Net amount: prefer <Net> under the claim root; fall back to summing activities
         net_amount: Optional[Decimal] = _decimal(_text(elem, "Net"))
 
+        # Case sheet (chief complaint / notes) and observation codes, for the documentation check
+        notes, obs_codes = [], set()
+        for obs in elem.findall(".//Activity/Observation"):
+            code = _text(obs, "Code")
+            if code:
+                obs_codes.add(code)
+            if code == "Presenting-Complaint" and _text(obs, "Value"):
+                notes.append(_text(obs, "Value"))
+
         scrub_claim = ScrubClaim(
             session_id=self.session_id,
             facility_id=self.facility_id,
@@ -107,6 +116,8 @@ class ScrubXmlExtractor:
             patient_id=patient_id,
             resubmission_key=resubmission_key,
             net_amount=net_amount,
+            case_sheet="\n".join(notes) or None,
+            obs_codes=",".join(sorted(obs_codes)) or None,
         )
         self.db.add(scrub_claim)
         self.db.flush()  # populate scrub_claim.id before FK children

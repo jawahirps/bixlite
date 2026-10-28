@@ -1,0 +1,149 @@
+"""
+doc_review.py — Documentation review screen (case sheet vs coded Dx).
+
+  POST  /api/docreview/runs                       {facility_id, month} → run the check in the background
+  GET   /api/docreview/runs?facility_id=          latest runs
+  GET   /api/docreview/dashboard?facility_id=&month=
+  GET   /api/docreview/findings?facility_id=&month=&tier=&category=&clinician=&review=&page=
+  PATCH /api/docreview/findings/{id}              {review_status, review_remark}
+  GET   /api/docreview/findings.xlsx?facility_id=&month=&tier=
+  GET   /api/docreview/feedback.xlsx?facility_id=&month=
+
+Facility users see their own facility only. Nothing is sent to the facility or a payer from here.
+"""
+from __future__ import annotations
+
+import re
+from datetime import datetime, timezone
+from math import ceil
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+
+from ..database import get_db
+from ..models import Facility, User
+from ..security import get_current_user
+from ..services import doc_review as dr
+
+router = APIRouter(prefix="/api/docreview", tags=["documentation review"])
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+PAGE = 100
+
+
+def _check_facility(db: Session, user: User, facility_id: int) -> Facility:
+    if user.role != "admin" and user.facility_id is not None and user.facility_id != facility_id:
+        raise HTTPException(403, "Not your facility")
+    fac = db.get(Facility, facility_id)
+    if not fac or not fac.is_active or fac.facility_code == "GHAF-001":
+        raise HTTPException(404, "Facility not found")
+    return fac
+
+
+def _month(m: str) -> str:
+    if not re.fullmatch(r"\d{4}-\d{2}", m or ""):
+        raise HTTPException(400, "Month must be YYYY-MM")
+    return m
+
+
+class RunIn(BaseModel):
+    facility_id: int
+    month: str
+
+
+class ReviewIn(BaseModel):
+    review_status: Optional[str] = None
+    review_remark: Optional[str] = None
+
+
+def _run_out(r: dr.DocReviewRun) -> dict:
+    return {c: getattr(r, c) for c in ("id", "facility_id", "month", "status", "progress", "error", "claims_checked",
+                                       "claims_flagged", "claims_no_note", "created_at", "completed_at")}
+
+
+@router.post("/runs")
+def start_run(body: RunIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    _check_facility(db, user, body.facility_id)
+    if db.query(dr.DocReviewRun).filter(dr.DocReviewRun.status.in_(("Queued", "Running"))).count():
+        raise HTTPException(409, "A check is already running; try again when it finishes")
+    r = dr.DocReviewRun(facility_id=body.facility_id, month=_month(body.month), user_id=user.id, status="Queued")
+    db.add(r); db.commit(); db.refresh(r)
+    dr.start(r.id)
+    return _run_out(r)
+
+
+@router.get("/runs")
+def list_runs(facility_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    _check_facility(db, user, facility_id)
+    q = db.query(dr.DocReviewRun).filter_by(facility_id=facility_id).order_by(dr.DocReviewRun.id.desc()).limit(12)
+    return [_run_out(r) for r in q]
+
+
+@router.get("/dashboard")
+def get_dashboard(facility_id: int, month: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    _check_facility(db, user, facility_id)
+    return dr.dashboard(db, facility_id, _month(month))
+
+
+@router.get("/findings")
+def list_findings(facility_id: int, month: str, tier: Optional[str] = None, category: Optional[str] = None,
+                  clinician: Optional[str] = None, review: Optional[str] = None, page: int = 1,
+                  db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    _check_facility(db, user, facility_id)
+    q = db.query(dr.DocFinding).filter_by(facility_id=facility_id, month=_month(month))
+    if tier:
+        q = q.filter(dr.DocFinding.tier == tier)
+    if category:
+        q = q.filter(dr.DocFinding.category == category)
+    if clinician:
+        q = q.filter(dr.DocFinding.clinician_id == clinician)
+    if review == "pending":
+        q = q.filter(dr.DocFinding.review_status.is_(None))
+    elif review:
+        q = q.filter(dr.DocFinding.review_status == review)
+    total = q.count()
+    rows = (q.order_by(dr.DocFinding.tier, dr.DocFinding.amount_at_risk.desc().nullslast(), dr.DocFinding.encounter_date)
+            .offset((max(page, 1) - 1) * PAGE).limit(PAGE).all())
+    names = dr.clinician_names(db, facility_id)
+    cols = ("id", "tier", "claim_id", "encounter_date", "payer_id", "clinician_id", "dx_code", "dx_description", "category",
+            "reason", "query_text", "suggestion", "not_coded", "services_at_risk", "amount_at_risk", "case_sheet", "all_dx",
+            "review_status", "review_remark")
+    return {"total": total, "pages": ceil(total / PAGE) if total else 0, "page": page,
+            "rows": [{**{c: getattr(f, c) for c in cols}, "clinician_name": names.get(f.clinician_id, "")} for f in rows]}
+
+
+@router.patch("/findings/{finding_id}")
+def review_finding(finding_id: int, body: ReviewIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    f = db.get(dr.DocFinding, finding_id)
+    if not f:
+        raise HTTPException(404, "Finding not found")
+    _check_facility(db, user, f.facility_id)
+    if body.review_status not in (None, "", "Agree", "Not needed"):
+        raise HTTPException(400, "Review must be Agree or Not needed")
+    f.review_status = body.review_status or None
+    f.review_remark = (body.review_remark or "").strip() or None
+    f.reviewed_by, f.reviewed_at = user.id, datetime.now(timezone.utc)
+    db.commit()
+    return {"id": f.id, "review_status": f.review_status, "review_remark": f.review_remark}
+
+
+def _fname(fac: Facility, what: str, month: str) -> str:
+    return f"{re.sub(r'[^A-Za-z0-9]+', '-', fac.facility_name).strip('-')}_{what}_{month}.xlsx"
+
+
+@router.get("/findings.xlsx")
+def findings_xlsx(facility_id: int, month: str, tier: Optional[str] = None,
+                  db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    fac = _check_facility(db, user, facility_id)
+    what = f"Documentation_Tier{tier}" if tier else "Documentation_findings"
+    return Response(dr.findings_workbook(db, facility_id, _month(month), tier), media_type=XLSX,
+                    headers={"Content-Disposition": f'attachment; filename="{_fname(fac, what, month)}"'})
+
+
+@router.get("/feedback.xlsx")
+def feedback_xlsx(facility_id: int, month: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    fac = _check_facility(db, user, facility_id)
+    return Response(dr.feedback_workbook(db, facility_id, _month(month)), media_type=XLSX,
+                    headers={"Content-Disposition": f'attachment; filename="{_fname(fac, "Doctor_feedback", month)}"'})

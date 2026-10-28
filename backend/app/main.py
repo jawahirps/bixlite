@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse
 
 from .config import get_settings
 from .database import SessionLocal, init_db
-from .routers import analytics, auth, bulk_resub, calibration, clinical_profiles, dha_sync, facilities, packs, reports, portal, receipts, resub, scrub
+from .routers import analytics, auth, bulk_resub, calibration, clinical_profiles, dha_sync, doc_review, facilities, packs, reports, portal, receipts, resub, scrub
 from .seed import run_seed
 
 settings = get_settings()
@@ -48,6 +48,13 @@ def _prepare_bulk_resub() -> None:
         db.close()
 
 
+def _prepare_doc_review() -> None:
+    """Documentation review tables (and the case-sheet columns on scrub claims); interrupted runs marked failed."""
+    from .services import doc_review as dr
+    dr.ensure_tables(SessionLocal().get_bind())
+    dr.resume_on_startup()
+
+
 @app.on_event("startup")
 def on_startup() -> None:
     init_db()
@@ -59,6 +66,7 @@ def on_startup() -> None:
         db.close()
     packs.resume_on_startup()
     _prepare_bulk_resub()
+    _prepare_doc_review()
 
 
 def _cleanup_stale_jobs(db) -> None:
@@ -143,6 +151,7 @@ app.include_router(receipts.router)               # /api/receipts/* — JWT-prot
 app.include_router(scrub.router)                  # /api/scrub/*   — JWT-protected
 app.include_router(calibration.router)            # /api/calibration/* — JWT-protected
 app.include_router(resub.router)                  # /api/resub/* — JWT-protected
+app.include_router(doc_review.router)             # /api/docreview/* — JWT-protected
 app.include_router(bulk_resub.router)             # /api/resub/bulk/* — JWT-protected
 app.include_router(packs.router)                  # /api/packs/* — JWT-protected
 

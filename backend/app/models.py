@@ -793,6 +793,8 @@ class ScrubClaim(Base):
     patient_id       : Mapped[Optional[str]] = mapped_column(String(100))   # Encounter/PatientID (MRN)
     resubmission_key : Mapped[str]           = mapped_column(String(50), nullable=False, default="")
     net_amount       : Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2))
+    case_sheet       : Mapped[Optional[str]] = mapped_column(Text)          # Presenting-Complaint text (documentation check)
+    obs_codes        : Mapped[Optional[str]] = mapped_column(Text)          # observation codes on the claim, comma-separated
     created_at       : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now())
 
     session          : Mapped["ScrubSession"]           = relationship(back_populates="scrub_claims")

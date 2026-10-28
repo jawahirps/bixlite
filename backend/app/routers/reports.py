@@ -863,13 +863,42 @@ def _build_claim_activity(db, facility_id, payer_id, encounter_type,
                       facility_ids=None):
     fac_map = {f.id: (f.facility_name, f.license_id) for f in db.query(Facility).all()}
 
+    # Payment status / denial / rejection are per ACTIVITY, taken from the
+    # remittance activity detail of the rank-appropriate RA (same join as
+    # Claim Activity V2). Previously the claim-level RA values were copied onto
+    # every activity line, which repeated the rejection amount per line.
+    rem_ranked_sq = (
+        db.query(
+            Remittance.facility_id,
+            Remittance.claim_id,
+            Remittance.id.label("rem_id"),
+            func.row_number().over(
+                partition_by=[Remittance.facility_id, Remittance.claim_id],
+                order_by=Remittance.id,
+            ).label("ra_rank"),
+        ).subquery()
+    )
+    rad_alias = aliased(RemittanceActivityDetail)
+
     q = (
-        db.query(ClaimActivity, Claim, Remittance)
+        db.query(ClaimActivity, Claim, rad_alias)
         .join(Claim, Claim.id == ClaimActivity.claim_id_fk)
         .outerjoin(
-            Remittance,
-            (Remittance.claim_id == Claim.claim_id) &
-            (Remittance.facility_id == Claim.facility_id)
+            rem_ranked_sq,
+            and_(
+                rem_ranked_sq.c.facility_id == Claim.facility_id,
+                rem_ranked_sq.c.claim_id    == Claim.claim_id,
+                rem_ranked_sq.c.ra_rank     == case(
+                    (Claim.resubmission_key == "",              1),
+                    (Claim.resubmission_key == "reconciliation", 3),
+                    else_=2,
+                ),
+            )
+        )
+        .outerjoin(
+            rad_alias,
+            (rad_alias.remittance_id_fk == rem_ranked_sq.c.rem_id) &
+            (rad_alias.activity_id      == ClaimActivity.activity_id)
         )
     )
     if facility_ids:
@@ -898,8 +927,24 @@ def _build_claim_activity(db, facility_id, payer_id, encounter_type,
     ws.freeze_panes = "A2"
     _write_headers(ws, CLAIM_ACTIVITY_COLS)
 
-    for row_idx, (act, claim, rem) in enumerate(rows, start=2):
+    for row_idx, (act, claim, rad) in enumerate(rows, start=2):
         fac_name, fac_license = fac_map.get(claim.facility_id, ("", ""))
+
+        # Activity status, as in Claim Activity V2
+        if rad is None:
+            pay_status = "Pending"
+        elif rad.denial_code and float(rad.paid_amount) == 0:
+            pay_status = "Denied"
+        elif act.net is not None and float(rad.paid_amount) >= float(act.net):
+            pay_status = "Fully Paid"
+        elif float(rad.paid_amount) > 0:
+            pay_status = "Partially Paid"
+        else:
+            pay_status = "Pending"
+        den_code = rad.denial_code or "" if rad else ""
+        # Rejection = RA net − paid for this activity (sums to V2 Initial Denied)
+        rej_amt = (round(float(rad.net if rad.net is not None else act.net or 0)
+                         - float(rad.paid_amount), 2) if rad else 0.0)
         _write_row(ws, row_idx, [
             fac_name,
             _claim_gateway(claim.source_channel, claim.sender_id),
@@ -919,10 +964,10 @@ def _build_claim_activity(db, facility_id, payer_id, encounter_type,
             act.activity_code or "",
             _f(act.quantity),
             _f(act.net),
-            rem.claim_status_ra or "" if rem else "",
-            rem.denial_code or "" if rem else "",
-            rem.denial_description or "" if rem else "",
-            _f(rem.denial_amount) if rem and rem.denial_amount else 0.0,
+            pay_status,
+            den_code,
+            (rad.denial_description or _lookup_denial(den_code)[0]) if den_code else "",
+            rej_amt,
         ], alt=(row_idx % 2 == 0))
 
     _auto_width(ws, CLAIM_ACTIVITY_COLS)

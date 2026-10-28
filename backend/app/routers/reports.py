@@ -743,8 +743,10 @@ def _build_claim_summary(db, facility_id, payer_id, encounter_type,
             # unsettled tracking moves to the resubmission row; avoid double-counting.
             unsettled = 0.0
         else:
+            # Unsettled = submitted − paid − denied (matches ClaimCycleV2 Unsettled/AR);
+            # amounts the payer has already denied are not counted as unsettled.
             if this_net is not None and paid is not None:
-                unsettled = round(max(0.0, this_net - paid), 2)
+                unsettled = round(max(0.0, this_net - paid - rejected_amt), 2)
             elif this_net is not None:
                 unsettled = this_net
             else:

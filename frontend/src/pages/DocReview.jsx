@@ -7,7 +7,7 @@
  *   B  monthly doctor feedback
  *   C  Ghaf internal review
  *
- * Tabs: Dashboard · Findings · Downloads
+ * Tabs: Dashboard · Findings · Payer patterns · Downloads
  */
 import { useEffect, useState } from "react";
 import apiClient from "../api/client";
@@ -203,6 +203,41 @@ function Findings({ facilityId, month, dash, filters, setFilters }) {
   );
 }
 
+function PayerPatterns({ facilityId, month }) {
+  const [rows, setRows] = useState(null);
+  useEffect(() => {
+    setRows(null);
+    apiClient.get("/docreview/payer-patterns", { params: { facility_id: facilityId, month } })
+      .then((r) => setRows(r.data)).catch(() => setRows([]));
+  }, [facilityId, month]);
+  if (!rows) return <div className="gh-card p-4 text-sm text-slate-500">Loading…</div>;
+  if (!rows.length) return <div className="gh-card p-4 text-sm text-slate-500">No payer denial patterns in the scrubbed claims of this month.</div>;
+  return (
+    <div className="gh-card space-y-3 p-4">
+      <p className="text-xs text-slate-500">
+        Payer denial patterns behind the Claim scrubber's "high chance of denial" annotations — for clinic administration
+        and payer / contract follow-up, not per-claim queries.
+      </p>
+      <div className="overflow-auto">
+        <table className="w-full text-xs">
+          <thead className="bg-slate-50 text-left text-slate-500">
+            <tr>{["Payer", "Code", "Pattern", "Claims", "Net AED"].map((h) => <th key={h} className="px-2 py-1 font-medium">{h}</th>)}</tr>
+          </thead>
+          <tbody>{rows.map((r) => (
+            <tr key={`${r.payer}-${r.code}`} className="border-t border-slate-100 align-top">
+              <td className="px-2 py-1 whitespace-nowrap">{r.payer_name || r.payer}<span className="block text-slate-400">{r.payer}</span></td>
+              <td className="px-2 py-1 font-mono">{r.code}</td>
+              <td className="px-2 py-1">{r.pattern}</td>
+              <td className="px-2 py-1 text-right">{r.claims}</td>
+              <td className="px-2 py-1 text-right">{aed(r.net)}</td>
+            </tr>))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function Downloads({ facilityId, month, fac, dash }) {
   const [err, setErr] = useState("");
   if (!dash?.run) return <div className="gh-card p-4 text-sm text-slate-500">No completed check for this month yet.</div>;
@@ -290,11 +325,12 @@ export default function DocReview() {
       {facilityId && (
         <>
           <div className="flex gap-2">
-            {[["dashboard", "Dashboard"], ["findings", "Findings"], ["downloads", "Downloads"]].map(([k, l]) => (
+            {[["dashboard", "Dashboard"], ["findings", "Findings"], ["patterns", "Payer patterns"], ["downloads", "Downloads"]].map(([k, l]) => (
               <button key={k} className={tab === k ? "gh-btn gh-btn-sm" : "gh-btn-secondary gh-btn-sm"} onClick={() => setTab(k)}>{l}</button>))}
           </div>
           {tab === "dashboard" && <Dashboard dash={dash} onDoctor={(c) => { setFilters({ ...filters, clinician: c }); setTab("findings"); }} />}
           {tab === "findings" && <Findings facilityId={facilityId} month={month} dash={dash} filters={filters} setFilters={setFilters} />}
+          {tab === "patterns" && <PayerPatterns facilityId={facilityId} month={month} />}
           {tab === "downloads" && <Downloads facilityId={facilityId} month={month} fac={fac} dash={dash} />}
         </>)}
     </div>

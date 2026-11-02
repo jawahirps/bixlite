@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from datetime import timedelta
+from datetime import date, timedelta
 from types import SimpleNamespace
 from typing import Dict, List, Optional
 
@@ -67,6 +67,16 @@ TEST_PAIRS = [
     ("85025", "CBC", "85048", "AEC"),
     ("80061", "LIPID PANEL", "83721", "LDL DIRECT"),
 ]
+# why the pair is questioned — the query annotates the necessity, it does not ask to remove a test
+PAIR_REASON = {
+    ("85652", "86140"): "ESR is a slow-responding and CRP a fast-responding inflammatory marker; payers expect the "
+                        "case sheet to justify why both markers are needed concurrently for this encounter (e.g. "
+                        "distinguishing an acute flare from chronic activity)",
+    ("85025", "85048"): "the CBC already includes the white cell count; payers expect the case sheet to justify a "
+                        "separate absolute eosinophil count",
+    ("80061", "83721"): "the lipid panel already reports LDL; payers expect the case sheet to justify a direct LDL "
+                        "(e.g. high triglycerides)",
+}
 # (definitive dx block, symptom dx block) — symptom code is removed when both are coded
 EXCLUDES1 = [
     ("E79", "R79"), ("E11", "R73"), ("M62", "R25"), ("N23", "R10"), ("R60", "R22"),
@@ -81,6 +91,69 @@ ADDON_PARENT = {"96366": ("96365",), "96367": ("96365",), "96368": ("96365",),
                 "96361": ("96360", "96365", "96374"), "96411": ("96409",), "96415": ("96413",), "96417": ("96413",)}
 CONSULT_BASE = re.compile(r"^(9|10|11)$")
 CONSULT_CHECKED = re.compile(r"^(9|10|11)(\.0[12])?$")   # .01 = free follow-up (≤7 days, net 0), .02 = repeat (8–28 days)
+# pregnancy / childbirth / puerperium: Chapter 15 (O00–O9A) and the pregnancy Z codes
+# (Z32.01 positive test, Z33 pregnant state, Z34 normal pregnancy, Z36 antenatal screening, Z37 outcome of delivery,
+#  Z39 postpartum, Z3A weeks of gestation, Z03.7 suspected maternal/fetal condition ruled out)
+MATERNITY_DX = re.compile(r"^(O|Z32\.01|Z33|Z34|Z36|Z37|Z39|Z3A|Z03\.7)")
+OPTICAL_CODES = {"92015"}   # refraction — optical benefit
+DRUG_CODE = re.compile(r"^\d{4}-\d{6}-\d{4}$")   # DHA / DoH drug code, e.g. 0011-106618-1001
+# administration codes where a payer denying the admin AND the drug together questions the route (clinical necessity)
+ADMIN_ROUTE = {
+    "96372": ("IM injection", "choosing IM injection over oral treatment (e.g. vomiting / unable to take orally, "
+                              "severe pain needing rapid action, failed oral treatment)"),
+    "96365": ("IV infusion", "IV infusion over oral treatment (e.g. dehydration, unable to take orally, severity, "
+                             "failed oral treatment)"),
+    "96374": ("IV push", "IV push over oral treatment (e.g. vomiting / unable to take orally, severity needing rapid "
+                         "action, failed oral treatment)"),
+}
+ADMIN_BOTH_MIN_CASES, ADMIN_BOTH_MIN_RATE = 30, 0.20
+_ADMIN_SQL = text(r"""
+WITH x AS (
+  SELECT upper(c.receiver_id) AS rcv, c.id AS cid, a.activity_code AS code, coalesce(d.denial_code,'') AS den
+  FROM claims c JOIN claim_activities a ON a.claim_id_fk = c.id
+  JOIN remittances r ON r.facility_id = c.facility_id AND r.claim_id = c.claim_id
+  JOIN remittance_activity_details d ON d.remittance_id_fk = r.id AND d.activity_id = a.activity_id
+  WHERE c.resubmission_key = '' AND c.encounter_start >= now() - make_interval(days => :days)),
+drg AS (SELECT cid, bool_and(den <> '') AS all_den FROM x WHERE code ~ '^\d{4}-\d{6}-\d{4}$' GROUP BY cid)
+SELECT x.rcv, x.code, count(*) AS n, count(*) FILTER (WHERE x.den <> '' AND drg.all_den) AS both
+FROM x JOIN drg ON drg.cid = x.cid WHERE x.code IN ('96372','96365','96374') GROUP BY 1, 2
+""")
+_dstats_cache: Dict[str, dict] = {}
+
+
+def admin_stats(db: Session) -> dict:
+    """Network-wide: (payer, admin code) → (cases with admin + drug both denied, cases) where that is common."""
+    key = date.today().isoformat()
+    if key not in _dstats_cache:
+        _dstats_cache.clear()
+        _dstats_cache[key] = {(r.rcv, r.code): (r.both, r.n) for r in db.execute(_ADMIN_SQL, {"days": 730})
+                              if r.n >= ADMIN_BOTH_MIN_CASES and r.both / r.n >= ADMIN_BOTH_MIN_RATE}
+    return _dstats_cache[key]
+MATERNITY_MIN_LINES, MATERNITY_EXEMPT_RATE = 30, 0.02   # payer pays maternity without approval → no query
+
+_MATERNITY_SQL = text("""
+SELECT c.receiver_id AS rcv, count(*) AS n, count(*) FILTER (WHERE d.denial_code ~ '^AUTH') AS den
+FROM claims c JOIN claim_activities a ON a.claim_id_fk = c.id AND nullif(trim(a.authorization_id),'') IS NULL
+JOIN remittances r ON r.facility_id = c.facility_id AND r.claim_id = c.claim_id
+JOIN remittance_activity_details d ON d.remittance_id_fk = r.id AND d.activity_id = a.activity_id
+WHERE c.resubmission_key = '' AND c.encounter_start >= now() - make_interval(days => :days)
+  AND EXISTS (SELECT 1 FROM claim_diagnoses x WHERE x.claim_id_fk = c.id
+              AND upper(x.diagnosis_code) ~ '^(O|Z32\\.01|Z33|Z34|Z36|Z37|Z39|Z3A|Z03\\.7)')
+GROUP BY 1
+""")
+_mstats_cache: Dict[str, object] = {}
+
+
+def maternity_stats(db: Session):
+    """Network-wide: per payer, maternity lines billed without approval and AUTH denials. Payers that pay them
+    (≥30 lines, <2 % denied for approval) are exempt from the maternity approval query."""
+    key = date.today().isoformat()
+    if key not in _mstats_cache:
+        rate = {r.rcv: (r.n, r.den) for r in db.execute(_MATERNITY_SQL, {"days": 730})}
+        exempt = {k for k, (n, d) in rate.items() if n >= MATERNITY_MIN_LINES and d / n < MATERNITY_EXEMPT_RATE}
+        _mstats_cache.clear()
+        _mstats_cache[key] = SimpleNamespace(rate=rate, exempt=exempt)
+    return _mstats_cache[key]
 
 _HIST_SQL = text("""
 WITH r AS (
@@ -259,6 +332,31 @@ def _drug_sequencing(acts) -> List[dict]:
     return out
 
 
+# consultations in every scrubbed file of the facility (not yet submitted) — a month is split over many
+# HIMES files, so the initial visit for a follow-up is often in another file; latest session wins per claim
+_PENDING_VISITS_SQL = text("""
+SELECT DISTINCT ON (sc.claim_id) sc.claim_id, sc.patient_id, coalesce(sc.member_id,'') AS member_id,
+       sc.encounter_start AS d, upper(a.activity_code) AS code, upper(a.clinician_id) AS doc,
+       (SELECT array_agg(DISTINCT upper(left(x.diagnosis_code,3))) FROM scrub_claim_diagnoses x WHERE x.scrub_claim_id = sc.id) AS dx3s,
+       (SELECT upper(x.diagnosis_code) FROM scrub_claim_diagnoses x WHERE x.scrub_claim_id = sc.id ORDER BY x.sequence_no LIMIT 1) AS pdx
+FROM scrub_claims sc JOIN scrub_sessions s ON s.id = sc.session_id
+JOIN scrub_claim_activities a ON a.scrub_claim_id = sc.id AND upper(a.activity_code) ~ '^(9|10|11)(\\.\\d+)?$'
+WHERE s.facility_id = :f AND sc.encounter_start BETWEEN :d0 AND :d1
+ORDER BY sc.claim_id, s.id DESC, a.sequence_no
+""")
+
+
+def _family(code: str) -> str:
+    """9 / 9.01 / 9.02 are one sequence, 10 / 10.01 / 10.02 another — never mixed."""
+    return (code or "").split(".")[0]
+
+
+def _visit_txt(v, ref) -> str:
+    gap = abs((ref - v.d).days)
+    when = "same day" if not gap else f"{gap} day{'s' if gap > 1 else ''} {'before' if v.d < ref else 'after'}"
+    return f"{v.d:%d/%m/%Y} ({when}) code {v.code}, {v.doc or 'no clinician'}, {'dx ' + v.pdx if v.pdx else 'no diagnosis'}, claim {v.claim_id}"
+
+
 def generate(db: Session, session_id: int) -> int:
     sess = db.get(ScrubSession, session_id)
     if sess is None:
@@ -281,6 +379,8 @@ def generate(db: Session, session_id: int) -> int:
         dxs[d.scrub_claim_id].append(d.code)
 
     hist = History(db, fid)
+    mstats = maternity_stats(db)
+    dstats = admin_stats(db)
     doc_learned, doc_pref = doc_review.cached_model(fid)
     d0 = min(c["d"] for c in claims if c["d"]) if any(c["d"] for c in claims) else None
     d1 = max(c["d"] for c in claims if c["d"]) if d0 else None
@@ -288,8 +388,16 @@ def generate(db: Session, session_id: int) -> int:
     spec = rw._specialties()
     has_dental = any(dental_rules.CDT.match(a.activity_code) for v in acts.values() for a in v)
     dhist = dental_rules.DentalHistory(db, fid, d0, d1) if d0 and has_dental else None
-    session_visits: Dict[str, list] = defaultdict(list)   # earlier consults in this same batch
-    policy_seen: set = set()
+    visits: Dict[str, dict] = defaultdict(dict)   # P:/M: key -> {claim_id: visit}; submitted history + all scrubbed files
+    if d0:
+        for v in [*(x for vs in ctx.by_patient.values() for x in vs),
+                  *db.execute(_PENDING_VISITS_SQL, {"f": fid, "d0": d0 - timedelta(days=rw.REPEAT_DAYS),
+                                                    "d1": d1 + timedelta(days=rw.REPEAT_DAYS)})]:
+            v = SimpleNamespace(claim_id=v.claim_id, d=v.d, code=(v.code or "").upper(), doc=(v.doc or "").upper(),
+                                pdx=v.pdx, dx3s=v.dx3s or [], patient_id=v.patient_id, member_id=v.member_id)
+            for k in ("P:" + (v.patient_id or ""), "M:" + (v.member_id or "")):
+                if k not in ("P:", "M:"):
+                    visits[k].setdefault(v.claim_id, v)
 
     # days where most invoices are fully doubled point to an ERP problem, not individual billing errors
     def _fully_doubled(lines):
@@ -312,9 +420,12 @@ def generate(db: Session, session_id: int) -> int:
         # ---- duplicate lines (same code, quantity, net, approval, clinician) ------------------
         # checked first; the other rules then see each service once, so a doubled parent code is not
         # also reported as a sequencing error
+        # dental CDT codes repeat legitimately (one line per tooth) — the DHA dental rules check those instead
         groups: Dict[tuple, list] = defaultdict(list)
-        for a in A:
-            groups[(a.activity_code, float(a.quantity or 1), float(a.net or 0), a.authorization_id, a.clinician_id)].append(a)
+        for i, a in enumerate(A):
+            k = ((a.activity_code, i) if DENTAL_CODE.match(a.activity_code) else
+                 (a.activity_code, float(a.quantity or 1), float(a.net or 0), a.authorization_id, a.clinician_id))
+            groups[k].append(a)
         dups = [(k, v) for k, v in groups.items() if len(v) > 1]
         if dups:
             extra = sum(len(v) - 1 for _, v in dups)
@@ -342,6 +453,20 @@ def generate(db: Session, session_id: int) -> int:
                               f"{blocks[definitive]} / {blocks[symptom]}",
                               f"ICD code correction applied as per Excludes-1 guideline — {blocks[symptom]} removed, "
                               f"{blocks[definitive]} retained. Kindly review."))
+        preg = [d for d in D if d.startswith("O") or d.startswith("Z34")]
+        z3a = next((d for d in D if d.startswith("Z3A")), None)
+        if z3a and (D[0].startswith("Z3A") or not preg):
+            out.append(_q("MATERNITY_CODING", "Diagnosis coding — pregnancy", "CODING CORRECTION", z3a,
+                          f"{z3a} (weeks of gestation) is an additional code only and cannot be "
+                          f"{'the principal diagnosis' if D[0].startswith('Z3A') else 'billed without a pregnancy code'}. "
+                          f"Kindly code the pregnancy as principal — Z34.x normal pregnancy, O09.x high-risk pregnancy, "
+                          f"or the O-code for the pregnancy complication — with {z3a} as secondary.", incharge="DOCTOR"))
+        elif any(d.startswith("O") for d in D) and not D[0].startswith("O"):
+            o = next(d for d in D if d.startswith("O"))
+            out.append(_q("MATERNITY_CODING", "Diagnosis coding — pregnancy", "CODING CORRECTION", f"{D[0]} / {o}",
+                          f"Principal dx {D[0]} is billed with pregnancy code {o}. Chapter 15 (O-codes) has sequencing "
+                          f"priority — kindly sequence {o} as principal, or if the pregnancy is incidental to the visit "
+                          f"use Z33.1 instead of the O-code.", incharge="DOCTOR"))
         out += _drug_sequencing(A)
         dental_violations = dental_rules.check(A, c, dhist, _q)
         out += dental_violations
@@ -349,9 +474,12 @@ def generate(db: Session, session_id: int) -> int:
         # ---- test pairs -----------------------------------------------------------------
         for ca, na, cb, nb in TEST_PAIRS:
             if ca in codes and cb in codes:
-                out.append(_q("TEST_PAIR", "Test pair — remove one or justify", "IMPENDING REJECTION", f"{ca} + {cb}",
-                              f"{na} ({ca}) and {nb} ({cb}) are billed together. Payer denies this combination unless both "
-                              f"are clinically needed. Kindly remove one, or add the doctor's reason for both in the case sheet."))
+                n, _, m, _, _ = hist.lines.get((rcv, cb), (0, 0, 0, 0, 0))
+                ev = (f" This payer denied {m} of {n} recent {nb} lines as not clinically indicated." if n >= 10 and m / n >= 0.2
+                      else "")
+                out.append(_q("TEST_PAIR", "Test pair — necessity of both", "IMPENDING REJECTION", f"{ca} + {cb}",
+                              f"{na} ({ca}) and {nb} ({cb}) are billed together — {PAIR_REASON[(ca, cb)]}. Without "
+                              f"documented necessity for both there is a high chance of denial.{ev}"))
 
         # ---- approvals ------------------------------------------------------------------
         billable = [a for a in A if float(a.net or 0) > 0 and not CONSULT_BASE.match(a.activity_code.split(".")[0])]
@@ -386,12 +514,40 @@ def generate(db: Session, session_id: int) -> int:
                           f"Kindly check & update the approval number."))
             done_dental = {a.activity_code for a in dental}
             no_auth = [a for a in no_auth if a.activity_code not in done_dental]
+        # refraction is an optical-benefit service: the query is about the member's optical cover, not the dx
+        # when refraction is in the encounter, every service of the encounter (consultation included) needs approval
+        refr = [a for a in A if a.activity_code in OPTICAL_CODES and float(a.net or 0) > 0]
+        optical = ([a for a in A if float(a.net or 0) > 0 and not a.authorization_id and a not in dental]
+                   if refr else [])
+        if optical:
+            codes_o = ", ".join(sorted({a.activity_code for a in refr}))
+            miss = ", ".join(sorted({a.activity_code for a in optical}))
+            h = [x for x in (hist.auth(rcv, a.activity_code) for a in optical) if x]
+            out.append(_q("OPTICAL_BENEFIT", "Optical benefit / approval", "BENEFIT CHECK", miss,
+                          f"Refraction {codes_o} comes under the optical benefit. Kindly check the member's policy covers "
+                          f"optical and the approval requirement — when refraction is part of the encounter, all "
+                          f"services of the encounter including consultation require approval. {miss} billed without "
+                          f"approval — chance of denial"
+                          + (f" (this payer denied {h[0][0]} of {h[0][1]} recent lines for no approval)." if h else ".")))
+            no_auth = [a for a in no_auth if a not in optical]
         # an approval exists but does not cover the whole encounter: payers check approval compliance — every
-        # service of the encounter, consultation included, must be on the approval and the dx must match it,
-        # so services without approval go to a separate encounter (the facility splits the invoice)
+        # service of the encounter, consultation included, must be on the approval and the dx must match it;
+        # the unapproved services are annotated with the denial risk
         enc_with = [a for a in A if float(a.net or 0) > 0 and a.authorization_id]
-        enc_without = [a for a in A if float(a.net or 0) > 0 and not a.authorization_id and a not in dental]
-        if enc_with and enc_without:
+        enc_without = [a for a in A if float(a.net or 0) > 0 and not a.authorization_id and a not in dental
+                       and a not in optical]
+        mat = [d for d in D if MATERNITY_DX.match(d) and not d.startswith("Z32.02")]
+        mat_rule = mat and not enc_with and enc_without and rcv not in mstats.exempt
+        if mat_rule:
+            miss = ", ".join(sorted({a.activity_code for a in enc_without}))
+            h = mstats.rate.get(rcv)
+            ev = (f" This payer denied {h[1]} of {h[0]} recent maternity lines billed without approval."
+                  if h and h[1] >= 3 else "")
+            out.append(_q("APPROVAL_MATERNITY", "Approval missing", "APPROVAL MISSING", f"{', '.join(mat[:3])} / {miss}",
+                          f"Maternity encounter (dx {', '.join(mat[:3])}). Most payers require prior approval for all "
+                          f"services of a pregnancy-related encounter. {miss} billed without approval — chance of denial "
+                          f"for non-compliance with approval.{ev} Kindly check & update the approval number."))
+        elif enc_with and enc_without:
             miss = ", ".join(sorted({a.activity_code for a in enc_without}))
             approved = ", ".join(sorted({a.activity_code for a in enc_with}))
             auths = ", ".join(sorted({a.authorization_id for a in enc_with}))
@@ -399,13 +555,10 @@ def generate(db: Session, session_id: int) -> int:
             net_ok = sum(float(a.net or 0) for a in enc_with)
             net_no = sum(float(a.net or 0) for a in enc_without)
             out.append(_q("APPROVAL_PARTIAL", "Approval missing — not all services", "APPROVAL MISSING", miss,
-                          f"Approval {auths} is added only for {approved} ({n_ok} of {n_all} services). {miss} "
-                          f"billed without approval. All services of an encounter, including consultation, must be "
-                          f"covered by the approval and the diagnosis must match the approval. Kindly take approval "
-                          f"along with the other services, or bill the unapproved services separately.",
-                          suggested=f"Split invoice → Invoice 1 (approved): {approved}, approval {auths}, net AED "
-                                    f"{net_ok:.2f} | Invoice 2 (separate encounter, no approval): {miss}, net AED "
-                                    f"{net_no:.2f} — take approval or bill separately."))
+                          f"Approval {auths} covers {approved} ({n_ok} of {n_all} services). {miss} (net AED "
+                          f"{net_no:.2f}) is billed without approval — chance of denial for non-compliance with "
+                          f"approval. Kindly check if approval was taken for {miss} and update the approval number.",
+                          evidence=f"approved net AED {net_ok:.2f}; unapproved net AED {net_no:.2f}"))
         elif not enc_with and no_auth and D and hist.dx_approval(rcv, D[0]):
             den, n = hist.dx_approval(rcv, D[0])
             miss = ", ".join(sorted({a.activity_code for a in no_auth}))
@@ -429,25 +582,40 @@ def generate(db: Session, session_id: int) -> int:
             code = a.activity_code
             if any(code in (i or "") for i in done):
                 continue
+            drugs = sorted({d.activity_code for d in A if DRUG_CODE.match(d.activity_code)})
+            both = dstats.get((rcv, code)) if code in ADMIN_ROUTE and drugs else None
+            if both:
+                den, n = both
+                route, why = ADMIN_ROUTE[code]
+                out.append(_q("ADMIN_NECESSITY", "Clinical necessity — injection / IV over oral", "CLINICAL JUSTIFICATION",
+                              f"{code} + {', '.join(drugs[:3])}",
+                              f"{route} {code} billed with drug {', '.join(drugs[:3])}. This payer denies both the "
+                              f"administration and the drug in {100 * den // n}% of recent cases ({den:,} of {n:,}) — oral treatment is preferred "
+                              f"over injection by this payer. Kindly document in the case sheet the clinical necessity "
+                              f"for {why}.", incharge="DOCTOR"))
+                done.add(code)
+                continue
             panel = hist.panel_components(rcv, code)
             if panel:
-                if (rcv, code) not in policy_seen:
-                    policy_seen.add((rcv, code))
-                    paid, n, good = panel
-                    out.append(_q("PAYER_POLICY", "Payer policy — not a facility query", "INFO", code,
-                                  f"{rcv} pays only {paid} of {n} recent {code} panels but pays "
-                                  f"{', '.join(f'{nm} {pct}%' for nm, pct in good)} when ordered individually. "
-                                  f"Standing rule: doctor orders only the components clinically needed. "
-                                  f"Do not split a panel already done (unbundling).", incharge="INFO"))
+                paid, n, good = panel
+                out.append(_q("DENIAL_RISK", "High chance of denial — payer pattern", "DENIAL RISK", code,
+                              f"{code} — high chance of denial: this payer paid only {paid} of {n} recent {code} panels "
+                              f"as not clinically indicated. Kindly confirm the full panel was clinically needed and "
+                              f"is documented in the case sheet.",
+                              evidence=f"Payer pattern: {rcv} pays only {paid} of {n} recent {code} panels but pays "
+                                       f"{', '.join(f'{nm} {pct}%' for nm, pct in good)} when ordered individually. "
+                                       f"Standing rule: doctor orders only the components clinically needed; do not "
+                                       f"split a panel already done (unbundling)."))
                 continue
             pol = hist.payer_policy(rcv, code)
             if pol:
-                if (rcv, code) not in policy_seen:      # info only — goes to the payer rules matrix, not the facility
-                    policy_seen.add((rcv, code))
-                    out.append(_q("PAYER_POLICY", "Payer policy — not a facility query", "INFO", code,
-                                  f"{rcv} denies {code} as not clinically indicated whatever the diagnosis "
-                                  f"({pol[0]} of {pol[1]} recent lines). Documentation will not change this — "
-                                  f"take up with the payer / facility contract.", incharge="INFO"))
+                # the query annotates the per-code denial chance; the payer pattern goes in the remark column
+                out.append(_q("DENIAL_RISK", "High chance of denial — payer pattern", "DENIAL RISK", code,
+                              f"{code} — high chance of denial: this payer denied {pol[0]} of {pol[1]} recent {code} "
+                              f"lines as not clinically indicated.",
+                              evidence=f"Payer pattern: {rcv} denies {code} whatever the diagnosis ({pol[0]} of "
+                                       f"{pol[1]} recent lines) — documentation is unlikely to change this; take up "
+                                       f"with the payer / facility contract."))
                 continue
             fit = hist.dx_fit(rcv, code, D[0] if D else "")
             if fit:
@@ -495,18 +663,23 @@ def generate(db: Session, session_id: int) -> int:
         # ---- repeat / follow-up consultation -----------------------------------------------
         cons = [a for a in A if CONSULT_CHECKED.match(a.activity_code)]
         if ctx and cons and D and c["d"] and not D[0].startswith("Z"):   # Z = routine / screening visits
-            cur = SimpleNamespace(id=-cid, patient_id=c["patient_id"], member_id=c["member_id"], d=c["d"],
-                                  doc=cons[0].clinician_id, pdx=D[0], dx3s=[x[:3] for x in D])
-            prev = ctx.previous(cur) + [v for k in ("P:" + (c["patient_id"] or ""), "M:" + c["member_id"])
-                                         for v in session_visits.get(k, []) if 0 <= (c["d"] - v.d).days <= rw.REPEAT_DAYS]
+            cur = SimpleNamespace(doc=cons[0].clinician_id)
             dx = D[0][:3]
             code = cons[0].activity_code
-            base = code.split(".")[0]
+            base = _family(code)
             net = float(cons[0].net or 0)
+            mine = {cl: v for k in ("P:" + (c["patient_id"] or ""), "M:" + c["member_id"]) if k not in ("P:", "M:")
+                    for cl, v in visits.get(k, {}).items() if cl != c["claim_id"] and _family(v.code) == base}
+            prev = [v for v in mine.values() if 0 < (c["d"] - v.d).days <= rw.REPEAT_DAYS]
+            nxt = sorted((v for v in mine.values() if 0 < (v.d - c["d"]).days <= rw.REPEAT_DAYS), key=lambda v: v.d)
+            same_day = [v for v in mine.values() if v.d == c["d"]]
+            if same_day and c["claim_id"] > min(v.claim_id for v in same_day):   # raise once per pair
+                out.append(_q("CONSULT_SAMEDAY", "Follow-up / repeat visit rule", "REPEAT TEST", code,
+                              f"{code} billed, and another {base}-series consultation is billed for this patient on the "
+                              f"same day: {'; '.join(_visit_txt(v, c['d']) for v in same_day)}. Kindly check for a "
+                              f"duplicate or wrong visit date."))
             matched = None
             for p in sorted(prev, key=lambda v: v.d, reverse=True):
-                if p.claim_id == c["claim_id"]:
-                    continue
                 same = dx in (p.dx3s or []) or any(rw._block(x) == rw._block(dx) for x in (p.dx3s or []) if rw._block(x))
                 same_doc = cur.doc and cur.doc == (p.doc or "").upper()
                 same_spec = spec.get((cur.doc or "").upper()) and spec.get((cur.doc or "").upper()) == spec.get((p.doc or "").upper())
@@ -523,20 +696,28 @@ def generate(db: Session, session_id: int) -> int:
                 elif gap > rw.FOLLOWUP_DAYS and not code.endswith(".02"):
                     out.append(_q("REPEAT", "Follow-up / repeat visit rule", "REPEAT TEST", f"{code} → {base}.02",
                                   f"{seen} Visit within 8–28 days is a repeat consultation. Kindly bill as {base}.02."))
-            elif code.endswith(".01") and not any(0 < (c["d"] - p.d).days <= rw.FOLLOWUP_DAYS
-                                                  for p in prev if p.claim_id != c["claim_id"]):
-                out.append(_q("FOLLOWUP_NO_VISIT", "Follow-up / repeat visit rule", "REPEAT TEST", code,
-                              f"Follow-up {code} billed, but there is no visit in the previous 7 days. "
-                              f"Kindly check — if there is no initial visit, bill as a new consultation {base}."))
+            elif code.endswith(".01") and not any((c["d"] - p.d).days <= rw.FOLLOWUP_DAYS for p in prev):
+                last = max(prev, key=lambda v: v.d) if prev else None
+                after = (f" Next {base}-series visit: {'; '.join(_visit_txt(v, c['d']) for v in nxt[:3])}." if nxt
+                         else f" No later {base}-series visit within 28 days.")
+                if last:    # 8–28 days → repeat, the chain of later visits does not change
+                    out.append(_q("FOLLOWUP_NO_VISIT", "Follow-up / repeat visit rule", "REPEAT TEST", f"{code} → {base}.02",
+                                  f"Follow-up {code} billed, but the last {base}-series visit is {_visit_txt(last, c['d'])} "
+                                  f"— more than 7 days. Kindly bill as repeat consultation {base}.02.{after}"))
+                else:
+                    knock = [v for v in nxt if (v.d - c["d"]).days <= rw.FOLLOWUP_DAYS and v.code == base]
+                    effect = (f" If changed to {base}, this becomes the initial visit, so "
+                              + "; ".join(f"claim {v.claim_id} on {v.d:%d/%m/%Y} billed {v.code} must change to {base}.01"
+                                          for v in knock) + "." if knock else
+                              f" Changing to {base} does not affect the later visits." if nxt else "")
+                    out.append(_q("FOLLOWUP_NO_VISIT", "Follow-up / repeat visit rule", "REPEAT TEST", f"{code} → {base}",
+                                  f"Follow-up {code} billed, but there is no {base}-series visit in the previous 28 days "
+                                  f"(checked all files of the month and submitted claims). Kindly check — if there is no "
+                                  f"initial visit, bill as a new consultation {base}.{after}{effect}"))
             if code.endswith(".01") and net > 0:
                 out.append(_q("FOLLOWUP_NET", "Billing mistake (quantity / duplicate / price)", "BILLING MISTAKE", code,
                               f"Follow-up {code} is billed with net AED {net:g}. Free follow-up must be billed with net 0. "
                               f"Kindly check & update."))
-            v = SimpleNamespace(id=-cid, claim_id=c["claim_id"], d=c["d"], doc=cons[0].clinician_id, pdx=D[0],
-                                dx3s=[x[:3] for x in D], code=cons[0].activity_code)
-            for k in ("P:" + (c["patient_id"] or ""), "M:" + c["member_id"]):
-                if k not in ("P:", "M:"):
-                    session_visits[k].append(v)
 
         # ---- case sheet does not support a coded Dx: Tier A only (B / C go to Documentation review) -------
         if D and (c["case_sheet"] or any(dx_support.CONSULT.match(a.activity_code) for a in A)):
@@ -562,7 +743,9 @@ def generate(db: Session, session_id: int) -> int:
 # ---------------------------------------------------------------------------
 
 BASE_HEADERS = ["Batch", "Insurance", "MRN / File no", "Invoice no", "Claim ID", "Date", "Patient name",
-                "Procedure / Code / Dx", "Type", "Query type", "Status", "Query", "Suggested action", "In-charge"]
+                "Procedure / Code / Dx", "Type", "Query type", "Status", "Query", "Suggested action", "Remark",
+                "In-charge"]
+REMARK_RULES = {"DENIAL_RISK"}   # their evidence (the payer pattern) is shown in the Remark column
 
 # ---- code type (Dental / Consultation / Laboratory / Radiology …) for the "Type" column -------------------
 # CPT groups come from the DHA CPT list, kept outside the repo (AMA-licensed) as code,type in
@@ -625,20 +808,18 @@ def item_type(item: Optional[str]) -> str:
 GHAF_HEADERS = ["Action by", "Ghaf review", "Ghaf remarks"]
 FACILITY_HEADERS = ["Facility response", "Facility remarks", "Closed (Y/N)"]
 FACILITY_RESPONSES = ["FIXED", "LINE REMOVED", "JUSTIFICATION ADDED", "APPROVAL ATTACHED", "APPROVAL TAKEN",
-                      "INVOICE SPLIT",
+                      "SUBMITTED - DENIAL RISK NOTED",
                       "CORRECTION ACCEPTED", "CORRECTION NOT ACCEPTED", "NO ACTION"]
 GHAF_REVIEW = ["APPROVAL FOUND & ENTERED", "CORRECTION APPLIED", "NOT FOUND - SEND TO FACILITY",
-               "NOT FOUND - FACILITY TO SPLIT INVOICE",
+               "NOT FOUND - ANNOTATED (DENIAL RISK)",
                "SEND TO FACILITY", "NO ISSUE - CLOSE"]
 # first pass: Ghaf enters approval numbers from the eClaimLink auth portal and applies coding corrections in the ERP
-GHAF_APPROVAL_RULES = {"APPROVAL_MISSING", "APPROVAL_PARTIAL", "APPROVAL_DX", "APPROVAL_DENTAL"}
+GHAF_APPROVAL_RULES = {"APPROVAL_MISSING", "APPROVAL_PARTIAL", "APPROVAL_DX", "APPROVAL_DENTAL", "APPROVAL_MATERNITY"}
 # batch by visit day: 1st = 1–10, 2nd = 11–20, final = 21–end of month
 BATCH_DAYS = (("1ST", 1, 10), ("2ND", 11, 20), ("FINAL", 21, 31))
 
 
 def action_by(rule_code: str, status: str) -> str:
-    if rule_code == "APPROVAL_PARTIAL":
-        return "GHAF - CHECK AUTH PORTAL, ELSE FACILITY - SPLIT INVOICE"
     if rule_code in GHAF_APPROVAL_RULES:
         return "GHAF - CHECK AUTH PORTAL"
     if status == "CORRECTION APPLIED":
@@ -682,7 +863,7 @@ def to_workbook(db: Session, session_ids: List[int], batch: Optional[str], audie
     rows = db.execute(text("""
         SELECT sc.claim_id, sc.patient_id, sc.encounter_start AS d,
                upper(coalesce(nullif(sc.receiver_id,''), sc.payer_id,'')) AS rcv,
-               q.rule_code, q.item, q.query_type, q.status, q.query_text, q.suggested_action, q.incharge
+               q.rule_code, q.item, q.query_type, q.status, q.query_text, q.suggested_action, q.incharge, q.evidence
         FROM scrub_queries q JOIN scrub_claims sc ON sc.id = q.scrub_claim_id
         WHERE q.session_id = ANY(:s) AND q.rule_code <> 'PAYER_POLICY'
           AND (CAST(:d0 AS date) IS NULL OR sc.encounter_start >= CAST(:d0 AS date))
@@ -709,7 +890,7 @@ def to_workbook(db: Session, session_ids: List[int], batch: Optional[str], audie
                 invoice_no(r.claim_id), r.claim_id, r.d, None, r.item,
                 item_type(r.item) or ("Dental" if r.rule_code in ("DENTAL_RULE", "APPROVAL_DENTAL") else None),
                 r.query_type, r.status,
-                r.query_text, r.suggested_action, r.incharge]
+                r.query_text, r.suggested_action, r.evidence if r.rule_code in REMARK_RULES else None, r.incharge]
         who = action_by(r.rule_code, r.status)
         if ghaf:
             line += [who, None, None]
@@ -720,7 +901,7 @@ def to_workbook(db: Session, session_ids: List[int], batch: Optional[str], audie
         ws.cell(ws.max_row, headers.index("Suggested action") + 1).alignment = Alignment(wrap_text=True, vertical="top")
         if ghaf and who != "FACILITY":
             ws.cell(ws.max_row, headers.index("Action by") + 1).fill = ghaf_fill
-    widths = [10, 28, 14, 14, 30, 12, 18, 22, 18, 34, 22, 70, 50, 11] + ([24, 28, 30] if ghaf else []) + [22, 30, 10]
+    widths = [10, 28, 14, 14, 30, 12, 18, 22, 18, 34, 22, 70, 50, 50, 11] + ([24, 28, 30] if ghaf else []) + [22, 30, 10]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
     ws.freeze_panes = "A2"

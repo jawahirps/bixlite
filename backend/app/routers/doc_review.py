@@ -8,6 +8,7 @@ doc_review.py — Documentation review screen (case sheet vs coded Dx).
   PATCH /api/docreview/findings/{id}              {review_status, review_remark}
   GET   /api/docreview/findings.xlsx?facility_id=&month=&tier=
   GET   /api/docreview/feedback.xlsx?facility_id=&month=
+  GET   /api/docreview/payer-patterns?facility_id=&month=  payer denial patterns from the Claim scrubber
 
 Facility users see their own facility only. Nothing is sent to the facility or a payer from here.
 """
@@ -21,12 +22,14 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import Facility, User
 from ..security import get_current_user
 from ..services import doc_review as dr
+from ..services import resub_worklist as rw
 
 router = APIRouter(prefix="/api/docreview", tags=["documentation review"])
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -127,6 +130,28 @@ def review_finding(finding_id: int, body: ReviewIn, db: Session = Depends(get_db
     f.reviewed_by, f.reviewed_at = user.id, datetime.now(timezone.utc)
     db.commit()
     return {"id": f.id, "review_status": f.review_status, "review_remark": f.review_remark}
+
+
+@router.get("/payer-patterns")
+def payer_patterns(facility_id: int, month: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Payer denial patterns behind the scrubber's "high chance of denial" annotations, for clinic administration."""
+    _check_facility(db, user, facility_id)
+    y, m = map(int, _month(month).split("-"))
+    rows = db.execute(text("""
+        WITH c AS (SELECT DISTINCT ON (sc.claim_id) sc.id, sc.net_amount,
+                          upper(coalesce(nullif(sc.receiver_id,''), sc.payer_id, '')) AS rcv
+                   FROM scrub_claims sc JOIN scrub_sessions s ON s.id = sc.session_id
+                   WHERE s.facility_id = :f AND sc.encounter_start >= make_date(:y, :m, 1)
+                     AND sc.encounter_start < make_date(:y, :m, 1) + interval '1 month'
+                   ORDER BY sc.claim_id, s.id DESC)
+        SELECT c.rcv, q.item AS code, q.evidence AS pattern, count(DISTINCT c.id) AS claims, sum(c.net_amount) AS net
+        FROM scrub_queries q JOIN c ON c.id = q.scrub_claim_id
+        WHERE q.rule_code = 'DENIAL_RISK' GROUP BY 1, 2, 3 ORDER BY 4 DESC, 5 DESC"""),
+        {"f": facility_id, "y": y, "m": m}).all()
+    payer_names, receiver_names = rw.party_names(db)
+    return [{"payer": r.rcv, "payer_name": receiver_names.get(r.rcv) or payer_names.get(r.rcv) or "",
+             "code": r.code, "pattern": (r.pattern or "").removeprefix("Payer pattern: "),
+             "claims": r.claims, "net": float(r.net or 0)} for r in rows]
 
 
 def _fname(fac: Facility, what: str, month: str) -> str:

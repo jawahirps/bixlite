@@ -67,6 +67,8 @@ def on_startup() -> None:
     packs.resume_on_startup()
     _prepare_bulk_resub()
     _prepare_doc_review()
+    from .services import scrub_inbox
+    scrub_inbox.start()                        # ~/Downloads/*to Scrub* → Claim scrubber sessions
 
 
 def _cleanup_stale_jobs(db) -> None:

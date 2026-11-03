@@ -937,4 +937,45 @@ def to_workbook(db: Session, session_ids: List[int], batch: Optional[str], audie
     yn = DataValidation(type="list", formula1='"Y,N"', allow_blank=True)
     yn.add(f"{col('Closed (Y/N)')}2:{col('Closed (Y/N)')}2000")
     ws.add_data_validation(yn)
+    _claim_wise(wb, rows, batch, receiver_names, payer_names)
     return wb, len(rows)
+
+
+CLAIM_WISE_HEADERS = ["Batch", "Insurance", "MRN / File no", "Invoice no", "Claim ID", "Date", "Patient name",
+                      "Query — Admin team", "Query — Clinician"]
+
+
+def _to_clinician(r) -> bool:
+    # Excludes-1 is an ICD derivation question for the doctor (scrubber in-charge to follow after verification)
+    return r.incharge == "DOCTOR" or r.rule_code == "EXCLUDES1"
+
+
+def _claim_wise(wb, rows, batch, receiver_names, payer_names) -> None:
+    """First sheet: one row per claim; admin (General) and clinician (Doctor) queries numbered in two columns.
+    The per-query sheet stays behind it for Ghaf's first pass and the facility response."""
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+    ws = wb.create_sheet("Claim-wise queries", 0)
+    ws.append(CLAIM_WISE_HEADERS)
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="1F4E78")
+        c.alignment = Alignment(wrap_text=True, vertical="center")
+    claims: Dict[str, list] = {}
+    for r in sorted(rows, key=lambda r: (r.d or date.min, r.claim_id)):
+        claims.setdefault(r.claim_id, []).append(r)
+    num = lambda g: "\n".join(f"{i}) {r.query_text}" for i, r in enumerate(g, 1)) or None
+    top = Alignment(wrap_text=True, vertical="top")
+    for claim_id, g in claims.items():
+        r0 = g[0]
+        ws.append([batch or (batch_for(r0.d, r0.d) if r0.d else "") or "",
+                   receiver_names.get(r0.rcv) or payer_names.get(r0.rcv) or r0.rcv, r0.patient_id,
+                   invoice_no(claim_id), claim_id, r0.d, None,
+                   num([r for r in g if not _to_clinician(r)]), num([r for r in g if _to_clinician(r)])])
+        for c in ws[ws.max_row]:
+            c.alignment = top
+        ws.cell(ws.max_row, CLAIM_WISE_HEADERS.index("Date") + 1).number_format = "DD/MM/YYYY"
+    for i, w in enumerate([10, 28, 14, 14, 30, 12, 18, 80, 80], 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions

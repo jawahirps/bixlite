@@ -144,12 +144,38 @@ LAB_EVIDENCE = {   # ICD prefix → CPT codes on the same claim that produce the
 SKIP = re.compile(r"^(Z|U07|V|W|X|Y)")  # status / external-cause codes are not derived from complaints
 
 
+# "not" that does not negate a finding: "f/u not better", "not had food" (= low intake)
+NOT_FINDING = [
+    (re.compile(r"\bnot\s+(getting\s+)?(better|improv\w*|reliev\w*|subsid\w*|reduc\w*|settl\w*|resolv\w*|ok|well|"
+                r"responding|respond\w*)\b"), " persistent "),
+    (re.compile(r"\bnot\s+(had|having|taken|taking|eat\w*|able to eat)\s+(any\s+)?(food|meals?|anything|orally|well)\b"),
+     " low intake "),
+]
+# a negation covers the next few words only ("no loose stools constipation - 1 d" keeps constipation), extended
+# by "/", "or", "and", "nor" ("no vomiting / loose motion / abd pain"); it never crosses punctuation or c/o, h/o …
+# a single word that is a whole finding ends the negated phrase: "no vomiting nausea present" keeps nausea
+_FINDING_WORD = (r"(?:vomit\w*|nause\w*|fever|cough|cold|constipat\w*|diarr\w*|dysuria|headache|giddi\w*|dizz\w*|"
+                 r"sob|wheez\w*|rash\w*|itch\w*|swelling|bleeding|palpitat\w*|fatigue|weakness|dehydrat\w*)")
+_STOP = r"(?:k/c/o|c/o|h/o|o/e|imp|adv|dx|s-|o-|or|and|nor|no|nil|not|denies|without)\b"
+_NEG_WORD = rf"(?!{_STOP})[a-z0-9][a-z0-9'.+\-]*"
+_NEG_GROUP = rf"(?:{_FINDING_WORD}\b|(?!{_FINDING_WORD}\b){_NEG_WORD}(?:[ \t]+(?!{_FINDING_WORD}\b){_NEG_WORD})?)"
+NEG_CLAUSE = (rf"\b(?:no|nil|not|denies|denied|without|negative for)\b[ \t]*(?:(?:h/o|history of|c/o|any)\b[ \t]*)?"
+              rf"{_NEG_GROUP}(?:[ \t]*(?:/|\bor\b|\band\b|\bnor\b|&)[ \t]*{_NEG_GROUP})*")
+
+
+def _fix_not(t: str) -> str:
+    for rx, rep in NOT_FINDING:
+        t = rx.sub(rep, t)
+    return t
+
+
 def norm(text: Optional[str], drop_negated: bool = True) -> str:
-    t = html.unescape(text or "").lower()
+    t = _fix_not(html.unescape(text or "").lower())
+    t = re.sub(r"\bd[sy]{1,2}[sy]?ur[ie]a\b|\bdisuria\b", "dysuria", t)   # common misspellings
     if not drop_negated:
         t = re.sub(r"\b(no|nil|not|denies|denied|without|negative for)\b", " ", t)
-    # negations first, while "h/o" is still there: "no h/o vomiting /loose motion" drops the whole clause
-    t = re.sub(r"\b(no|nil|not|denies|denied|without|negative for)\b\s*(h/o|history of|c/o|any)?[^\n\r.;:,]*", " ", t)
+    # negations first, while "h/o" is still there: "no h/o vomiting /loose motion" drops the clause
+    t = re.sub(NEG_CLAUSE, " ", t)
     t = re.sub(r"\bafebrile\b", " ", t)
     t = re.sub(r"\bk/c/o\b|\bc/o\b|\bh/o\b|[\n\r,;:]+", " xx ", t)  # keep phrases from running together
     return re.sub(r"[^a-z0-9/\.]+", " ", t)
@@ -163,8 +189,8 @@ def negated_lines(note: Optional[str], core: str, limit: int = 3) -> List[str]:
     out = []
     for line in re.split(r"[\r\n]+", html.unescape(note or "")):
         line = line.strip(" -•\t")
-        m = NEG.search(line)
-        if m and re.search(core, line[m.start():].lower()):
+        low = _fix_not(line.lower())
+        if any(re.search(core, m.group(0)) for m in re.finditer(NEG_CLAUSE, low)):
             out.append(line[:120])
     return out[:limit]
 
@@ -482,9 +508,9 @@ def evaluate(dx: List[tuple], complaint: Optional[str], obs_codes: set, acts: Li
     pref = pref or Preferred([])
     for f in found:
         sole = f["code"] == principal or not supported
-        if f["layer"] in ("negated", "no note"):
+        if f["layer"] == "negated":
             f["tier"] = "A"
-        elif f["layer"] == "learned":
+        elif f["layer"] in ("learned", "no note"):   # no case sheet: Ghaf manual review, never a Dx query
             f["tier"] = "C"
         elif services and sole:
             f["tier"] = "A"

@@ -134,7 +134,8 @@ def review_finding(finding_id: int, body: ReviewIn, db: Session = Depends(get_db
 
 @router.get("/payer-patterns")
 def payer_patterns(facility_id: int, month: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    """Payer denial patterns behind the scrubber's "high chance of denial" annotations, for clinic administration."""
+    """Payer denial patterns and the clinician licence watch-list found by the Claim scrubber — for clinic administration,
+    not claim queries."""
     _check_facility(db, user, facility_id)
     y, m = map(int, _month(month).split("-"))
     rows = db.execute(text("""
@@ -144,13 +145,14 @@ def payer_patterns(facility_id: int, month: str, db: Session = Depends(get_db), 
                    WHERE s.facility_id = :f AND sc.encounter_start >= make_date(:y, :m, 1)
                      AND sc.encounter_start < make_date(:y, :m, 1) + interval '1 month'
                    ORDER BY sc.claim_id, s.id DESC)
-        SELECT c.rcv, q.item AS code, q.evidence AS pattern, count(DISTINCT c.id) AS claims, sum(c.net_amount) AS net
+        SELECT q.rule_code AS kind, c.rcv, q.item AS code, q.evidence AS pattern, count(DISTINCT c.id) AS claims,
+               sum(c.net_amount) AS net
         FROM scrub_queries q JOIN c ON c.id = q.scrub_claim_id
-        WHERE q.rule_code = 'DENIAL_RISK' GROUP BY 1, 2, 3 ORDER BY 4 DESC, 5 DESC"""),
+        WHERE q.rule_code IN ('DENIAL_RISK', 'LICENCE') GROUP BY 1, 2, 3, 4 ORDER BY 1, 5 DESC, 6 DESC"""),
         {"f": facility_id, "y": y, "m": m}).all()
     payer_names, receiver_names = rw.party_names(db)
-    return [{"payer": r.rcv, "payer_name": receiver_names.get(r.rcv) or payer_names.get(r.rcv) or "",
-             "code": r.code, "pattern": (r.pattern or "").removeprefix("Payer pattern: "),
+    return [{"kind": "licence" if r.kind == "LICENCE" else "denial", "payer": r.rcv, "payer_name": receiver_names.get(r.rcv) or payer_names.get(r.rcv) or "",
+             "code": r.code, "pattern": (r.pattern or "").removeprefix("Payer pattern: ").removeprefix("Payer history: "),
              "claims": r.claims, "net": float(r.net or 0)} for r in rows]
 
 

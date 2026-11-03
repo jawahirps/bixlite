@@ -95,6 +95,8 @@ CONSULT_CHECKED = re.compile(r"^(9|10|11)(\.0[12])?$")   # .01 = free follow-up 
 # (Z32.01 positive test, Z33 pregnant state, Z34 normal pregnancy, Z36 antenatal screening, Z37 outcome of delivery,
 #  Z39 postpartum, Z3A weeks of gestation, Z03.7 suspected maternal/fetal condition ruled out)
 MATERNITY_DX = re.compile(r"^(O|Z32\.01|Z33|Z34|Z36|Z37|Z39|Z3A|Z03\.7)")
+# kept for the Documentation review "Payer patterns" tab only — never a claim query
+PATTERN_ONLY = ("DENIAL_RISK", "PAYER_POLICY", "LICENCE")
 OPTICAL_CODES = {"92015"}   # refraction — optical benefit
 DRUG_CODE = re.compile(r"^\d{4}-\d{6}-\d{4}$")   # DHA / DoH drug code, e.g. 0011-106618-1001
 # administration codes where a payer denying the admin AND the drug together questions the route (clinical necessity)
@@ -475,11 +477,12 @@ def generate(db: Session, session_id: int) -> int:
         for ca, na, cb, nb in TEST_PAIRS:
             if ca in codes and cb in codes:
                 n, _, m, _, _ = hist.lines.get((rcv, cb), (0, 0, 0, 0, 0))
-                ev = (f" This payer denied {m} of {n} recent {nb} lines as not clinically indicated." if n >= 10 and m / n >= 0.2
-                      else "")
+                ev = (f"Payer history: {m} of {n} recent {nb} lines denied as not clinically indicated."
+                      if n >= 10 and m / n >= 0.2 else None)
                 out.append(_q("TEST_PAIR", "Test pair — necessity of both", "IMPENDING REJECTION", f"{ca} + {cb}",
                               f"{na} ({ca}) and {nb} ({cb}) are billed together — {PAIR_REASON[(ca, cb)]}. Without "
-                              f"documented necessity for both there is a high chance of denial.{ev}"))
+                              f"documented necessity for both there is a high chance of denial.", incharge="DOCTOR",
+                              evidence=ev))
 
         # ---- approvals ------------------------------------------------------------------
         billable = [a for a in A if float(a.net or 0) > 0 and not CONSULT_BASE.match(a.activity_code.split(".")[0])]
@@ -527,8 +530,9 @@ def generate(db: Session, session_id: int) -> int:
                           f"Refraction {codes_o} comes under the optical benefit. Kindly check the member's policy covers "
                           f"optical and the approval requirement — when refraction is part of the encounter, all "
                           f"services of the encounter including consultation require approval. {miss} billed without "
-                          f"approval — chance of denial"
-                          + (f" (this payer denied {h[0][0]} of {h[0][1]} recent lines for no approval)." if h else ".")))
+                          f"approval — chance of denial.",
+                          evidence=(f"Payer history: {h[0][0]} of {h[0][1]} recent lines without approval denied."
+                                    if h else None)))
             no_auth = [a for a in no_auth if a not in optical]
         # an approval exists but does not cover the whole encounter: payers check approval compliance — every
         # service of the encounter, consultation included, must be on the approval and the dx must match it;
@@ -541,12 +545,12 @@ def generate(db: Session, session_id: int) -> int:
         if mat_rule:
             miss = ", ".join(sorted({a.activity_code for a in enc_without}))
             h = mstats.rate.get(rcv)
-            ev = (f" This payer denied {h[1]} of {h[0]} recent maternity lines billed without approval."
-                  if h and h[1] >= 3 else "")
+            ev = (f"Payer history: {h[1]} of {h[0]} recent maternity lines without approval denied for approval."
+                  if h and h[1] >= 3 else None)
             out.append(_q("APPROVAL_MATERNITY", "Approval missing", "APPROVAL MISSING", f"{', '.join(mat[:3])} / {miss}",
                           f"Maternity encounter (dx {', '.join(mat[:3])}). Most payers require prior approval for all "
                           f"services of a pregnancy-related encounter. {miss} billed without approval — chance of denial "
-                          f"for non-compliance with approval.{ev} Kindly check & update the approval number."))
+                          f"for non-compliance with approval. Kindly check & update the approval number.", evidence=ev))
         elif enc_with and enc_without:
             miss = ", ".join(sorted({a.activity_code for a in enc_without}))
             approved = ", ".join(sorted({a.activity_code for a in enc_with}))
@@ -564,14 +568,15 @@ def generate(db: Session, session_id: int) -> int:
             miss = ", ".join(sorted({a.activity_code for a in no_auth}))
             out.append(_q("APPROVAL_DX", "Approval missing", "APPROVAL MISSING", f"{D[0]} / {miss}",
                           f"Approval missing for {miss} with dx {D[0]}. This payer requires approval for {D[0][:3]} "
-                          f"cases (denied for no approval on {den} of {n} recent lines). Kindly check & update the "
-                          f"approval number.", evidence=f"{den}/{n} lines without approval denied AUTH-001/002"))
+                          f"cases. Kindly check & update the approval number.",
+                          evidence=f"Payer history: {den} of {n} recent lines without approval denied (AUTH-001/002)."))
         elif not enc_with and no_auth:
             risky = [(a, hist.auth(rcv, a.activity_code)) for a in no_auth]
             risky = [(a, h) for a, h in risky if h]
             if risky:
                 miss = ", ".join(sorted({a.activity_code for a, _ in risky}))
-                ev = "; ".join(f"{a.activity_code}: {h[0]}/{h[1]} denied for approval" for a, h in risky)
+                ev = "Payer history: " + "; ".join(f"{a.activity_code} {h[0]} of {h[1]} recent lines without approval denied"
+                                                  for a, h in risky) + "."
                 out.append(_q("APPROVAL_MISSING", "Approval missing", "APPROVAL MISSING", miss,
                               f"Approval missing for {miss}. This payer requires approval for this service. "
                               f"Kindly check & update the approval number.", evidence=ev))
@@ -589,33 +594,32 @@ def generate(db: Session, session_id: int) -> int:
                 route, why = ADMIN_ROUTE[code]
                 out.append(_q("ADMIN_NECESSITY", "Clinical necessity — injection / IV over oral", "CLINICAL JUSTIFICATION",
                               f"{code} + {', '.join(drugs[:3])}",
-                              f"{route} {code} billed with drug {', '.join(drugs[:3])}. This payer denies both the "
-                              f"administration and the drug in {100 * den // n}% of recent cases ({den:,} of {n:,}) — oral treatment is preferred "
+                              f"{route} {code} billed with drug {', '.join(drugs[:3])}. Oral treatment is preferred "
                               f"over injection by this payer. Kindly document in the case sheet the clinical necessity "
-                              f"for {why}.", incharge="DOCTOR"))
+                              f"for {why}.", incharge="DOCTOR",
+                              evidence=f"Payer history: administration and drug both denied in {100 * den // n}% of "
+                                       f"recent cases ({den:,} of {n:,})."))
                 done.add(code)
                 continue
             panel = hist.panel_components(rcv, code)
             if panel:
                 paid, n, good = panel
                 out.append(_q("DENIAL_RISK", "High chance of denial — payer pattern", "DENIAL RISK", code,
-                              f"{code} — high chance of denial: this payer paid only {paid} of {n} recent {code} panels "
-                              f"as not clinically indicated. Kindly confirm the full panel was clinically needed and "
-                              f"is documented in the case sheet.",
+                              f"{code} — high chance of denial as not clinically indicated. Kindly confirm the full "
+                              f"panel was clinically needed and is documented in the case sheet.",
                               evidence=f"Payer pattern: {rcv} pays only {paid} of {n} recent {code} panels but pays "
                                        f"{', '.join(f'{nm} {pct}%' for nm, pct in good)} when ordered individually. "
                                        f"Standing rule: doctor orders only the components clinically needed; do not "
-                                       f"split a panel already done (unbundling)."))
+                                       f"split a panel already done (unbundling).", incharge="INFO"))
                 continue
             pol = hist.payer_policy(rcv, code)
             if pol:
                 # the query annotates the per-code denial chance; the payer pattern goes in the remark column
                 out.append(_q("DENIAL_RISK", "High chance of denial — payer pattern", "DENIAL RISK", code,
-                              f"{code} — high chance of denial: this payer denied {pol[0]} of {pol[1]} recent {code} "
-                              f"lines as not clinically indicated.",
+                              f"{code} — high chance of denial as not clinically indicated by this payer.",
                               evidence=f"Payer pattern: {rcv} denies {code} whatever the diagnosis ({pol[0]} of "
                                        f"{pol[1]} recent lines) — documentation is unlikely to change this; take up "
-                                       f"with the payer / facility contract."))
+                                       f"with the payer / facility contract.", incharge="INFO"))
                 continue
             fit = hist.dx_fit(rcv, code, D[0] if D else "")
             if fit:
@@ -623,42 +627,44 @@ def generate(db: Session, session_id: int) -> int:
                 if code.startswith("963"):
                     out.append(_q("DX_FIT", "NEW · Justification for IV / injection and routine labs (Oman)",
                                   "CLINICAL JUSTIFICATION", f"{code} / {D[0]}",
-                                  f"IV / injection {code} billed for dx {D[0]}. This payer denies IV administration for "
-                                  f"{D[0][:3]} ({m} of {n} recent lines) — oral / IM treatment is expected. Kindly confirm "
-                                  f"the procedure note states why IV was required (e.g. vomiting, unable to take orally, "
-                                  f"failed oral treatment), else remove {code}.", incharge="DOCTOR"))
+                                  f"IV / injection {code} billed for dx {D[0]}. Oral / IM treatment is expected by this "
+                                  f"payer for {D[0][:3]}. Kindly confirm the procedure note states why IV was required "
+                                  f"(e.g. vomiting, unable to take orally, failed oral treatment), else remove {code}.",
+                                  incharge="DOCTOR", evidence=f"Payer history: {m} of {n} recent lines denied."))
                     continue
                 out.append(_q("DX_FIT", "Diagnosis does not support the service", "CLINICAL JUSTIFICATION",
                               f"{code} / {D[0]}",
-                              f"{code} is billed with principal dx {D[0]}. This payer denies {code} with {D[0][:3]} "
-                              f"({m} of {n} recent lines) but pays it with {', '.join(paid)}. Kindly check if a supporting "
-                              f"diagnosis is documented in the case sheet and code it, else remove {code}.",
-                              incharge="DOCTOR"))
+                              f"{code} is billed with principal dx {D[0]}, which does not support {code} for this "
+                              f"payer. Kindly check if a supporting diagnosis is documented in the case sheet and code "
+                              f"it, else remove {code}.", incharge="DOCTOR",
+                              evidence=f"Payer history: {code} with {D[0][:3]} denied on {m} of {n} recent lines; paid "
+                                       f"with {', '.join(paid)}."))
                 continue
             if code.startswith("963"):
                 alt = hist.alternative(rcv, code)
                 if alt:
                     out.append(_q("ALT_SERVICE", "NEW · Justification for IV / injection and routine labs (Oman)",
                                   "CLINICAL JUSTIFICATION", code,
-                                  f"{code} billed. This payer expects an alternative (oral / IM) to IV administration "
-                                  f"({alt[0]} of {alt[1]} recent lines denied MNEC-006). Kindly confirm the procedure note "
-                                  f"states why IV was required (e.g. vomiting, dehydration, failed oral treatment).",
-                                  incharge="DOCTOR"))
+                                  f"{code} billed. This payer expects an alternative (oral / IM) to IV administration. "
+                                  f"Kindly confirm the procedure note states why IV was required (e.g. vomiting, "
+                                  f"dehydration, failed oral treatment).", incharge="DOCTOR",
+                                  evidence=f"Payer history: {alt[0]} of {alt[1]} recent lines denied MNEC-006."))
 
         # ---- diagnosis excluded by payer ---------------------------------------------------
         if D:
             h = hist.dx_excluded(rcv, D[0])
             if h:
                 out.append(_q("DX_EXCLUDED", "Diagnosis covered under policy (SOB)", "SOB", D[0],
-                              f"Dx {D[0]} is not covered by this payer (denied as not covered on {h[0]} of {h[1]} recent "
-                              f"claims). Kindly confirm coverage / collect from patient."))
+                              f"Dx {D[0]} may not be covered by this payer. Kindly confirm coverage / collect from "
+                              f"patient.", evidence=f"Payer history: denied as not covered on {h[0]} of {h[1]} recent claims."))
 
         # ---- licence watch-list -----------------------------------------------------------
         for doc in sorted({a.clinician_id for a in A if a.clinician_id and (a.clinician_id, rcv) in hist.licence}):
             den, n, last = hist.licence[(doc, rcv)]
-            out.append(_q("LICENCE", "NEW · Clinician licence watch-list", "CONFIRMATION", doc,
-                          f"This payer denied {den} of {n} recent lines for {doc} for licence status (last on "
-                          f"{last:%d/%m/%Y}). Kindly confirm the licence is active and registered with this payer."))
+            out.append(_q("LICENCE", "Clinician licence watch-list", "CONFIRMATION", doc,
+                          f"Kindly confirm the licence of {doc} is active and registered with this payer.",
+                          evidence=f"Payer history: {den} of {n} recent lines for {doc} denied for licence status "
+                                   f"(last on {last:%d/%m/%Y}).", incharge="INFO"))
 
         # ---- repeat / follow-up consultation -----------------------------------------------
         cons = [a for a in A if CONSULT_CHECKED.match(a.activity_code)]
@@ -672,10 +678,17 @@ def generate(db: Session, session_id: int) -> int:
                     for cl, v in visits.get(k, {}).items() if cl != c["claim_id"] and _family(v.code) == base}
             prev = [v for v in mine.values() if 0 < (c["d"] - v.d).days <= rw.REPEAT_DAYS]
             nxt = sorted((v for v in mine.values() if 0 < (v.d - c["d"]).days <= rw.REPEAT_DAYS), key=lambda v: v.d)
-            same_day = [v for v in mine.values() if v.d == c["d"]]
+            # 9 + 9.01 on the same day is a correct initial + follow-up pair; only the same code twice is questioned
+            same_day = [v for v in mine.values() if v.d == c["d"] and v.code == code]
+            initial_today = any(v.d == c["d"] and v.code == base for v in mine.values())
+            # GP referral: the GP records the visit as 9.01 (net 0) and the specialist bills 10 / 11 the same day
+            referral = code.endswith(".01") and any(
+                v.d == c["d"] and _family(v.code) != base
+                for k in ("P:" + (c["patient_id"] or ""), "M:" + c["member_id"]) if k not in ("P:", "M:")
+                for cl, v in visits.get(k, {}).items() if cl != c["claim_id"] and CONSULT_CHECKED.match(v.code))
             if same_day and c["claim_id"] > min(v.claim_id for v in same_day):   # raise once per pair
                 out.append(_q("CONSULT_SAMEDAY", "Follow-up / repeat visit rule", "REPEAT TEST", code,
-                              f"{code} billed, and another {base}-series consultation is billed for this patient on the "
+                              f"{code} billed, and another {code} consultation is billed for this patient on the "
                               f"same day: {'; '.join(_visit_txt(v, c['d']) for v in same_day)}. Kindly check for a "
                               f"duplicate or wrong visit date."))
             matched = None
@@ -696,7 +709,8 @@ def generate(db: Session, session_id: int) -> int:
                 elif gap > rw.FOLLOWUP_DAYS and not code.endswith(".02"):
                     out.append(_q("REPEAT", "Follow-up / repeat visit rule", "REPEAT TEST", f"{code} → {base}.02",
                                   f"{seen} Visit within 8–28 days is a repeat consultation. Kindly bill as {base}.02."))
-            elif code.endswith(".01") and not any((c["d"] - p.d).days <= rw.FOLLOWUP_DAYS for p in prev):
+            elif (code.endswith(".01") and not initial_today and not referral
+                  and not any((c["d"] - p.d).days <= rw.FOLLOWUP_DAYS for p in prev)):
                 last = max(prev, key=lambda v: v.d) if prev else None
                 after = (f" Next {base}-series visit: {'; '.join(_visit_txt(v, c['d']) for v in nxt[:3])}." if nxt
                          else f" No later {base}-series visit within 28 days.")
@@ -735,7 +749,7 @@ def generate(db: Session, session_id: int) -> int:
 
     db.add_all(rows)
     db.flush()
-    return len(rows)
+    return sum(r.rule_code not in PATTERN_ONLY for r in rows)
 
 
 # ---------------------------------------------------------------------------
@@ -745,7 +759,6 @@ def generate(db: Session, session_id: int) -> int:
 BASE_HEADERS = ["Batch", "Insurance", "MRN / File no", "Invoice no", "Claim ID", "Date", "Patient name",
                 "Procedure / Code / Dx", "Type", "Query type", "Status", "Query", "Suggested action", "Remark",
                 "In-charge"]
-REMARK_RULES = {"DENIAL_RISK"}   # their evidence (the payer pattern) is shown in the Remark column
 
 # ---- code type (Dental / Consultation / Laboratory / Radiology …) for the "Type" column -------------------
 # CPT groups come from the DHA CPT list, kept outside the repo (AMA-licensed) as code,type in
@@ -865,11 +878,11 @@ def to_workbook(db: Session, session_ids: List[int], batch: Optional[str], audie
                upper(coalesce(nullif(sc.receiver_id,''), sc.payer_id,'')) AS rcv,
                q.rule_code, q.item, q.query_type, q.status, q.query_text, q.suggested_action, q.incharge, q.evidence
         FROM scrub_queries q JOIN scrub_claims sc ON sc.id = q.scrub_claim_id
-        WHERE q.session_id = ANY(:s) AND q.rule_code <> 'PAYER_POLICY'
+        WHERE q.session_id = ANY(:s) AND q.rule_code NOT IN :pattern_only
           AND (CAST(:d0 AS date) IS NULL OR sc.encounter_start >= CAST(:d0 AS date))
           AND (CAST(:d1 AS date) IS NULL OR sc.encounter_start <= CAST(:d1 AS date))
         ORDER BY q.incharge, sc.encounter_start, sc.claim_id, q.id"""),
-        {"s": list(session_ids), "d0": date_from, "d1": date_to}).all()
+        {"s": list(session_ids), "d0": date_from, "d1": date_to, "pattern_only": PATTERN_ONLY}).all()
     seen = set()
     rows = [r for r in rows if not ((r.claim_id, r.query_text) in seen or seen.add((r.claim_id, r.query_text)))]
 
@@ -890,7 +903,7 @@ def to_workbook(db: Session, session_ids: List[int], batch: Optional[str], audie
                 invoice_no(r.claim_id), r.claim_id, r.d, None, r.item,
                 item_type(r.item) or ("Dental" if r.rule_code in ("DENTAL_RULE", "APPROVAL_DENTAL") else None),
                 r.query_type, r.status,
-                r.query_text, r.suggested_action, r.evidence if r.rule_code in REMARK_RULES else None, r.incharge]
+                r.query_text, r.suggested_action, r.evidence, r.incharge]
         who = action_by(r.rule_code, r.status)
         if ghaf:
             line += [who, None, None]

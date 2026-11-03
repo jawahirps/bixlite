@@ -211,28 +211,40 @@ function PayerPatterns({ facilityId, month }) {
       .then((r) => setRows(r.data)).catch(() => setRows([]));
   }, [facilityId, month]);
   if (!rows) return <div className="gh-card p-4 text-sm text-slate-500">Loading…</div>;
-  if (!rows.length) return <div className="gh-card p-4 text-sm text-slate-500">No payer denial patterns in the scrubbed claims of this month.</div>;
+  if (!rows.length) return <div className="gh-card p-4 text-sm text-slate-500">No payer patterns in the scrubbed claims of this month.</div>;
+  const table = (list, first) => (
+    <div className="overflow-auto">
+      <table className="w-full text-xs">
+        <thead className="bg-slate-50 text-left text-slate-500">
+          <tr>{["Payer", first, "Pattern", "Claims", "Net AED"].map((h) => <th key={h} className="px-2 py-1 font-medium">{h}</th>)}</tr>
+        </thead>
+        <tbody>{list.map((r) => (
+          <tr key={`${r.payer}-${r.code}`} className="border-t border-slate-100 align-top">
+            <td className="px-2 py-1 whitespace-nowrap">{r.payer_name || r.payer}<span className="block text-slate-400">{r.payer}</span></td>
+            <td className="px-2 py-1 font-mono">{r.code}</td>
+            <td className="px-2 py-1">{r.pattern}</td>
+            <td className="px-2 py-1 text-right">{r.claims}</td>
+            <td className="px-2 py-1 text-right">{aed(r.net)}</td>
+          </tr>))}
+        </tbody>
+      </table>
+    </div>
+  );
+  const denial = rows.filter((r) => r.kind === "denial");
+  const licence = rows.filter((r) => r.kind === "licence");
   return (
-    <div className="gh-card space-y-3 p-4">
+    <div className="space-y-4">
       <p className="text-xs text-slate-500">
-        Payer denial patterns behind the Claim scrubber's "high chance of denial" annotations — for clinic administration
-        and payer / contract follow-up, not per-claim queries.
+        Patterns found by the Claim scrubber for clinic administration and payer / contract follow-up — not claim queries.
       </p>
-      <div className="overflow-auto">
-        <table className="w-full text-xs">
-          <thead className="bg-slate-50 text-left text-slate-500">
-            <tr>{["Payer", "Code", "Pattern", "Claims", "Net AED"].map((h) => <th key={h} className="px-2 py-1 font-medium">{h}</th>)}</tr>
-          </thead>
-          <tbody>{rows.map((r) => (
-            <tr key={`${r.payer}-${r.code}`} className="border-t border-slate-100 align-top">
-              <td className="px-2 py-1 whitespace-nowrap">{r.payer_name || r.payer}<span className="block text-slate-400">{r.payer}</span></td>
-              <td className="px-2 py-1 font-mono">{r.code}</td>
-              <td className="px-2 py-1">{r.pattern}</td>
-              <td className="px-2 py-1 text-right">{r.claims}</td>
-              <td className="px-2 py-1 text-right">{aed(r.net)}</td>
-            </tr>))}
-          </tbody>
-        </table>
+      <div className="gh-card space-y-2 p-4">
+        <p className="font-semibold text-slate-900">Payer denial patterns ({denial.length})</p>
+        {denial.length ? table(denial, "Code") : <p className="text-sm text-slate-500">None this month.</p>}
+      </div>
+      <div className="gh-card space-y-2 p-4">
+        <p className="font-semibold text-slate-900">Clinician licence watch-list ({licence.length})</p>
+        <p className="text-xs text-slate-500">Payers that denied this clinician's lines for licence status — confirm the licence is active and registered with the payer.</p>
+        {licence.length ? table(licence, "Clinician") : <p className="text-sm text-slate-500">None this month.</p>}
       </div>
     </div>
   );

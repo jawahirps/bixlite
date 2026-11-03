@@ -581,8 +581,9 @@ def session_queries(
                upper(coalesce(nullif(sc.receiver_id,''), sc.payer_id)) AS receiver,
                q.rule_code, q.query_type, q.status, q.incharge, q.item, q.query_text, q.evidence, q.suggested_action
         FROM scrub_queries q JOIN scrub_claims sc ON sc.id = q.scrub_claim_id
-        WHERE q.session_id = :sid ORDER BY sc.encounter_start, sc.claim_id, q.id
-    """), {"sid": session_id}).mappings().all()
+        WHERE q.session_id = :sid AND q.rule_code NOT IN :pattern_only
+        ORDER BY sc.encounter_start, sc.claim_id, q.id
+    """), {"sid": session_id, "pattern_only": presub_queries.PATTERN_ONLY}).mappings().all()
     return [ScrubQueryOut(**r) for r in rows]
 
 

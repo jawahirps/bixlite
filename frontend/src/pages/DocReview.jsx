@@ -235,7 +235,10 @@ function PayerPatterns({ facilityId, month }) {
   return (
     <div className="space-y-4">
       <p className="text-xs text-slate-500">
-        Patterns found by the Claim scrubber for clinic administration and payer / contract follow-up — not claim queries.
+        {rows[0].source === "submitted"
+          ? "This month was not scrubbed — patterns worked out from the month's submitted claims and the payers' denial history."
+          : "Patterns found by the Claim scrubber in this month's scrubbed claims."}{" "}
+        For clinic administration and payer / contract follow-up — not claim queries.
       </p>
       <div className="gh-card space-y-2 p-4">
         <p className="font-semibold text-slate-900">Payer denial patterns ({denial.length})</p>

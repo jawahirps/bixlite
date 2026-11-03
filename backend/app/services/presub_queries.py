@@ -979,3 +979,39 @@ def _claim_wise(wb, rows, batch, receiver_names, payer_names) -> None:
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
+
+
+def month_patterns(db: Session, fid: int, d0: date, d1: date) -> List[dict]:
+    """Payer patterns and licence watch-list for submitted claims of a period — the same tests the scrubber
+    runs, for months that were never scrubbed. Rows: kind, rcv, code, pattern, claims, net."""
+    hist = History(db, fid)
+    agg: Dict[tuple, list] = {}
+    for r in db.execute(text("""
+            SELECT c.id, upper(coalesce(nullif(c.receiver_id,''), c.payer_id, '')) AS rcv, c.net_amount AS claim_net,
+                   upper(a.activity_code) AS code, upper(a.clinician_id) AS doc
+            FROM claims c JOIN claim_activities a ON a.claim_id_fk = c.id
+            WHERE c.facility_id = :f AND c.resubmission_key = '' AND c.encounter_start >= :d0
+              AND c.encounter_start < :d1"""), {"f": fid, "d0": d0, "d1": d1}):
+        found = []
+        pol = hist.payer_policy(r.rcv, r.code)
+        if pol:
+            found.append(("DENIAL_RISK", r.code, f"{r.rcv} denies {r.code} whatever the diagnosis ({pol[0]} of {pol[1]} "
+                                                 f"recent lines) — documentation is unlikely to change this; take up "
+                                                 f"with the payer / facility contract."))
+        panel = hist.panel_components(r.rcv, r.code)
+        if panel:
+            paid, n, good = panel
+            found.append(("DENIAL_RISK", r.code, f"{r.rcv} pays only {paid} of {n} recent {r.code} panels but pays "
+                                                 f"{', '.join(f'{nm} {pct}%' for nm, pct in good)} when ordered "
+                                                 f"individually. Standing rule: doctor orders only the components "
+                                                 f"clinically needed; do not split a panel already done (unbundling)."))
+        if r.doc and (r.doc, r.rcv) in hist.licence:
+            den, n, last = hist.licence[(r.doc, r.rcv)]
+            found.append(("LICENCE", r.doc, f"{den} of {n} recent lines for {r.doc} denied for licence status "
+                                            f"(last on {last:%d/%m/%Y})."))
+        for kind, code, pattern in found:
+            a = agg.setdefault((kind, r.rcv, code, pattern), [set(), {}])
+            a[0].add(r.id); a[1][r.id] = float(r.claim_net or 0)
+    rows = [SimpleNamespace(kind=k, rcv=rcv, code=code, pattern=p, claims=len(v[0]), net=sum(v[1].values()))
+            for (k, rcv, code, p), v in agg.items()]
+    return sorted(rows, key=lambda r: (r.kind, -r.claims, -r.net))

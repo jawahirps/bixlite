@@ -134,8 +134,8 @@ def review_finding(finding_id: int, body: ReviewIn, db: Session = Depends(get_db
 
 @router.get("/payer-patterns")
 def payer_patterns(facility_id: int, month: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    """Payer denial patterns and the clinician licence watch-list found by the Claim scrubber — for clinic administration,
-    not claim queries."""
+    """Payer denial patterns and the clinician licence watch-list — from the Claim scrubber when the month was
+    scrubbed, else from the month's submitted claims. For clinic administration, not claim queries."""
     _check_facility(db, user, facility_id)
     y, m = map(int, _month(month).split("-"))
     rows = db.execute(text("""
@@ -150,10 +150,17 @@ def payer_patterns(facility_id: int, month: str, db: Session = Depends(get_db), 
         FROM scrub_queries q JOIN c ON c.id = q.scrub_claim_id
         WHERE q.rule_code IN ('DENIAL_RISK', 'LICENCE') GROUP BY 1, 2, 3, 4 ORDER BY 1, 5 DESC, 6 DESC"""),
         {"f": facility_id, "y": y, "m": m}).all()
+    source = "scrubbed"
+    if not rows:      # month never scrubbed: same tests on the submitted claims
+        from datetime import date
+        from ..services import presub_queries
+        d0 = date(y, m, 1)
+        rows = presub_queries.month_patterns(db, facility_id, d0, date(y + m // 12, m % 12 + 1, 1))
+        source = "submitted"
     payer_names, receiver_names = rw.party_names(db)
     return [{"kind": "licence" if r.kind == "LICENCE" else "denial", "payer": r.rcv, "payer_name": receiver_names.get(r.rcv) or payer_names.get(r.rcv) or "",
              "code": r.code, "pattern": (r.pattern or "").removeprefix("Payer pattern: ").removeprefix("Payer history: "),
-             "claims": r.claims, "net": float(r.net or 0)} for r in rows]
+             "claims": r.claims, "net": float(r.net or 0), "source": source} for r in rows]
 
 
 def _fname(fac: Facility, what: str, month: str) -> str:

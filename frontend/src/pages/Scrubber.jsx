@@ -195,18 +195,19 @@ function UploadPanel({ onUploaded }) {
 function SessionsList({ refreshKey, onSelect, selectedId, checked, onCheck }) {
   const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [limit, setLimit] = useState(50);
 
   const load = useCallback(() => {
     setLoading(true);
-    api.get("/scrub/sessions?limit=30")
+    api.get(`/scrub/sessions?limit=${limit}`)
       .then((r) => setSessions(r.data))
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, []);
+  }, [limit]);
 
   useEffect(() => { load(); }, [load, refreshKey]);
 
-  if (loading) return <p className="py-4 text-sm text-slate-400">Loading sessions…</p>;
+  if (loading && !sessions.length) return <p className="py-4 text-sm text-slate-400">Loading sessions…</p>;
   if (!sessions.length) return <p className="py-4 text-sm text-slate-400">No scrub sessions yet.</p>;
 
   return (
@@ -253,6 +254,14 @@ function SessionsList({ refreshKey, onSelect, selectedId, checked, onCheck }) {
           ))}
         </tbody>
       </table>
+      <div className="flex items-center justify-between border-t border-slate-100 px-4 py-2 text-xs text-slate-500">
+        <span>Showing the latest {sessions.length} sessions</span>
+        {sessions.length >= limit && (
+          <span className="flex gap-2">
+            <button className="gh-btn-secondary gh-btn-sm" onClick={() => setLimit(limit + 100)}>Show 100 more</button>
+            <button className="gh-btn-secondary gh-btn-sm" onClick={() => setLimit(2000)}>Show all</button>
+          </span>)}
+      </div>
     </div>
   );
 }

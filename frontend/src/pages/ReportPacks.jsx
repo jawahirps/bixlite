@@ -173,7 +173,7 @@ export default function ReportPacks() {
 
       <div className="gh-card flex flex-wrap items-center gap-3 p-4">
         <label className="text-sm font-medium text-slate-700">Facility</label>
-        <select className="gh-input min-w-[320px]" value={facilityId} onChange={(e) => setFacilityId(e.target.value)}>
+        <select className="gh-input w-full sm:w-auto sm:min-w-[320px]" value={facilityId} onChange={(e) => setFacilityId(e.target.value)}>
           <option value="">Choose a facility…</option>
           {facilities.map((f) => <option key={f.id} value={f.id}>{f.facility_name} (#{f.id})</option>)}
         </select>
@@ -199,7 +199,7 @@ export default function ReportPacks() {
             <h2 className="text-lg font-semibold text-slate-900">4. Generated files</h2>
             <p className="text-xs text-slate-500">Newest first. Files are kept in ~/ghaf_reports on the server.</p>
           </div>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <select className="gh-input" value={filterFac} onChange={(e) => setFilterFac(e.target.value)}>
               <option value="">All facilities</option>
               {facilities.map((f) => <option key={f.id} value={f.id}>{f.facility_name}</option>)}

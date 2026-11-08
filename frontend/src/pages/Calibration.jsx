@@ -191,7 +191,7 @@ export default function Calibration() {
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-1 border-b border-slate-200">
+      <div className="flex gap-1 overflow-x-auto border-b border-slate-200">
         {[
               { key: "files",  label: `Resubmission Files (${fileSummary.length})` },
           { key: "queue",  label: `Recall Queue (${denialQueue.length})` },
@@ -199,7 +199,7 @@ export default function Calibration() {
           { key: "rules",  label: `Rule Precision (${ruleStats.length})` },
         ].map(t => (
           <button key={t.key} onClick={() => setTab(t.key)}
-            className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            className={`shrink-0 whitespace-nowrap px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
               tab === t.key
                 ? "border-ghaf-600 text-ghaf-700"
                 : "border-transparent text-slate-500 hover:text-slate-700"

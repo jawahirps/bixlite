@@ -871,7 +871,7 @@ function ClaimQueriesPanel({ sessionId }) {
             </span>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <select value={type} onChange={(e) => setType(e.target.value)}
             className="rounded-lg border border-slate-300 px-2 py-1.5 text-xs">
             <option value="ALL">All query types</option>
@@ -1044,7 +1044,7 @@ export default function Scrubber() {
 
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h2 className="text-sm font-semibold text-slate-600">Recent Sessions</h2>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <span className="text-xs text-slate-500">
                 {checked.length ? `${checked.length} batches selected` : "Tick batches to combine their queries"}
               </span>

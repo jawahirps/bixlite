@@ -252,7 +252,7 @@ export default function Jobs() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="gh-eyebrow">07 — Data sync</p>
           <h1 className="gh-h1">Background Jobs</h1>
@@ -264,7 +264,7 @@ export default function Jobs() {
           <select
             value={selectedFac}
             onChange={e => setSelectedFac(Number(e.target.value))}
-            className="gh-input"
+            className="gh-input w-full sm:w-auto"
           >
             <option value="">All facilities</option>
             {facilities.map(f => (
@@ -422,7 +422,7 @@ export default function Jobs() {
       <div>
         <div className="mb-3 flex items-center justify-between gap-3 flex-wrap">
           <h2 className="text-lg font-semibold text-slate-800">Recent Job History</h2>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {/* Type filter */}
             <select
               value={filterType}

@@ -5,6 +5,7 @@
  */
 import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
+import { toast } from "../../utils/notify";
 
 // ── Standalone API client (no auth header, no 401 redirect) ─────────────────
 const portalApi = axios.create({ baseURL: "/api/portal" });
@@ -149,7 +150,7 @@ export default function RemittancePortal() {
       a.click();
       URL.revokeObjectURL(url);
     } catch {
-      alert("Export failed. Please try again.");
+      toast("Export failed. Please try again.", "error");
     } finally {
       setExporting(false);
     }

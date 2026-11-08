@@ -197,7 +197,7 @@ export default function ResubWorklist() {
   return (
     <div className="space-y-6">
       <div>
-        <p className="gh-eyebrow">10 — Resubmission</p>
+        <p className="gh-eyebrow">Resubmission</p>
         <h1 className="gh-h1">Resubmission Worklist</h1>
         <p className="text-sm text-slate-500">
           {facilityView
@@ -343,7 +343,7 @@ export default function ResubWorklist() {
                     ))}
                   {shown.length === 0 && (
                     <tr><td colSpan={9} className="px-3 py-8 text-center text-slate-600">
-                      {loading ? "Loading…" : "Nothing here."}
+                      {loading ? "Loading…" : "No claims in this list. Try another tab or facility, or press Refresh after the next RA fetch."}
                     </td></tr>
                   )}
                 </tbody>

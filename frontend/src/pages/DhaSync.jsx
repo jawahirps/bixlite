@@ -269,7 +269,7 @@ export default function DhaSync() {
   return (
     <div className="space-y-6">
       <div>
-        <p className="gh-eyebrow">03 — Submission quality</p>
+        <p className="gh-eyebrow">Submission quality</p>
         <h1 className="gh-h1">XML Scrub Monitor</h1>
         <p className="text-sm text-slate-500">
           Quality check on fetched ClaimSubmission files — click any row to see per-claim findings.
@@ -643,7 +643,7 @@ export default function DhaSync() {
             <tbody className="divide-y divide-slate-100">
               {fetchLogs.length === 0 && (
                 <tr>
-                  <td colSpan={8} className="px-3 py-4 text-center text-slate-600">No sync runs yet.</td>
+                  <td colSpan={8} className="px-3 py-4 text-center text-slate-600">No sync runs yet for this facility. Fetches started from Data sync &amp; jobs (or the nightly fetch) appear here.</td>
                 </tr>
               )}
               {fetchLogs.map(f => (

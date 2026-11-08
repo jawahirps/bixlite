@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import FilterBar from "../components/FilterBar";
 import apiClient from "../api/client";
+import { toast, confirmDialog } from "../utils/notify";
 
 const REPORTS = [
   {
@@ -250,7 +251,7 @@ export default function Analytics() {
       const detail = err.response?.data?.detail || err.message;
       // Only show the first line of a traceback to keep the alert readable
       const firstLine = detail?.split("\n").find((l) => l.trim()) || detail;
-      alert(`Report generation failed:\n${firstLine}`);
+      toast(`Report generation failed:\n${firstLine}`, "error");
     } finally {
       setGenerating(null);
     }
@@ -258,13 +259,13 @@ export default function Analytics() {
 
   // Cancel a pending/running job
   const cancelJob = async (job) => {
-    if (!window.confirm(`Cancel job #${String(job.id).padStart(4, "0")} — ${job.report_label}?`)) return;
+    if (!(await confirmDialog(`Cancel job #${String(job.id).padStart(4, "0")} — ${job.report_label}?`, { okLabel: "Cancel job" }))) return;
     try {
       await apiClient.post(`/reports/jobs/${job.id}/cancel`);
       // Refresh queue
       loadJobs();
     } catch (err) {
-      alert(`Cancel failed: ${err.response?.data?.detail || err.response?.status || err.message}`);
+      toast(`Cancel failed: ${err.response?.data?.detail || err.response?.status || err.message}`, "error");
     }
   };
 
@@ -283,7 +284,7 @@ export default function Analytics() {
       // Revoking immediately can cancel the download in Safari.
       setTimeout(() => URL.revokeObjectURL(href), 5000);
     } catch (err) {
-      alert(`Download failed: ${err.message}`);
+      toast(`Download failed: ${err.message}`, "error");
     }
   };
 
@@ -292,7 +293,7 @@ export default function Analytics() {
       {/* Page header */}
       <div className="flex items-start justify-between">
         <div>
-          <p className="gh-eyebrow">04 — Revenue intelligence</p>
+          <p className="gh-eyebrow">Revenue intelligence</p>
           <h1 className="gh-h1">Analytics &amp; Financial Insights</h1>
           <p className="text-sm text-slate-500">
             Submission, resubmission, remittance, and denial performance — filterable by facility,

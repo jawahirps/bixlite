@@ -10,6 +10,7 @@
 import { useState, useEffect, useCallback } from "react";
 import api from "../api/client";
 import { readFacility, saveFacility } from "../utils/facility";
+import { toast, confirmDialog } from "../utils/notify";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -181,6 +182,7 @@ function UploadPanel({ onUploaded }) {
         <button
           type="submit"
           disabled={busy || !files.length || !facilityId}
+          title={!facilityId ? "Pick a facility first" : !files.length ? "Choose one or more XML / Excel files" : undefined}
           className="rounded-lg bg-ghaf-600 px-5 py-2 text-sm font-semibold text-white hover:bg-ghaf-700 disabled:opacity-40"
         >
           {busy ? `Processing ${progress}…` : files.length > 1 ? `Upload & Scrub ${files.length} files` : "Upload & Scrub"}
@@ -242,7 +244,7 @@ function SessionsList({ refreshKey, onSelect, selectedId, checked, onCheck }) {
                   checked={checked.includes(s.id)}
                   onChange={(e) => onCheck(e.target.checked ? [...checked, s.id] : checked.filter((x) => x !== s.id))} />
               </td>
-              <td className="max-w-xs truncate px-4 py-3 font-medium text-slate-700">
+              <td className="max-w-xs truncate px-4 py-3 font-medium text-slate-700" title={s.uploaded_filename}>
                 {s.uploaded_filename}
               </td>
               <td className="px-4 py-3 text-slate-500">{fmtDate(s.uploaded_at)}</td>
@@ -374,7 +376,7 @@ function ResultsPanel({ sessionId }) {
       a.click();
       URL.revokeObjectURL(url);
     } catch {
-      alert("Export failed.");
+      toast("Export failed.", "error");
     }
   }
 
@@ -515,7 +517,7 @@ function ExclusionsPanel() {
   }
 
   async function handleDelete(id) {
-    if (!window.confirm("Deactivate this exclusion code?")) return;
+    if (!(await confirmDialog("Remove this exclusion code? It is switched off, not deleted, and can be added again.", { okLabel: "Remove" }))) return;
     await api.delete(`/scrub/exclusions/${id}`);
     load();
   }
@@ -851,7 +853,7 @@ function ClaimQueriesPanel({ sessionId }) {
     try {
       await downloadBlob(`/scrub/sessions/${sessionId}/query-excel?${exportQuery(opts)}`, "CLAIM QUERIES.xlsx");
     } catch {
-      alert("Download failed.");
+      toast("Download failed.", "error");
     }
   }
 
@@ -878,7 +880,7 @@ function ClaimQueriesPanel({ sessionId }) {
             {types.map((t) => <option key={t} value={t}>{t}</option>)}
           </select>
           <ExportControls value={opts} onChange={setOpts} />
-          <button onClick={handleDownload} disabled={!rows.length}
+          <button onClick={handleDownload} disabled={!rows.length} title={!rows.length ? "No queries in this batch" : undefined}
             className="rounded-lg bg-ghaf-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-ghaf-700 disabled:opacity-40">
             Download query Excel
           </button>
@@ -955,7 +957,7 @@ export default function Scrubber() {
       await downloadBlob(`/scrub/query-excel?session_ids=${checked.join(",")}&${exportQuery(combinedOpts)}`,
         "CLAIM QUERIES.xlsx");
     } catch {
-      alert("Download failed.");
+      toast("Download failed.", "error");
     }
   }
 
@@ -990,7 +992,7 @@ export default function Scrubber() {
     <div className="mx-auto max-w-7xl space-y-6 p-6">
       {/* Page header */}
       <div>
-        <p className="gh-eyebrow">08 — Pre-submission</p>
+        <p className="gh-eyebrow">Pre-submission</p>
         <h1 className="gh-h1">Claim Scrubber</h1>
         <p className="mt-1 text-sm text-slate-500">
           Upload the batch (ERP test XML or Excel) — generates the claim query Excel in the Ghaf template, plus DHA
@@ -1049,7 +1051,7 @@ export default function Scrubber() {
                 {checked.length ? `${checked.length} batches selected` : "Tick batches to combine their queries"}
               </span>
               <ExportControls value={combinedOpts} onChange={setCombinedOpts} />
-              <button onClick={handleCombinedDownload} disabled={!checked.length}
+              <button onClick={handleCombinedDownload} disabled={!checked.length} title={!checked.length ? "Tick one or more batches below first" : undefined}
                 className="rounded-lg bg-ghaf-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-ghaf-700 disabled:opacity-40">
                 Download combined query Excel
               </button>

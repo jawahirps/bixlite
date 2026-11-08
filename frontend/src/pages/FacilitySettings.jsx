@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import apiClient from "../api/client";
+import { confirmDialog } from "../utils/notify";
 
 const PLACEHOLDER_PREFIXES = ["user-", "cred-", "LIC-"];
 // "N/A" is intentional (Riayati-only facility, DHA skipped) — not a placeholder
@@ -294,7 +295,7 @@ function RiayatiAccounts({ facility, onChanged }) {
   };
 
   const remove = async (a) => {
-    if (!window.confirm(`Remove Riayati account "${a.label}" (${a.username})? Data already fetched is kept.`)) return;
+    if (!(await confirmDialog(`Remove Riayati account "${a.label}" (${a.username})? Data already fetched is kept.`, { okLabel: "Remove" }))) return;
     await apiClient.delete(`/facilities/${facility.id}/riayati-accounts/${a.id}`);
     await refresh();
   };
@@ -433,7 +434,7 @@ export default function FacilitySettings() {
     <div className="space-y-6">
       <div className="flex items-start justify-between">
         <div>
-          <p className="gh-eyebrow">05 — Setup</p>
+          <p className="gh-eyebrow">Setup</p>
           <h1 className="gh-h1">Facility Settings</h1>
           <p className="text-sm text-slate-500">
             Manage eClaimLink credentials for live data sync. Fields shown in amber need real values.

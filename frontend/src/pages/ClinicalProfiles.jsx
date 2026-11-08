@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import apiClient from "../api/client";
 import { useAuth } from "../context/AuthContext";
+import { confirmDialog } from "../utils/notify";
 
 const emptyForm = {
   member_id: "",
@@ -187,7 +188,7 @@ export default function ClinicalProfiles() {
   };
 
   const handleDelete = async (id) => {
-    if (!window.confirm("Delete this clinical profile?")) return;
+    if (!(await confirmDialog("Delete this clinical profile?", { okLabel: "Delete" }))) return;
     await apiClient.delete(`/clinical-profiles/${id}`);
     load(search);
   };
@@ -196,7 +197,7 @@ export default function ClinicalProfiles() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <p className="gh-eyebrow">02 — Patients</p>
+          <p className="gh-eyebrow">Patients</p>
           <h1 className="gh-h1">Clinical Profiles</h1>
           <p className="text-sm text-slate-500">Patient demographic, payer, and clinical setup.</p>
         </div>

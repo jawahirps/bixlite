@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse
 
 from .config import get_settings
 from .database import SessionLocal, init_db
-from .routers import analytics, auth, bulk_resub, calibration, clinical_profiles, dha_sync, doc_review, facilities, packs, reports, portal, receipts, resub, scrub
+from .routers import analytics, auth, bulk_resub, dashboard, calibration, clinical_profiles, dha_sync, doc_review, facilities, packs, reports, portal, receipts, resub, scrub
 from .seed import run_seed
 
 settings = get_settings()
@@ -154,6 +154,7 @@ app.include_router(scrub.router)                  # /api/scrub/*   — JWT-prote
 app.include_router(calibration.router)            # /api/calibration/* — JWT-protected
 app.include_router(resub.router)                  # /api/resub/* — JWT-protected
 app.include_router(doc_review.router)             # /api/docreview/* — JWT-protected
+app.include_router(dashboard.router)              # /api/dashboard/* — JWT-protected
 app.include_router(bulk_resub.router)             # /api/resub/bulk/* — JWT-protected
 app.include_router(packs.router)                  # /api/packs/* — JWT-protected
 

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import apiClient from "../api/client";
 import { useAuth } from "../context/AuthContext";
+import { readFacility, saveFacility } from "../utils/facility";
 
 const statusColors = {
   pending: "gh-chip-pending",
@@ -93,7 +94,7 @@ export default function DhaSync() {
   // Facility selector
   const [facilities, setFacilities] = useState([]);
   const [selectedFacilityId, setSelectedFacilityId] = useState(() => {
-    const saved = localStorage.getItem("ghaf_dha_facility_id");
+    const saved = readFacility();
     return saved ? Number(saved) : (user?.facility_id || 13);
   });
   const [facilitiesError, setFacilitiesError] = useState(null);
@@ -139,7 +140,7 @@ export default function DhaSync() {
 
   const handleFacilityChange = (id) => {
     setSelectedFacilityId(id);
-    localStorage.setItem("ghaf_dha_facility_id", id);
+    saveFacility(id);
   };
 
   useEffect(() => {

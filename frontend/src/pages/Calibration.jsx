@@ -9,6 +9,7 @@
 import { useEffect, useState } from "react";
 import apiClient from "../api/client";
 import { useAuth } from "../context/AuthContext";
+import { readFacility, saveFacility } from "../utils/facility";
 
 const PRIORITY_STYLE = {
   CRITICAL:   "bg-red-100 text-red-800 font-bold",
@@ -45,7 +46,7 @@ export default function Calibration() {
   const { user } = useAuth();
   const [facilities, setFacilities] = useState([]);
   const [facilityId, setFacilityId] = useState(() => {
-    const saved = localStorage.getItem("ghaf_dha_facility_id");
+    const saved = readFacility();
     return saved ? Number(saved) : (user?.facility_id || 13);
   });
 
@@ -121,7 +122,7 @@ export default function Calibration() {
 
   function handleFacilityChange(id) {
     setFacilityId(id);
-    localStorage.setItem("ghaf_dha_facility_id", id);
+    saveFacility(id);
     loadAll(id);
   }
 

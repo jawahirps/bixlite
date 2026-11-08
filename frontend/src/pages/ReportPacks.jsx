@@ -9,6 +9,7 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import apiClient from "../api/client";
+import { readFacility, saveFacility } from "../utils/facility";
 
 const SECTIONS = [
   { key: "performance", title: "1. Performance reports (PDF)", note: "Client-ready reports for a period." },
@@ -133,7 +134,8 @@ async function download(job, f) {
 export default function ReportPacks() {
   const [catalog, setCatalog] = useState({});
   const [facilities, setFacilities] = useState([]);
-  const [facilityId, setFacilityId] = useState("");
+  const [facilityId, setFacilityIdState] = useState(() => readFacility());
+  const setFacilityId = (id) => { setFacilityIdState(id); saveFacility(id); };
   const [jobs, setJobs] = useState([]);
   const [filterFac, setFilterFac] = useState("");
   const [filterKind, setFilterKind] = useState("");

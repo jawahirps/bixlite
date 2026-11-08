@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import apiClient from "../api/client";
 import { localISODate } from "../utils/format";
 import { useAuth } from "../context/AuthContext";
+import { readFacility, saveFacility } from "../utils/facility";
 
 const statusColors = {
   success: "gh-chip-paid",
@@ -52,7 +53,7 @@ export default function Jobs() {
   const [facilities, setFacilities]   = useState([]);
   const [facMap, setFacMap]           = useState({});   // { id: name }
   const [selectedFac, setSelectedFac] = useState(() => {
-    const s = localStorage.getItem("ghaf_jobs_facility_id");
+    const s = readFacility();
     return s ? Number(s) : (user?.facility_id || "");
   });
 
@@ -105,7 +106,7 @@ export default function Jobs() {
   }, [user]);
 
   useEffect(() => {
-    if (selectedFac) localStorage.setItem("ghaf_jobs_facility_id", String(selectedFac));
+    saveFacility(selectedFac);
     // Clear stale results when switching facilities
     setRaResult(null); setRaError(null);
     setAllResult(null); setAllError(null);

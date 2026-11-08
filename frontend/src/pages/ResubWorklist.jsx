@@ -11,6 +11,7 @@ import { useEffect, useMemo, useState } from "react";
 import apiClient from "../api/client";
 import BulkResub from "./BulkResub";
 import { useAuth } from "../context/AuthContext";
+import { readFacility, saveFacility } from "../utils/facility";
 
 const PRIORITY_STYLE = {
   P1: "bg-orange-100 text-orange-800 font-bold",
@@ -59,7 +60,7 @@ export default function ResubWorklist() {
   const { user } = useAuth();
   const [facilities, setFacilities] = useState([]);
   const [facilityId, setFacilityId] = useState(() => {
-    const saved = localStorage.getItem("ghaf_dha_facility_id");
+    const saved = readFacility();
     return user?.facility_id || (saved ? Number(saved) : 13);
   });
   const [data, setData] = useState(null);
@@ -102,7 +103,7 @@ export default function ResubWorklist() {
 
   function changeFacility(id) {
     setFacilityId(id);
-    localStorage.setItem("ghaf_dha_facility_id", id);
+    saveFacility(id);
     load(id);
   }
 

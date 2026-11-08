@@ -9,6 +9,7 @@
  */
 import { useState, useEffect, useCallback } from "react";
 import api from "../api/client";
+import { readFacility, saveFacility } from "../utils/facility";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -103,7 +104,8 @@ async function downloadBlob(url, fallbackName) {
 // Upload panel
 // ---------------------------------------------------------------------------
 function UploadPanel({ onUploaded }) {
-  const [facilityId, setFacilityId] = useState("");
+  const [facilityId, setFacilityIdState] = useState(() => readFacility());
+  const setFacilityId = (id) => { setFacilityIdState(id); saveFacility(id); };
   const [facilities, setFacilities] = useState([]);
   const [files, setFiles] = useState([]);
   const [progress, setProgress] = useState("");

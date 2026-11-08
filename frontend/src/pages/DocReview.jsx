@@ -11,6 +11,7 @@
  */
 import { useEffect, useState } from "react";
 import apiClient from "../api/client";
+import { readFacility, saveFacility } from "../utils/facility";
 
 const TIERS = {
   A: { label: "Tier A · Claim query", chip: "gh-chip gh-chip-denied", note: "Fix before submission" },
@@ -279,7 +280,8 @@ function Downloads({ facilityId, month, fac, dash }) {
 
 export default function DocReview() {
   const [facilities, setFacilities] = useState([]);
-  const [facilityId, setFacilityId] = useState("");
+  const [facilityId, setFacilityIdState] = useState(() => readFacility());
+  const setFacilityId = (id) => { setFacilityIdState(id); saveFacility(id); };
   const [month, setMonth] = useState(lastMonth);
   const [runs, setRuns] = useState([]);
   const [dash, setDash] = useState(null);

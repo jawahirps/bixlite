@@ -19,6 +19,8 @@ Exposes:
 """
 from __future__ import annotations
 
+import functools
+import time
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends
@@ -29,6 +31,24 @@ from ..database import get_db
 from ..models import User
 from ..security import get_current_user
 
+_CACHE: dict = {}
+TTL = 900   # 15 min: these read every scrub finding and RA of the facility (5–9 s each)
+
+
+def _cached(fn):
+    """Cache a facility-level read for TTL seconds, keyed on its query arguments."""
+    @functools.wraps(fn)
+    def wrap(*args, db: Session, _: User, **kw):
+        key = (fn.__name__, args, tuple(sorted(kw.items())))
+        hit = _CACHE.get(key)
+        if hit and time.time() - hit[0] < TTL:
+            return hit[1]
+        out = fn(*args, db=db, _=_, **kw)
+        _CACHE[key] = (time.time(), out)
+        return out
+    return wrap
+
+
 router = APIRouter(prefix="/api/calibration", tags=["calibration"])
 
 
@@ -36,6 +56,7 @@ router = APIRouter(prefix="/api/calibration", tags=["calibration"])
 # Rule precision stats
 # ---------------------------------------------------------------------------
 @router.get("/rule-stats")
+@_cached
 def get_rule_stats(
     facility_id: int,
     db: Session = Depends(get_db),
@@ -410,6 +431,7 @@ def export_recall_excel(
 # File-wise denial summary — for resubmission planning (21-day window)
 # ---------------------------------------------------------------------------
 @router.get("/file-denial-summary")
+@_cached
 def get_file_denial_summary(
     facility_id: int,
     db: Session = Depends(get_db),
@@ -515,6 +537,7 @@ def get_file_denial_summary(
 # Top denial codes from RA
 # ---------------------------------------------------------------------------
 @router.get("/denial-codes")
+@_cached
 def get_denial_codes(
     facility_id: int,
     limit: int = 30,

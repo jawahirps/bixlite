@@ -164,7 +164,8 @@ export default function Calibration() {
           )}
         </div>
         <button
-          onClick={() => loadAll(facilityId)}
+          onClick={() => apiClient.post("/calibration/refresh", null, { params: { facility_id: facilityId } })
+            .catch(() => {}).finally(() => loadAll(facilityId))}
           disabled={loading}
           className="gh-btn gh-btn-sm"
         >

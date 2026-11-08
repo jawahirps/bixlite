@@ -55,6 +55,14 @@ router = APIRouter(prefix="/api/calibration", tags=["calibration"])
 # ---------------------------------------------------------------------------
 # Rule precision stats
 # ---------------------------------------------------------------------------
+@router.post("/refresh")
+def refresh_cache(facility_id: int, _: User = Depends(get_current_user)):
+    """Drop this facility's cached reads so the next load is fresh (the page's Refresh button)."""
+    for k in [k for k in _CACHE if dict(k[2]).get("facility_id") == facility_id]:
+        _CACHE.pop(k, None)
+    return {"ok": True}
+
+
 @router.get("/rule-stats")
 @_cached
 def get_rule_stats(

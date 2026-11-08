@@ -9,6 +9,7 @@ Two responsibilities:
      charts, AR aging, denials) rendered inside the React
      "Analytics & Financial Insights" tab via <iframe>.
 """
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -215,6 +216,9 @@ def embed_url(
 # ---------------------------------------------------------------------------
 # Filter options (Facility / Receiver / Payer / Encounter type / Department)
 # ---------------------------------------------------------------------------
+_FILTER_CACHE: dict = {}
+
+
 @router.get("/filters")
 def analytics_filter_options(
     db: Session = Depends(get_db),
@@ -224,6 +228,11 @@ def analytics_filter_options(
         {"id": fac.id, "code": fac.facility_code, "name": fac.facility_name}
         for fac in db.query(Facility).filter(Facility.is_active.is_(True)).order_by(Facility.facility_name).all()
     ]
+    # receiver/payer/encounter type/department lists scan every claim (~11 s) and only change with the nightly
+    # fetch, so they are cached for an hour; facilities stay live
+    hit = _FILTER_CACHE.get("lists")
+    if hit and time.time() - hit[0] < 3600:
+        return {"facilities": facilities, **hit[1]}
 
     receivers = (
         db.query(Claim.receiver_id, Claim.receiver_name)
@@ -256,13 +265,14 @@ def analytics_filter_options(
         .all()
     ]
 
-    return {
-        "facilities": facilities,
+    lists = {
         "receivers": [{"id": r, "name": n} for r, n in receivers],
         "payers": [{"id": p, "name": n} for p, n in payers],
         "encounter_types": encounter_types,
         "departments": departments,
     }
+    _FILTER_CACHE["lists"] = (time.time(), lists)
+    return {"facilities": facilities, **lists}
 
 
 # ---------------------------------------------------------------------------

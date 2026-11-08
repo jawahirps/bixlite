@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+import threading
 
 from .config import get_settings
 from .database import SessionLocal, init_db
@@ -69,6 +70,28 @@ def on_startup() -> None:
     _prepare_doc_review()
     from .services import scrub_inbox
     scrub_inbox.start()                        # ~/Downloads/*to Scrub* → Claim scrubber sessions
+    threading.Thread(target=_warm_caches, daemon=True).start()
+
+
+def _warm_caches() -> None:
+    """Fill the Dashboard (all facilities, last 12 months) and Analytics filter caches so first visits are fast;
+    repeated hourly because both caches expire after an hour."""
+    import time
+    from .models import User
+    while True:
+        db = SessionLocal()
+        try:
+            admin = db.query(User).filter_by(role="admin").first()
+            if admin:
+                analytics._FILTER_CACHE.clear()
+                dashboard._cache.clear()
+                analytics.analytics_filter_options(db=db, _=admin)
+                dashboard.claim_cycle(None, None, None, db, admin)
+        except Exception as e:  # never take the app down for a cache
+            print(f"cache warm-up failed: {e}")
+        finally:
+            db.close()
+        time.sleep(3300)
 
 
 def _cleanup_stale_jobs(db) -> None:

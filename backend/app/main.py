@@ -87,6 +87,15 @@ def _warm_caches() -> None:
                 dashboard._cache.clear()
                 analytics.analytics_filter_options(db=db, _=admin)
                 dashboard.claim_cycle(None, None, None, db, admin)
+                # Dashboard table tabs, default view (all facilities, last 12 months by submission date)
+                from datetime import date, timedelta
+                d1 = date.today()
+                d0 = (d1.replace(day=1) - timedelta(days=335)).replace(day=1)
+                analytics._REPORT_CACHE.clear()
+                f = analytics.get_analytics_filters(date_from=d0, date_to=d1)
+                for rep in (analytics.insurance_report, analytics.clinicians_report, analytics.department_report,
+                            analytics.denials_report, analytics.submissions_report):
+                    rep(f=f, db=db, _=admin)
         except Exception as e:  # never take the app down for a cache
             print(f"cache warm-up failed: {e}")
         finally:

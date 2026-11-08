@@ -82,10 +82,11 @@ def _apply_claim_filters(query, f: AnalyticsFilters):
         query = query.filter(Claim.encounter_type == f.encounter_type)
     if f.department:
         query = query.filter(Claim.department == f.department)
+    # by encounter date, like the Dashboard's claim cycle; date_to includes the whole day
     if f.date_from:
-        query = query.filter(Claim.submission_date >= f.date_from)
+        query = query.filter(Claim.encounter_start >= f.date_from)
     if f.date_to:
-        query = query.filter(Claim.submission_date <= f.date_to)
+        query = query.filter(Claim.encounter_start < f.date_to + timedelta(days=1))
     return query
 
 
@@ -109,10 +110,11 @@ def _remits_with_claims(db: Session, f: AnalyticsFilters):
         query = query.filter(Claim.encounter_type == f.encounter_type)
     if f.department:
         query = query.filter(Claim.department == f.department)
+    # by encounter date, like the Dashboard's claim cycle; date_to includes the whole day
     if f.date_from:
-        query = query.filter(Claim.submission_date >= f.date_from)
+        query = query.filter(Claim.encounter_start >= f.date_from)
     if f.date_to:
-        query = query.filter(Claim.submission_date <= f.date_to)
+        query = query.filter(Claim.encounter_start < f.date_to + timedelta(days=1))
     return query
 
 
@@ -217,6 +219,25 @@ def embed_url(
 # Filter options (Facility / Receiver / Payer / Encounter type / Department)
 # ---------------------------------------------------------------------------
 _FILTER_CACHE: dict = {}
+_REPORT_CACHE: dict = {}
+
+
+def _cached_report(fn):
+    """Cache a report for an hour per filter set: all-facility runs scan every claim (7–22 s)."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrap(f: AnalyticsFilters, db: Session, _: User):
+        key = (fn.__name__, repr(f))
+        hit = _REPORT_CACHE.get(key)
+        if hit and time.time() - hit[0] < 3600:
+            return hit[1]
+        out = fn(f=f, db=db, _=_)
+        _REPORT_CACHE[key] = (time.time(), out)
+        if len(_REPORT_CACHE) > 300:
+            _REPORT_CACHE.pop(min(_REPORT_CACHE, key=lambda k: _REPORT_CACHE[k][0]))
+        return out
+    return wrap
 
 
 @router.get("/filters")
@@ -279,6 +300,7 @@ def analytics_filter_options(
 # Submissions
 # ---------------------------------------------------------------------------
 @router.get("/submissions")
+@_cached_report
 def submissions_report(
     f: AnalyticsFilters = Depends(get_analytics_filters),
     db: Session = Depends(get_db),
@@ -542,6 +564,7 @@ def remittance_report(
 # Denials
 # ---------------------------------------------------------------------------
 @router.get("/denials")
+@_cached_report
 def denials_report(
     f: AnalyticsFilters = Depends(get_analytics_filters),
     db: Session = Depends(get_db),
@@ -630,6 +653,7 @@ def denials_report(
 # Clinicians
 # ---------------------------------------------------------------------------
 @router.get("/clinicians")
+@_cached_report
 def clinicians_report(
     f: AnalyticsFilters = Depends(get_analytics_filters),
     db: Session = Depends(get_db),
@@ -738,6 +762,7 @@ def operations_report(
 # Insurance (Payer / Receiver breakdown)
 # ---------------------------------------------------------------------------
 @router.get("/insurance")
+@_cached_report
 def insurance_report(
     f: AnalyticsFilters = Depends(get_analytics_filters),
     db: Session = Depends(get_db),
@@ -806,6 +831,7 @@ def insurance_report(
 # Department
 # ---------------------------------------------------------------------------
 @router.get("/department")
+@_cached_report
 def department_report(
     f: AnalyticsFilters = Depends(get_analytics_filters),
     db: Session = Depends(get_db),

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
 import apiClient from "../api/client";
+import DashboardTables, { TABLE_TABS } from "./DashboardTables";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const AED = (v) => "AED " + Math.round(Number(v || 0)).toLocaleString("en-AE");
@@ -113,6 +114,7 @@ export default function Dashboard() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [tab, setTab] = useState("cycle");
 
   useEffect(() => {
     apiClient.get("/facilities")
@@ -184,6 +186,18 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* ── Tabs ── */}
+      <div className="flex gap-1 overflow-x-auto border-b border-slate-200">
+        {[{ key: "cycle", label: "Claim cycle" }, ...TABLE_TABS].map((x) => (
+          <button key={x.key} type="button" onClick={() => setTab(x.key)}
+                  className={`shrink-0 whitespace-nowrap border-b-2 px-4 py-2 text-sm font-medium ${tab === x.key
+                    ? "border-ghaf-600 text-ghaf-700" : "border-transparent text-slate-500 hover:text-slate-700"}`}>
+            {x.label}
+          </button>
+        ))}
+      </div>
+
+      {tab !== "cycle" ? <DashboardTables tab={tab} facilityId={facilityId} range={range} /> : (<>
       {error && (
         <div className="gh-card flex items-center justify-between border-red-200 bg-red-50 p-4 text-sm text-red-700">
           {error}
@@ -247,6 +261,7 @@ export default function Dashboard() {
           )}
         </div>
       )}
+      </>)}
     </div>
   );
 }

@@ -1,25 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import FilterBar from "../components/FilterBar";
-import Submissions from "./analytics/Submissions";
-import Resubmissions from "./analytics/Resubmissions";
-import Remittance from "./analytics/Remittance";
-import Denials from "./analytics/Denials";
-import Clinicians from "./analytics/Clinicians";
-import Operations from "./analytics/Operations";
-import Insurance from "./analytics/Insurance";
-import Department from "./analytics/Department";
 import apiClient from "../api/client";
-
-const TABS = [
-  { key: "submissions",   label: "Submissions",   component: Submissions },
-  { key: "resubmissions", label: "Resubmissions", component: Resubmissions },
-  { key: "remittance",    label: "Remittance",    component: Remittance },
-  { key: "denials",       label: "Denials",       component: Denials },
-  { key: "clinicians",    label: "Clinicians",    component: Clinicians },
-  { key: "operations",    label: "Operations",    component: Operations },
-  { key: "insurance",     label: "Insurance",     component: Insurance },
-  { key: "department",    label: "Department",    component: Department },
-];
 
 const REPORTS = [
   {
@@ -198,7 +179,6 @@ function JobRow({ job, onDownload, onCancel }) {
 // Main Analytics page
 // ---------------------------------------------------------------------------
 export default function Analytics() {
-  const [activeTab, setActiveTab]     = useState("submissions");
   const [filters, setFilters]         = useState({});
   const [showReports, setShowReports] = useState(false);
   const [generating, setGenerating]   = useState(null);
@@ -206,8 +186,6 @@ export default function Analytics() {
   const [jobsLoading, setJobsLoading] = useState(false);
   const [showQueue, setShowQueue]     = useState(true);   // always visible
   const [queueError, setQueueError]   = useState(null);
-
-  const ActiveComponent = TABS.find((t) => t.key === activeTab)?.component || Submissions;
 
   // Load report job queue — returns a Promise so callers can await it
   const loadJobs = useCallback(() => {
@@ -466,27 +444,6 @@ export default function Analytics() {
           )}
         </div>
       )}
-
-      {/* Tabs */}
-      <div className="border-b border-slate-200">
-        <nav className="-mb-px flex flex-wrap gap-x-6 gap-y-2">
-          {TABS.map((tab) => (
-            <button
-              key={tab.key}
-              onClick={() => setActiveTab(tab.key)}
-              className={`whitespace-nowrap border-b-2 px-1 py-3 text-sm font-medium transition ${
-                activeTab === tab.key
-                  ? "border-ghaf-500 text-ghaf-600"
-                  : "border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700"
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </nav>
-      </div>
-
-      <ActiveComponent filters={filters} />
     </div>
   );
 }

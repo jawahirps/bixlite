@@ -1217,6 +1217,7 @@ REMITTANCE_ACTIVITY_COLS = [
     "RASubmission File Name",
     "RAFille Id",
     "Claim Submission File Name",
+    "Initial Submission File Name",
     "Response Comments",
     "RAPament For",
 ]
@@ -1236,6 +1237,42 @@ def _ra_payment_for(rem_id: int, ra_rank_map: dict, dup_rem_ids: set) -> str:
     if rank == 1:
         return "1st RA"
     return f"Resubmission RA Claim Level - {rank - 1}"
+
+
+def _submission_history(db, rows) -> dict:
+    """(facility_id, claim_id) -> [(submission_date, file name, resubmission_key)] oldest first, for the
+    claims in an RA report. Used for the initial submission and the submission each RA answers."""
+    from collections import defaultdict as _dd
+    from sqlalchemy import text as _text
+    keys = {(rem.facility_id, rem.claim_id) for _, rem, *_ in rows}
+    out = _dd(list)
+    by_fac = _dd(list)
+    for f, c in keys:
+        by_fac[f].append(c)
+    for f, cids in by_fac.items():
+        for r in db.execute(_text("""
+            SELECT c.claim_id, c.submission_date, coalesce(c.resubmission_key, '') k, rx.source_filename fn
+            FROM claims c LEFT JOIN raw_xml_store rx ON rx.id = c.raw_xml_id
+            WHERE c.facility_id = :f AND c.claim_id = ANY(:ids)
+            ORDER BY c.submission_date NULLS LAST, c.id"""), {"f": f, "ids": cids}):
+            out[(f, r.claim_id)].append((r.submission_date, r.fn or "", r.k))
+    return out
+
+
+def _initial_sub(subs):
+    """The original submission (no resubmission type); the earliest one if none is marked original."""
+    return next((s for s in subs if not s[2]), subs[0]) if subs else (None, "", "")
+
+
+def _sub_for_ra(subs, ra_day):
+    """The submission an RA answers: the latest sent on or before the RA date (else the earliest)."""
+    if not subs:
+        return (None, "", "")
+    if ra_day is None:
+        return subs[-1]
+    day = lambda d: d.date() if hasattr(d, "date") else d
+    before = [s for s in subs if s[0] and day(s[0]) <= day(ra_day)]
+    return before[-1] if before else subs[0]
 
 
 def _build_remittance_activity(db, facility_id, payer_id, encounter_type,
@@ -1280,16 +1317,23 @@ def _build_remittance_activity(db, facility_id, payer_id, encounter_type,
         date_clauses += " AND r.facility_id = :facility_id"
         date_params["facility_id"] = facility_id
 
+    # rank over the claim's whole RA history, so a 2026 RA after a 2024 one is not "1st RA"
     rank_rows = db.execute(_text(f"""
-        SELECT r.id,
-               ROW_NUMBER() OVER (
-                   PARTITION BY r.facility_id, r.claim_id
-                   ORDER BY r.remittance_date, r.id
-               ) AS ra_rank
-        FROM remittances r
-        JOIN claims c ON c.facility_id = r.facility_id AND c.claim_id = r.claim_id
-        LEFT JOIN raw_xml_store rx ON rx.id = r.raw_xml_id
-        WHERE 1=1 {date_clauses}
+        WITH scoped AS (
+            SELECT r.id, r.facility_id, r.claim_id
+            FROM remittances r
+            JOIN LATERAL (SELECT c.encounter_start FROM claims c
+                          WHERE c.facility_id = r.facility_id AND c.claim_id = r.claim_id
+                          ORDER BY c.id LIMIT 1) c ON true
+            LEFT JOIN raw_xml_store rx ON rx.id = r.raw_xml_id
+            WHERE 1=1 {date_clauses}
+        ), ranked AS (
+            SELECT r.id, ROW_NUMBER() OVER (PARTITION BY r.facility_id, r.claim_id
+                                            ORDER BY r.remittance_date, r.id) AS ra_rank
+            FROM remittances r
+            WHERE (r.facility_id, r.claim_id) IN (SELECT DISTINCT facility_id, claim_id FROM scoped)
+        )
+        SELECT ranked.id, ranked.ra_rank FROM ranked JOIN scoped USING (id)
     """), date_params).fetchall()
     ra_rank_map = {row[0]: row[1] for row in rank_rows}
 
@@ -1317,15 +1361,27 @@ def _build_remittance_activity(db, facility_id, payer_id, encounter_type,
     claim_xml_store = aliased(RawXmlStore)
     act_alias       = aliased(ClaimActivity)
 
+    # Each RA line is paired with ONE submission of the claim: the latest sent on or before the RA date
+    # (no submission before it → the earliest). Joining on claim number alone listed the line once per
+    # submission and doubled the totals for resubmitted claims.
+    c2 = aliased(Claim)
+    ra_day = func.coalesce(cast(ra_xml_store.submission_date, Date), cast(Remittance.remittance_date, Date))
+    sent_before = cast(c2.submission_date, Date) <= ra_day
+    paired_claim = (
+        db.query(c2.id)
+        .filter(c2.facility_id == Remittance.facility_id, c2.claim_id == Remittance.claim_id)
+        .order_by(sent_before.desc().nullslast(),
+                  case((sent_before, c2.submission_date)).desc().nullslast(),
+                  c2.submission_date, c2.id.desc())
+        .limit(1).correlate(Remittance, ra_xml_store).scalar_subquery()
+    )
+
     q = (
         db.query(RemittanceActivityDetail, Remittance, Claim,
                  ra_xml_store, claim_xml_store, act_alias)
         .join(Remittance, Remittance.id == RemittanceActivityDetail.remittance_id_fk)
-        .join(Claim, and_(
-            Claim.facility_id == Remittance.facility_id,
-            Claim.claim_id    == Remittance.claim_id,
-        ))
         .outerjoin(ra_xml_store,    ra_xml_store.id    == Remittance.raw_xml_id)
+        .join(Claim, Claim.id == paired_claim)
         .outerjoin(claim_xml_store, claim_xml_store.id == Claim.raw_xml_id)
         .outerjoin(act_alias, and_(
             act_alias.claim_id_fk  == Claim.id,
@@ -1366,8 +1422,10 @@ def _build_remittance_activity(db, facility_id, payer_id, encounter_type,
     ws.title = "RemittanceActivityReportTemplat"
     ws.freeze_panes = "A2"
     _write_headers(ws, REMITTANCE_ACTIVITY_COLS)
+    subs = _submission_history(db, rows)
 
     for row_idx, (rad, rem, claim, ra_xml_row, claim_xml_row, act_row) in enumerate(rows, start=2):
+        init_date, init_file, _ = _initial_sub(subs.get((rem.facility_id, rem.claim_id)))
         enc_start = claim.encounter_start
         enc_year  = enc_start.year  if enc_start else ""
         enc_month = enc_start.month if enc_start else ""
@@ -1395,7 +1453,8 @@ def _build_remittance_activity(db, facility_id, payer_id, encounter_type,
             claim.member_id, claim.member_id, claim.emirates_id or "",
             _fmt_date(enc_start), _fmt_date(claim.encounter_end),
             enc_year, enc_month,
-            _fmt_date(claim.submission_date), _fmt_date(claim.submission_date),
+            _fmt_date(claim.submission_date),  # Last Submission Date = the submission this RA answers
+            _fmt_date(init_date),              # First Submission Date = the original submission
             _fmt_date(ra_xml_row.submission_date if ra_xml_row else None),  # Transaction Date = RA file date
             claim.claim_id, _enc_label(claim.encounter_type), claim.end_type or "",
             claim.claim_id_payer or "", rem.ra_file_id or "",
@@ -1411,6 +1470,7 @@ def _build_remittance_activity(db, facility_id, payer_id, encounter_type,
             ra_xml_row.source_filename    if ra_xml_row    else "",  # RASubmission File Name
             rem.ra_file_id or "",                                    # RAFille Id
             claim_xml_row.source_filename if claim_xml_row else "",  # Claim Submission File Name
+            init_file,                                               # Initial Submission File Name
             rad.denial_description or rem.denial_description or "",    # Response Comments
             _ra_payment_for(rem.id, ra_rank_map, dup_rem_ids),        # RAPament For
         ], alt=(row_idx % 2 == 0))
@@ -1962,7 +2022,10 @@ REMITTANCE_ACTIVITY_V2_COLS = [
     "Payer ID", "Payer Name", "Patient ID", "Member Id", "Emirates Id",
     "Encounter Start Date", "Encounter End Date",
     "Encounter Start Year", "Encounter Start Month",
-    "Last Submission Date", "Transaction Date", "Date Settlement", "Days to Settlement",
+    "Initial Submission Date", "Initial Submission File",
+    "RA For Submission Date", "RA For Submission File",
+    "Latest Submission Date", "Latest Submission File",
+    "Transaction Date", "Date Settlement", "Days to Settlement",
     "Claim Number", "Encounter Type", "Encounter End Type",
     "Submission Count", "Current Submission Stage", "Sub Rank",
     "RA Count", "Current RA Rank", "Claim Cycle Status",
@@ -1975,7 +2038,6 @@ REMITTANCE_ACTIVITY_V2_COLS = [
     "TPA Comments",
     "Activity Detail ID",
     "RASubmission File Name", "RAFille Id",
-    "Claim Submission File Name",
     "Response Comments",
     "RAPament For",
 ]
@@ -3478,8 +3540,13 @@ def _build_remittance_activity_v2(db, facility_id, payer_id, encounter_type,
     ws.title = "Remittance Activity V2"
     ws.freeze_panes = "A2"
     _write_headers(ws, REMITTANCE_ACTIVITY_V2_COLS)
+    subs = _submission_history(db, rows)
 
     for row_idx, (rad, rem, claim, ra_xml_row, claim_xml_row, act_row) in enumerate(rows, start=2):
+        hist = subs.get((rem.facility_id, rem.claim_id))
+        init_date, init_file, _ = _initial_sub(hist)
+        for_date, for_file, _ = _sub_for_ra(
+            hist, (ra_xml_row.submission_date if ra_xml_row and ra_xml_row.submission_date else rem.remittance_date))
         enc_start = claim.encounter_start
         enc_year  = enc_start.year  if enc_start else ""
         enc_month = enc_start.month if enc_start else ""
@@ -3541,7 +3608,10 @@ def _build_remittance_activity_v2(db, facility_id, payer_id, encounter_type,
             claim.member_id, claim.member_id, claim.emirates_id or "",
             _fmt_date(enc_start), _fmt_date(claim.encounter_end),
             enc_year, enc_month,
-            _fmt_date(claim.submission_date),
+            _fmt_date(init_date), init_file,                                   # Initial Submission
+            _fmt_date(for_date), for_file,                                     # submission this RA answers
+            _fmt_date(claim.submission_date),                                  # Latest Submission
+            claim_xml_row.source_filename if claim_xml_row else "",
             _fmt_date(ra_xml_row.submission_date if ra_xml_row else None),    # Transaction Date
             _fmt_date(rem.remittance_date),                                    # Date Settlement
             days_to_settle,                                                    # Days to Settlement (NEW)
@@ -3563,7 +3633,6 @@ def _build_remittance_activity_v2(db, facility_id, payer_id, encounter_type,
             rad.activity_id or "",
             ra_xml_row.source_filename    if ra_xml_row    else "",
             rem.ra_file_id or "",
-            claim_xml_row.source_filename if claim_xml_row else "",
             rad.denial_description or rem.denial_description or "",
             _ra_payment_for(rem.id, ra_rank_map, dup_rem_ids),
         ], alt=(row_idx % 2 == 0))

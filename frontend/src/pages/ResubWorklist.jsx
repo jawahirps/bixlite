@@ -74,6 +74,11 @@ export default function ResubWorklist() {
   const [limit, setLimit] = useState(200);
   const [groupByClaim, setGroupByClaim] = useState(true);
   const [openClaims, setOpenClaims] = useState(new Set());
+  const [raRange, setRaRange] = useState(() => {   // default: last month by RA transaction date
+    const t = new Date(), iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    return { from: iso(new Date(t.getFullYear(), t.getMonth() - 1, 1)), to: iso(new Date(t.getFullYear(), t.getMonth(), 0)) };
+  });
+  const [raBusy, setRaBusy] = useState(false);
 
   const facilityView = data?.facility_view;
   const canEditPlaybook = ["admin", "billing_manager"].includes(user?.role);
@@ -126,6 +131,23 @@ export default function ResubWorklist() {
     } catch (e) {
       setError(e.response?.data?.detail || e.message);
     } finally { setSaving(null); }
+  }
+
+  async function downloadRaWorkbook() {
+    if (!raRange.from || !raRange.to) return setError("Pick the RA date range first.");
+    setRaBusy(true); setError(null);
+    try {
+      const r = await apiClient.get("/resub/ra-workbook", {
+        params: { facility_id: facilityId, date_from: raRange.from, date_to: raRange.to }, responseType: "blob" });
+      const url = URL.createObjectURL(r.data);
+      const a = document.createElement("a"); a.href = url;
+      const code = facilities.find(f => f.id === facilityId)?.facility_code || facilityId;
+      a.download = `Resub_Workbook_${code}_${raRange.from}_${raRange.to}.xlsx`; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch (e) {
+      const msg = e.response?.data instanceof Blob ? JSON.parse(await e.response.data.text()).detail : e.message;
+      setError("Resubmission workbook failed: " + msg);
+    } finally { setRaBusy(false); }
   }
 
   async function exportExcel(audience) {
@@ -237,6 +259,32 @@ export default function ResubWorklist() {
           Excel — Facility requests
         </button>
       </div>
+
+      {/* RA report + resubmission remarks */}
+      {!facilityView && (
+        <div className="gh-card p-4">
+          <p className="gh-label">Resubmission workbook</p>
+          <p className="mb-3 text-xs text-slate-500">
+            The Remittance Activity report for the RA dates below, every service line with a remark on how to
+            resubmit it in the ERP. Includes a Consultation Corrections sheet to send to the facility for recoding.
+          </p>
+          <div className="flex flex-wrap items-end gap-3">
+            <div>
+              <label className="mb-1 block text-xs font-medium text-slate-600">RA date from</label>
+              <input type="date" value={raRange.from} onChange={e => setRaRange(r => ({ ...r, from: e.target.value }))}
+                className="gh-input py-1.5" />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-slate-600">RA date to</label>
+              <input type="date" value={raRange.to} onChange={e => setRaRange(r => ({ ...r, to: e.target.value }))}
+                className="gh-input py-1.5" />
+            </div>
+            <button onClick={downloadRaWorkbook} disabled={raBusy || !facilityId} className="gh-btn gh-btn-sm">
+              {raBusy ? "Building… (up to a minute)" : "Download resubmission workbook"}
+            </button>
+          </div>
+        </div>
+      )}
 
       {error && <div className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</div>}
 

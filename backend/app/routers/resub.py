@@ -7,6 +7,7 @@ resub.py — Resubmission Worklist screen.
   PUT  /api/resub/playbook/{id}                 edit a playbook rule (admin / billing manager)
   POST /api/resub/playbook                      add a playbook rule (admin / billing manager)
   GET  /api/resub/export?facility_id=X&audience=ghaf|facility   Excel download
+  GET  /api/resub/ra-workbook?facility_id=X&date_from=&date_to=  RA activity report (by RA date) + resub remarks
 
 Facility users (a user tied to one facility, not admin) only see their own
 facility and only the items that need facility attention; they can answer
@@ -15,6 +16,7 @@ with a facility reply.
 from __future__ import annotations
 
 import io
+from datetime import date
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -25,6 +27,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import Facility, ResubPlaybook, User
 from ..security import get_current_user
+from ..services import resub_ra_workbook as rawb
 from ..services import resub_worklist as rw
 
 router = APIRouter(prefix="/api/resub", tags=["resubmission"])
@@ -193,5 +196,27 @@ def export(facility_id: int, audience: str = "ghaf", db: Session = Depends(get_d
     buf = io.BytesIO(); wb.save(buf); buf.seek(0)
     label = {"ghaf": "Resub_Worklist_Ghaf", "facility": "Resub_Facility_Requests", "reconciliation": "Reconciliation"}[audience]
     name = f"{label}_{fac.facility_code}.xlsx"
+    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                             headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@router.get("/ra-workbook")
+def ra_workbook(facility_id: int, date_from: date, date_to: date, db: Session = Depends(get_db),
+                user: User = Depends(get_current_user)):
+    """Remittance Activity report for RA transaction dates date_from..date_to, every service line with a remark
+    on how to resubmit it, plus a consultation code-correction sheet for the facility."""
+    from .reports import _build_remittance_activity
+    _check_facility(user, facility_id)
+    if date_from > date_to:
+        raise HTTPException(status_code=400, detail="date_from is after date_to")
+    fac = db.get(Facility, facility_id)
+    if not fac:
+        raise HTTPException(status_code=404, detail="Facility not found")
+    wb, _, n = _build_remittance_activity(db, facility_id, None, None, date_from, date_to, "remittance_date")
+    if not n:
+        raise HTTPException(status_code=404, detail="No RA lines for this facility in that RA date range")
+    rawb.add_remarks(db, facility_id, wb)
+    buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+    name = f"Resub_Workbook_{fac.facility_code}_{date_from:%Y%m%d}-{date_to:%Y%m%d}.xlsx"
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                              headers={"Content-Disposition": f'attachment; filename="{name}"'})

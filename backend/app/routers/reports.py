@@ -658,8 +658,41 @@ def _build_claim_summary(db, facility_id, payer_id, encounter_type,
         for ic in init_claims:
             init_sub_map[(ic.facility_id, ic.claim_id)] = ic.submission_date
 
-    # ── Diagnosis map: (facility_id, claim_id) → formatted string ──────────────
+    # ── Unassigned RA paid ──────────────────────────────────────────────────────
+    # Each row joins only the RA at its fixed rank (initial→1, resub→2, recon→3).
+    # Remittances at any other rank would otherwise be dropped from Approved Amt:
+    #   • extra re-adjudications (more RAs than submissions) → added to the row
+    #     with the highest rank below that RA (the submission it re-adjudicated);
+    #   • RAs before the first row present (initial submission file never
+    #     fetched) → added to the claim's first row.
+    # Keeps the claim's total Approved equal to the sum of all its RA paid,
+    # which is what ClaimCycleV2 "Paid Amount" reports.
     from collections import defaultdict as _dd
+    _row_rank = lambda c: 1 if c.resubmission_key == "" else (3 if c.resubmission_key == "reconciliation" else 2)
+    claim_row_ranks: dict = _dd(set)
+    for c, _, _ in rows:
+        claim_row_ranks[(c.facility_id, c.claim_id)].add(_row_rank(c))
+    extra_paid: dict = _dd(float)   # (facility_id, claim_id, row_rank) → paid
+    if fac_ids_in_rows:
+        _ra_rows = (
+            db.query(Remittance.facility_id, Remittance.claim_id, Remittance.paid_amount)
+            .filter(Remittance.facility_id.in_(fac_ids_in_rows))
+            .order_by(Remittance.facility_id, Remittance.claim_id, Remittance.id)
+            .all()
+        )
+        _rank_ctr: dict = _dd(int)
+        for _r in _ra_rows:
+            _k = (_r.facility_id, _r.claim_id)
+            _rank_ctr[_k] += 1
+            ranks = claim_row_ranks.get(_k)
+            k = _rank_ctr[_k]
+            if not ranks or k in ranks:
+                continue
+            lower = [x for x in ranks if x < k]
+            target = max(lower) if lower else min(ranks)
+            extra_paid[(_k[0], _k[1], target)] += float(_r.paid_amount or 0)
+
+    # ── Diagnosis map: (facility_id, claim_id) → formatted string ──────────────
     fac_claims: dict = _dd(set)
     for claim, _, _ in rows:
         fac_claims[claim.facility_id].add(claim.claim_id)
@@ -694,12 +727,17 @@ def _build_claim_summary(db, facility_id, payer_id, encounter_type,
             else (claim_net if rem else 0.0)
         )
         paid      = float(rem.paid_amount) if rem and rem.paid_amount is not None else None
+        _extra    = extra_paid.get((claim.facility_id, claim.claim_id, _row_rank(claim)), 0.0)
+        if _extra and paid is not None:
+            paid = round(paid + _extra, 2)
 
         # "Net Amt - Initial Sub": always from claims.net_amount for initial rows.
         # For resubmission rows: always 0 in this column.
         net_sub = 0.0 if is_resub else claim_net
 
-        approved   = _f(paid) if paid is not None else 0.0
+        # Row awaiting its own RA but holding paid from an earlier RA (initial
+        # submission file missing): show that paid in Approved only.
+        approved   = _f(paid) if paid is not None else (_f(_extra) if _extra else 0.0)
         unsettled  = ""
         pay_status = ""
 

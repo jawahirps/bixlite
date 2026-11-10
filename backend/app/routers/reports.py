@@ -673,6 +673,17 @@ def _build_claim_summary(db, facility_id, payer_id, encounter_type,
     for c, _, _ in rows:
         claim_row_ranks[(c.facility_id, c.claim_id)].add(_row_rank(c))
     extra_paid: dict = _dd(float)   # (facility_id, claim_id, row_rank) → paid
+    total_paid_map: dict = _dd(float)   # (facility_id, claim_id) → paid across all RAs
+    # Claim net for the balance cap: initial row net, else the largest row net.
+    claim_net_map: dict = {}
+    _init_net: dict = {}
+    for c, _, _ in rows:
+        _k = (c.facility_id, c.claim_id)
+        _v = float(c.net_amount or 0)
+        if c.resubmission_key == "":
+            _init_net[_k] = _v
+        claim_net_map[_k] = max(_v, claim_net_map.get(_k, 0.0))
+    claim_net_map.update(_init_net)
     if fac_ids_in_rows:
         _ra_rows = (
             db.query(Remittance.facility_id, Remittance.claim_id, Remittance.paid_amount)
@@ -684,6 +695,7 @@ def _build_claim_summary(db, facility_id, payer_id, encounter_type,
         for _r in _ra_rows:
             _k = (_r.facility_id, _r.claim_id)
             _rank_ctr[_k] += 1
+            total_paid_map[_k] += float(_r.paid_amount or 0)
             ranks = claim_row_ranks.get(_k)
             k = _rank_ctr[_k]
             if not ranks or k in ranks:
@@ -774,8 +786,13 @@ def _build_claim_summary(db, facility_id, payer_id, encounter_type,
         if pay_status == "Fully Paid":
             unsettled = 0.0
         elif is_resub and rem is None:
-            # Awaiting adjudication resubmission — full resubmitted amount is unsettled
-            unsettled = _f(claim_net) if claim_net is not None else 0.0
+            # Awaiting adjudication resubmission — resubmitted amount is unsettled,
+            # capped at the claim's unpaid balance (claim net − paid across all RAs),
+            # matching ClaimCycleV2 Outstanding = min(Resub/Recons Amt, Denial).
+            _k = (claim.facility_id, claim.claim_id)
+            _bal = max(0.0, round(max(claim_net_map.get(_k, 0.0), total_paid_map.get(_k, 0.0))
+                                  - total_paid_map.get(_k, 0.0), 2))
+            unsettled = _f(min(claim_net, _bal)) if claim_net is not None else 0.0
         elif not is_resub and has_resub:
             # Initial row whose rejected amount was resubmitted —
             # unsettled tracking moves to the resubmission row; avoid double-counting.
@@ -3227,8 +3244,14 @@ def _build_claim_cycle_v2(db, facility_id, payer_id, encounter_type,
         #  • Resub filed + awaiting 2nd RA       → min(Resub Amt, Denial)  (open S2 contest)
         #  • Resub filed + 2nd RA denied         → 0  (captured in Resub Rejected column)
         #  • No Resub (RA received, settled)     → 0
+        # Reconciliation adjudicated (3rd RA received) and still denied → the claim
+        # is final: the denied balance is a Final Rejection, not receivable
+        # (user rule 2026-11-10).
+        recon_final_denied = recons_net_raw > 0 and ra_count >= 3 and denial_calc > 0
         if ra_count == 0:
             outstanding = round(initial_net - total_paid, 2) if initial_net > 0 else ""
+        elif recon_final_denied:
+            outstanding = 0.0
         elif recons_net_raw > 0:
             outstanding = max(0.0, round(min(recons_net_raw, denial_calc), 2))
         elif resub_net_raw > 0 and ra_count == 1:
@@ -3245,7 +3268,9 @@ def _build_claim_cycle_v2(db, facility_id, payer_id, encounter_type,
         # Initial Denied (the claim may yet be resubmitted).
         _ra_dt = r.ra_date.date() if hasattr(r.ra_date, 'date') else r.ra_date
         _window_open = _ra_dt is not None and (date.today() - _ra_dt).days <= RESUB_WINDOW_DAYS
-        if denial_calc > 0 and resub_net_raw == 0 and not _window_open:
+        if recon_final_denied:
+            final_rejection = _f(denial_calc)
+        elif denial_calc > 0 and resub_net_raw == 0 and not _window_open:
             final_rejection = _f(denial_calc)
         else:
             final_rejection = _f(0)

@@ -15,6 +15,7 @@ import Scrubber from "./pages/Scrubber";
 import Calibration from "./pages/Calibration";
 import ResubWorklist from "./pages/ResubWorklist";
 import ReportPacks from "./pages/ReportPacks";
+import AccountSecurity from "./pages/AccountSecurity";
 
 export default function App() {
   return (
@@ -32,6 +33,7 @@ export default function App() {
           <Route path="/analytics" element={<Analytics />} />
           <Route path="/report-packs" element={<ReportPacks />} />
           <Route path="/login-activity" element={<LoginActivity />} />
+          <Route path="/account-security" element={<AccountSecurity />} />
           <Route path="/facility-settings" element={<FacilitySettings />} />
           <Route path="/jobs" element={<Jobs />} />
           <Route path="/scrubber" element={<Scrubber />} />

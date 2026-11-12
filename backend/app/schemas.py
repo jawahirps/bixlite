@@ -29,6 +29,17 @@ class UserOut(BaseModel):
     facility_id: Optional[int] = None
     is_active: bool
     last_login_at: Optional[datetime] = None
+    totp_enabled: bool = False
+
+
+class TotpSetupOut(BaseModel):
+    otpauth_uri: str
+    secret: str
+    qr_svg: str
+
+
+class TotpCode(BaseModel):
+    code: str
 
 
 class UserCreate(BaseModel):

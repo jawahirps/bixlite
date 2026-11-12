@@ -133,7 +133,9 @@ class User(Base):
     role             : Mapped[str]           = mapped_column(String(30), nullable=False, default="staff")
     is_active        : Mapped[bool]          = mapped_column(Boolean, nullable=False, default=True)
     last_login_at    : Mapped[Optional[datetime]] = mapped_column(TIMESTAMPTZ)
-    created_at       : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now())
+    totp_secret      : Mapped[Optional[str]] = mapped_column(String(64))   # authenticator-app secret, set during setup
+    totp_enabled     : Mapped[bool]          = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    created_at      : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now())
     updated_at       : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now(), onupdate=func.now())
 
     facility         : Mapped[Optional["Facility"]] = relationship(back_populates="users")

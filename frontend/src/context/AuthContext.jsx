@@ -10,10 +10,11 @@ export function AuthProvider({ children }) {
   });
   const [token, setToken] = useState(() => localStorage.getItem("ghaf_token"));
 
-  const login = useCallback(async (email, password) => {
+  const login = useCallback(async (email, password, otp) => {
     const form = new URLSearchParams();
     form.append("username", email);
     form.append("password", password);
+    if (otp) form.append("otp", otp);
 
     const { data } = await apiClient.post("/auth/login", form, {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -26,6 +27,12 @@ export function AuthProvider({ children }) {
     return data.user;
   }, []);
 
+  // Keep the stored user in sync after profile changes (e.g. authenticator on/off)
+  const updateUser = useCallback((u) => {
+    localStorage.setItem("ghaf_user", JSON.stringify(u));
+    setUser(u);
+  }, []);
+
   const logout = useCallback(() => {
     localStorage.removeItem("ghaf_token");
     localStorage.removeItem("ghaf_user");
@@ -34,7 +41,7 @@ export function AuthProvider({ children }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, token, login, logout, isAuthenticated: !!token }}>
+    <AuthContext.Provider value={{ user, token, login, logout, updateUser, isAuthenticated: !!token }}>
       {children}
     </AuthContext.Provider>
   );

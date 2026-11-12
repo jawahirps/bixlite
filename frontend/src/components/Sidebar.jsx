@@ -68,6 +68,7 @@ export const NAV_SECTIONS = [
     items: [
       { to: "/facility-settings", label: "Facility settings", icon: "settings" },
       { to: "/login-activity", label: "Login activity", icon: "login" },
+      { to: "/account-security", label: "Authenticator app", icon: "settings" },
     ],
   },
 ];

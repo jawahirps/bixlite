@@ -67,8 +67,8 @@ CATALOG = {
                        "help": "Performance report, AR ageing & resubmission tracker, clinician scorecards",
                        "fields": ["month"]},
     "submission":     {"section": "performance", "label": "Monthly submission report",
-                       "help": "Claims submitted for one treatment month (same report as in the monthly pack)",
-                       "fields": ["month"]},
+                       "help": "Claims submitted for a treatment month, H1, H2, FY or a custom month range",
+                       "fields": ["month", "sub_period"]},   # "month" keeps older built pages working
     "quarterly":      {"section": "performance", "label": "Quarterly report",
                        "help": "Quarter or full year (DHA eClaimLink facilities)",
                        "fields": ["quarter"]},
@@ -113,6 +113,9 @@ def _command(kind: str, fac: Facility, p: dict) -> tuple[list[str], str]:
         m = need("month", r"\d{4}-\d{2}", "Month must be YYYY-MM")
         return ["monthly_pack.py", "--month", m, "--facility", fac.facility_code], m
     if kind == "submission":
+        if p.get("period"):
+            h = need("period", r"(H1|H2|FY)-\d{4}|\d{4}-\d{2}:\d{4}-\d{2}", "Period must be H1-YYYY, H2-YYYY, FY-YYYY or YYYY-MM:YYYY-MM")
+            return ["monthly_pack.py", "--period", h, "--facility", fac.facility_code], h
         m = need("month", r"\d{4}-\d{2}", "Month must be YYYY-MM")
         return ["monthly_pack.py", "--month", m, "--facility", fac.facility_code, "--submission-only"], m
     if kind == "quarterly":

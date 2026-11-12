@@ -32,6 +32,31 @@ const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0
 
 function PeriodFields({ fields, value, onChange }) {
   const set = (k) => (e) => onChange({ ...value, [k]: e.target.value });
+  if (fields.includes("sub_period")) {
+    const custom = value.period && value.period.includes(":");
+    const opts = [];
+    for (const y of [thisYear, thisYear - 1]) ["H1", "H2", "FY"].forEach((h) => opts.push(`${h}-${y}`));
+    return (
+      <div className="flex flex-wrap items-center gap-2">
+        <select className="gh-input" value={custom ? "custom" : value.period || ""}
+          onChange={(e) => onChange({ ...value, period: e.target.value === "custom" ? `${ym(lastMonth)}:${ym(lastMonth)}` : e.target.value })}>
+          <option value="">Single month…</option>
+          {opts.map((o) => <option key={o} value={o}>{o}</option>)}
+          <option value="custom">Custom month range…</option>
+        </select>
+        {!value.period && <input type="month" className="gh-input" value={value.month || ""} onChange={set("month")} />}
+        {custom && (
+          <>
+            <input type="month" className="gh-input" value={value.period.split(":")[0]}
+              onChange={(e) => onChange({ ...value, period: `${e.target.value}:${value.period.split(":")[1]}` })} />
+            <span className="text-slate-400">→</span>
+            <input type="month" className="gh-input" value={value.period.split(":")[1]}
+              onChange={(e) => onChange({ ...value, period: `${value.period.split(":")[0]}:${e.target.value}` })} />
+          </>
+        )}
+      </div>
+    );
+  }
   if (fields.includes("month")) {
     return <input type="month" className="gh-input" value={value.month || ""} onChange={set("month")} />;
   }

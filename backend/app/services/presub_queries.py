@@ -35,7 +35,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.models import ScrubQuery, ScrubSession
-from app.services import dental_rules, doc_review, resub_worklist as rw
+from app.services import dental_rules, doc_review, icd_excludes, resub_worklist as rw
 from app.services.claim_scrubber import dx_support
 
 HISTORY_DAYS = 180
@@ -89,6 +89,7 @@ INITIAL = {"96413": (1, "96417"), "96409": (2, "96411"), "96365": (3, "96367"),
 ADDON_PARENT = {"96366": ("96365",), "96367": ("96365",), "96368": ("96365",),
                 "96375": ("96365", "96374", "96409", "96413"), "96376": ("96374",),
                 "96361": ("96360", "96365", "96374"), "96411": ("96409",), "96415": ("96413",), "96417": ("96413",)}
+GP_REFERRAL_PAYERS = {"TPA004": "NAS"}   # receivers that require a GP referral for specialist consultations
 CONSULT_BASE = re.compile(r"^(9|10|11)$")
 CONSULT_CHECKED = re.compile(r"^(9|10|11)(\.0[12])?$")   # .01 = free follow-up (≤7 days, net 0), .02 = repeat (8–28 days)
 # pregnancy / childbirth / puerperium: Chapter 15 (O00–O9A) and the pregnancy Z codes
@@ -401,6 +402,16 @@ def generate(db: Session, session_id: int) -> int:
                 if k not in ("P:", "M:"):
                     visits[k].setdefault(v.claim_id, v)
 
+    # NAS members already denied for a missing GP referral (any facility, last 12 months)
+    gp_ref_members = {r.member_id: (r.last, r.n) for r in db.execute(text("""
+        SELECT c.member_id, max(r.remittance_date) last, count(*) n
+        FROM remittances r JOIN claims c ON c.facility_id = r.facility_id AND c.claim_id = r.claim_id
+         AND c.resubmission_key = ''
+        WHERE r.remittance_date >= current_date - 365 AND r.tpa_comments ~* 'gp referral'
+          AND coalesce(c.member_id, '') <> ''
+          AND upper(coalesce(nullif(c.receiver_id, ''), c.payer_id)) = ANY(:rcv)
+        GROUP BY 1"""), {"rcv": list(GP_REFERRAL_PAYERS)})}
+
     # days where most invoices are fully doubled point to an ERP problem, not individual billing errors
     def _fully_doubled(lines):
         n = defaultdict(int)
@@ -448,13 +459,27 @@ def generate(db: Session, session_id: int) -> int:
         codes = {a.activity_code for a in A}
 
         # ---- coding corrections -------------------------------------------------------
-        blocks = {d[:3]: d for d in D}
-        for definitive, symptom in EXCLUDES1:
-            if definitive in blocks and symptom in blocks:
+        # Official ICD-10-CM 2026 Excludes-1 notes (CMS tabular) + payer practice (symptom integral to diagnosis)
+        for x in icd_excludes.excludes1_conflicts(D):
+            if x["drop"]:
                 out.append(_q("EXCLUDES1", "ICD Excludes-1 — correction applied", "CORRECTION APPLIED",
-                              f"{blocks[definitive]} / {blocks[symptom]}",
-                              f"ICD code correction applied as per Excludes-1 guideline — {blocks[symptom]} removed, "
-                              f"{blocks[definitive]} retained. Kindly review."))
+                              f"{x['keep']} / {x['drop']}",
+                              f"ICD code correction applied as per Excludes-1 guideline — {x['drop']} removed, "
+                              f"{x['keep']} retained. Kindly review.",
+                              evidence=f"{x['note']} ({x['source']})", suggested=f"Remove {x['drop']}"))
+            else:
+                out.append(_q("EXCLUDES1", "ICD Excludes-1 — doctor to choose", "CODING CORRECTION",
+                              f"{x['a']} / {x['b']}",
+                              f"{x['a']} and {x['b']} cannot be coded together (ICD-10-CM Excludes-1). Kindly confirm "
+                              f"which diagnosis is documented and remove the other, unless the two conditions are "
+                              f"clearly unrelated and documented separately.",
+                              incharge="DOCTOR", evidence=f"{x['note']} ({x['source']})"))
+        for x in icd_excludes.practice_conflicts(D):
+            out.append(_q("SYMPTOM_INTEGRAL", "Symptom code with definitive diagnosis", "CODING CORRECTION",
+                          f"{x['keep']} / {x['drop']}",
+                          f"{x['drop']} is a symptom code and {x['note']} ({x['keep']}). Payers flag this as an "
+                          f"Excludes-1 edit. Kindly remove {x['drop']} unless it is unrelated to {x['keep']}.",
+                          evidence=x["source"], suggested=f"Remove {x['drop']}"))
         preg = [d for d in D if d.startswith("O") or d.startswith("Z34")]
         z3a = next((d for d in D if d.startswith("Z3A")), None)
         if z3a and (D[0].startswith("Z3A") or not preg):
@@ -665,6 +690,30 @@ def generate(db: Session, session_id: int) -> int:
                           f"Kindly confirm the licence of {doc} is active and registered with this payer.",
                           evidence=f"Payer history: {den} of {n} recent lines for {doc} denied for licence status "
                                    f"(last on {last:%d/%m/%Y}).", incharge="INFO"))
+
+        # ---- NAS: specialist consultation needs a GP referral -------------------------------
+        # NAS (TPA004) denies specialist consultations without a GP referral (CLAI-012 "GP referral
+        # required but not found") — 13 lines in Jul 2026, 443 in Oct. A same-day GP visit (9-series)
+        # for the patient counts as the referral; otherwise ask for the referral to be attached.
+        spec_cons = [a for a in A if re.match(r"^1[01](\.02)?$", a.activity_code or "")]
+        prior_gp = gp_ref_members.get(c["member_id"]) if c["member_id"] else None
+        # only members NAS has already denied for a missing referral: 89.5% of their next specialist visits
+        # are denied again (Oct 2026), against 5.6% for other members — the plan, not the payer, decides
+        if rcv in GP_REFERRAL_PAYERS and spec_cons and c["d"] and prior_gp:
+            gp_today = any(
+                v.d == c["d"] and _family(v.code) == "9"
+                for k in ("P:" + (c["patient_id"] or ""), "M:" + c["member_id"]) if k not in ("P:", "M:")
+                for cl, v in visits.get(k, {}).items() if cl != c["claim_id"])
+            if not gp_today:
+                out.append(_q("GP_REFERRAL", "GP referral for specialist visit", "DOCUMENT REQUIRED",
+                              spec_cons[0].activity_code,
+                              f"Specialist consultation {spec_cons[0].activity_code} for a {GP_REFERRAL_PAYERS[rcv]} "
+                              f"member. {GP_REFERRAL_PAYERS[rcv]} denies specialist visits without a GP referral "
+                              f"(CLAI-012). Kindly attach the GP referral, or bill as GP consultation 9 if the "
+                              f"patient was seen without one.",
+                              evidence=f"This member was denied by NAS for 'GP referral required but not found' on "
+                                       f"{prior_gp[0]:%d/%m/%Y} ({prior_gp[1]} line(s)). Members with a past referral "
+                                       f"denial were denied again on 89.5% of specialist visits (Oct 2026)."))
 
         # ---- repeat / follow-up consultation -----------------------------------------------
         cons = [a for a in A if CONSULT_CHECKED.match(a.activity_code)]

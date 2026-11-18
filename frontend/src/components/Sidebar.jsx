@@ -1,4 +1,6 @@
+import { useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
+import apiClient from "../api/client";
 import BixLogo from "./BixLogo";
 
 // 16px outline icons, 1.5px stroke, currentColor
@@ -40,7 +42,10 @@ const ICONS = {
 export const NAV_SECTIONS = [
   {
     label: "Overview",
-    items: [{ to: "/", label: "Dashboard", icon: "dashboard", end: true }],
+    items: [
+      { to: "/", label: "Dashboard", icon: "dashboard", end: true },
+      { to: "/alerts", label: "Facility alerts", icon: "denial", badge: "alerts" },
+    ],
   },
   {
     label: "Claim scrubbing & analysis",
@@ -49,6 +54,7 @@ export const NAV_SECTIONS = [
       { to: "/doc-review", label: "Documentation review", icon: "docreview" },
       { to: "/dha-sync", label: "XML scrub monitor", icon: "monitor" },
       { to: "/calibration", label: "Denial intelligence", icon: "denial" },
+      { to: "/denial-trends", label: "Denial trends", icon: "analytics" },
       { to: "/resub-worklist", label: "Resubmission worklist", icon: "resub" },
     ],
   },
@@ -56,6 +62,7 @@ export const NAV_SECTIONS = [
     label: "Reports & analytics",
     items: [
       { to: "/analytics", label: "Analytics & reports", icon: "analytics" },
+      { to: "/turnaround", label: "Payer turnaround", icon: "jobs" },
       { to: "/report-packs", label: "Client report packs", icon: "packs" },
       { to: "/clinical-profiles", label: "Clinical profiles", icon: "profiles" },
     ],
@@ -90,6 +97,14 @@ const linkClasses = ({ isActive }) =>
   }`;
 
 export default function Sidebar({ open = false, onClose }) {
+  const [alertCount, setAlertCount] = useState(0);
+  useEffect(() => {
+    let alive = true;
+    const load = () => apiClient.get("/alerts").then(r => alive && setAlertCount(r.data.count || 0)).catch(() => {});
+    load();
+    const t = setInterval(load, 30 * 60 * 1000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
   return (
     <>
       {open && (
@@ -125,6 +140,10 @@ export default function Sidebar({ open = false, onClose }) {
                   >
                     <Icon d={ICONS[item.icon]} />
                     {item.label}
+                    {item.badge === "alerts" && alertCount > 0 && (
+                      <span className="ml-auto rounded-full bg-denied px-1.5 text-[11px] font-semibold leading-5 text-white"
+                        aria-label={`${alertCount} alerts`}>{alertCount}</span>
+                    )}
                   </NavLink>
                 ))}
               </div>

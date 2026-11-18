@@ -418,8 +418,19 @@ def scrub(path: Path, rules=None, profile="UAE_COMMON", rule_pack=None, nas_guid
                 if len(set(present)) > 1:
                     finding(findings, pair.get("severity", "WARN"), "MUTUALLY_EXCLUSIVE_CODES", f"/Claim[{c['id']}]/Activity", f"Mutually exclusive services {sorted(set(present))} appear in the same claim; verify the current rule release.", c["id"], source="versioned rule pack")
 
-        # Excludes-1 is a diagnosis-pair rule. The public rule is precise,
-        # but the full pair table is not public; enforce only configured pairs.
+        # Excludes-1: official ICD-10-CM 2026 notes (CMS tabular, all 5k+ rules) plus payer practice,
+        # then any extra pairs configured in the rule pack.
+        from app.services import icd_excludes
+        for c in parsed_claims:
+            for x in icd_excludes.excludes1_conflicts(list(c["diagnoses"])):
+                act = f"remove {x['drop']}, keep {x['keep']}" if x["drop"] else "the doctor confirms which one is documented"
+                finding(findings, "WARN", "ICD_EXCLUDES1", f"/Claim[{c['id']}]/Diagnosis",
+                        f"Diagnosis codes {x['a']} and {x['b']} cannot be coded together ({x['note']}): {act}, "
+                        f"unless the conditions are clearly unrelated.", c["id"], source="ICD-10-CM 2026 Excludes-1")
+            for x in icd_excludes.practice_conflicts(list(c["diagnoses"])):
+                finding(findings, "WARN", "SYMPTOM_INTEGRAL", f"/Claim[{c['id']}]/Diagnosis",
+                        f"Symptom code {x['drop']} coded with {x['keep']} — {x['note']}. Payers flag this as an "
+                        f"Excludes-1 edit; remove {x['drop']} unless unrelated.", c["id"], source="payer practice")
         for c in parsed_claims:
             dx = set(c["diagnoses"])
             for pair in rule_pack.get("cpt_icd", {}).get("excludes1_pairs", []):
@@ -541,6 +552,7 @@ def scrub(path: Path, rules=None, profile="UAE_COMMON", rule_pack=None, nas_guid
         "NAS_VITD_REPEAT_90D": "CODE-016", "NAS_VITD_82652_COMPLEX_INDICATION": "MNEC-007",
         "NAS_VITD_COMBINATION_REVIEW": "MNEC-007", "NAS_ECHO_DOPPLER_BUNDLE_REVIEW": "MNEC-007",
         "NAS_INFUSION_96376_30MIN_REVIEW": "CODE-016",
+        "ICD_EXCLUDES1": "CODE-001", "SYMPTOM_INTEGRAL": "CODE-001",   # payers deny Excludes-1 edits as CODE-001 / CODE-012
     }
     denial_score = 0
     drivers = defaultdict(int)

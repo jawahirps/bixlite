@@ -1,0 +1,580 @@
+{
+ "COVID-19": {
+  "name": "COVID-19",
+  "type": "Insurance"
+ },
+ "DHA": {
+  "name": "DUBAI HEALTH AUTHORITY",
+  "type": "Insurance"
+ },
+ "INS001": {
+  "name": "DUBAI GOVERNMENT - PROGRAM 1 (ENAYA)",
+  "type": "Insurance"
+ },
+ "INS002": {
+  "name": "DUBAI GOVERNMENT - PROGRAM 2 (ENAYA 2022)",
+  "type": "Insurance"
+ },
+ "INS003": {
+  "name": "DUBAI GOVERNMENT - PROGRAM 3",
+  "type": "Insurance"
+ },
+ "INS004": {
+  "name": "DUBAI GOVERNMENT - PROGRAM 4",
+  "type": "Insurance"
+ },
+ "INS005": {
+  "name": "DUBAI INSURANCE COMPANY",
+  "type": "Insurance"
+ },
+ "INS006": {
+  "name": "DUBAI ISLAMIC INSURANCE & REINSURANCE CO (AMAN)",
+  "type": "Insurance"
+ },
+ "INS007": {
+  "name": "DUBAI NATIONAL INSURANCE AND REINSURANCE CO",
+  "type": "Insurance"
+ },
+ "INS008": {
+  "name": "ORIENT INSURANCE P.J.S.C",
+  "type": "Insurance"
+ },
+ "INS009": {
+  "name": "HAYAH INSURANCE COMPANY P.J.S.C",
+  "type": "Insurance"
+ },
+ "INS010": {
+  "name": "GULF INSURANCE GROUP (GULF) B S C CLOSED DUBAI BRANCH",
+  "type": "Insurance"
+ },
+ "INS011": {
+  "name": "AL SAGR NATIONAL INSURANCE COMPANY",
+  "type": "Insurance"
+ },
+ "INS012": {
+  "name": "OMAN INSURANCE COMPANY",
+  "type": "Insurance"
+ },
+ "INS013": {
+  "name": "AMERICAN LIFE INSURANCE COMPANY",
+  "type": "Insurance"
+ },
+ "INS014": {
+  "name": "RAS AL KHAIMAH NATIONAL INSURANCE COMPANY",
+  "type": "Insurance"
+ },
+ "INS015": {
+  "name": "SAUDI ARABIAN INSURANCE COMPANY",
+  "type": "Insurance"
+ },
+ "INS016": {
+  "name": "ARABIAN SCANDINAVIAN INSURANCE COMPANY",
+  "type": "Insurance"
+ },
+ "INS017": {
+  "name": "ABU DHABI NATIONAL INSURANCE COMPANY",
+  "type": "Insurance"
+ },
+ "INS018": {
+  "name": "WATANIA TAKAFUL FAMILY (PJSC)",
+  "type": "Insurance"
+ },
+ "INS019": {
+  "name": "QATAR INSURANCE COMPANY",
+  "type": "Insurance"
+ },
+ "INS020": {
+  "name": "AL-BUHAIRA NATIONAL INSURANCE COMPANY",
+  "type": "Insurance"
+ },
+ "INS021": {
+  "name": "SHARJAH INSURANCE COMPANY",
+  "type": "Insurance"
+ },
+ "INS022": {
+  "name": "TAKAFUL EMARAT - INSURANCE",
+  "type": "Insurance"
+ },
+ "INS023": {
+  "name": "AL WATHBA NATIONAL INSURANCE COMPANY",
+  "type": "Insurance"
+ },
+ "INS024": {
+  "name": "AL-ITTIHAD ALWATANI GENERAL INSURANCE COMPANY",
+  "type": "Insurance"
+ },
+ "INS025": {
+  "name": "ALLIANCE INSURANCE COMPANY",
+  "type": "Insurance"
+ },
+ "INS026": {
+  "name": "THE NATIONAL INSURANCE COMPANY (DAMAN) - PJSC",
+  "type": "Insurance"
+ },
+ "INS027": {
+  "name": "ABU DHABI NATIONAL TAKAFUL COMPANY-TAKAFUL",
+  "type": "Insurance"
+ },
+ "INS028": {
+  "name": "AL AIN AHLIA INSURANCE COMPANY",
+  "type": "Insurance"
+ },
+ "INS029": {
+  "name": "AL DHAFRA INSURANCE COMPANY",
+  "type": "Insurance"
+ },
+ "INS030": {
+  "name": "AL FUJAIRAH NATIONAL INSURANCE COMPANY",
+  "type": "Insurance"
+ },
+ "INS031": {
+  "name": "YAS TAKAFUL P.J.S.C",
+  "type": "Insurance"
+ },
+ "INS032": {
+  "name": "AL KHAZNA INSURANCE COMPANY",
+  "type": "Insurance"
+ },
+ "INS033": {
+  "name": "EMIRATES INSURANCE COMPANY",
+  "type": "Insurance"
+ },
+ "INS034": {
+  "name": "INSURANCE HOUSE - PSC",
+  "type": "Insurance"
+ },
+ "INS035": {
+  "name": "ISLAMIC ARAB INSURANCE COMPANY (SALAMA)",
+  "type": "Insurance"
+ },
+ "INS037": {
+  "name": "METHAQ TAKAFUL INSURANCE",
+  "type": "Insurance"
+ },
+ "INS038": {
+  "name": "NATIONAL GENERAL INSURANCE COMPANY",
+  "type": "Insurance"
+ },
+ "INS039": {
+  "name": "LIVA INSURANCE B.S.C. CLOSED - DUBAI BRANCH",
+  "type": "Insurance"
+ },
+ "INS040": {
+  "name": "UNION INSURANCE COMPANY",
+  "type": "Insurance"
+ },
+ "INS041": {
+  "name": "UNITED FIDELITY INSURANCE COMPANY - DUBAI BRANCH",
+  "type": "Insurance"
+ },
+ "INS042": {
+  "name": "ARABIA INSURANCE COMPANY",
+  "type": "Insurance"
+ },
+ "INS043": {
+  "name": "IRAN INSURANCE COMPANY",
+  "type": "Insurance"
+ },
+ "INS044": {
+  "name": "LIVA INSURANCE B.S.C. CLOSED - DUBAI BRANCH",
+  "type": "Insurance"
+ },
+ "INS046": {
+  "name": "THE NEW INDIA ASSURANCE COMPANY LIMITED",
+  "type": "Insurance"
+ },
+ "INS047": {
+  "name": "ADAMJEE INSURANCE CO. LTD.",
+  "type": "Insurance"
+ },
+ "INS053": {
+  "name": "ARAB ORIENT INSURANCE COMPANY WORLDWIDE",
+  "type": "Insurance"
+ },
+ "INS059": {
+  "name": "GATEWAY INTERNATIONAL ASSURANCE (ARABIA)",
+  "type": "Insurance"
+ },
+ "INS078": {
+  "name": "ABU DHABI MINISTRY OF FINANCE",
+  "type": "Insurance"
+ },
+ "INS079": {
+  "name": "NATIONAL TAKAFUL COMPANY - WATANIA",
+  "type": "Insurance"
+ },
+ "INS080": {
+  "name": "EMIRATES GROUP",
+  "type": "Insurance"
+ },
+ "INS081": {
+  "name": "EXPAT SERVICES",
+  "type": "Insurance"
+ },
+ "INS082": {
+  "name": "JORDAN INSURANCE COMPANY LTD",
+  "type": "Insurance"
+ },
+ "INS083": {
+  "name": "DAR AL TAKAFUL (P J S C)",
+  "type": "Insurance"
+ },
+ "INS084": {
+  "name": "TOKIO MARINE & NICHIDO FIRE INSURANCE COMPANY LIMITED (DUBAI BR)",
+  "type": "Insurance"
+ },
+ "INS113": {
+  "name": "DUBAI NATIONAL INSURANCE COMPANY",
+  "type": "Insurance"
+ },
+ "INS128": {
+  "name": "THE ORIENTAL INSURANCE COMPANY LTD. (DUBAI BRANCH)",
+  "type": "Insurance"
+ },
+ "INS129": {
+  "name": "SAADA",
+  "type": "Insurance"
+ },
+ "INS134": {
+  "name": "MEDGULF - THE MEDITERRANEAN & GULF INSURANCE & REINSURANCE CO. B.S.C. (C) (DUBAI BRANCH)",
+  "type": "Insurance"
+ },
+ "INS135": {
+  "name": "AMERICAN HOME ASSURANCE COMPANY (DUBAI BR)",
+  "type": "Insurance"
+ },
+ "INS136": {
+  "name": "(REAAYA) DUBAI POLICE",
+  "type": "Insurance"
+ },
+ "INS137": {
+  "name": "CIGNA INSURANCE MIDDLE EAST (S.A.L) - DUBAI BRANCH",
+  "type": "Insurance"
+ },
+ "INS139": {
+  "name": "ORIENT TAKAFUL P.J.S.C.",
+  "type": "Insurance"
+ },
+ "INS141": {
+  "name": "BASMA PATIENT SUPPORT PROGRAM",
+  "type": "Insurance"
+ },
+ "INS142": {
+  "name": "HEPATITIS",
+  "type": "Insurance"
+ },
+ "INS143": {
+  "name": "DHA DIALYSIS",
+  "type": "Insurance"
+ },
+ "INS144": {
+  "name": "HEPATITIS C",
+  "type": "Insurance"
+ },
+ "INS145": {
+  "name": "STATE LIFE INSURANCE CORPORATION OF PAKISTAN (DUBAI BR)",
+  "type": "Insurance"
+ },
+ "INS148": {
+  "name": "ALFIT INSURANCE - P.J.S.C",
+  "type": "Insurance"
+ },
+ "RCOVID-19": {
+  "name": "RCOVID19",
+  "type": "TPA"
+ },
+ "SELFPAY": {
+  "name": "SELF PAYING CUSTOMER",
+  "type": "Insurance"
+ },
+ "TPA001": {
+  "name": "NEURON LLC",
+  "type": "TPA"
+ },
+ "TPA002": {
+  "name": "NEXTCARE CLAIMS MANAGEMENT LLC",
+  "type": "TPA"
+ },
+ "TPA003": {
+  "name": "ALMADALLAH HEALTHCARE MANAGEMENT FZ-LLC",
+  "type": "TPA"
+ },
+ "TPA004": {
+  "name": "NAS ADMINISTRATION SERVICES LIMITED",
+  "type": "TPA"
+ },
+ "TPA005": {
+  "name": "AETNA GLOBAL BENEFITS (MIDDLE EAST)",
+  "type": "TPA"
+ },
+ "TPA006": {
+  "name": "AMITY HEALTH",
+  "type": "TPA"
+ },
+ "TPA008": {
+  "name": "INAYAH TPA LLC",
+  "type": "TPA"
+ },
+ "TPA009": {
+  "name": "MEDNET UAE",
+  "type": "TPA"
+ },
+ "TPA010": {
+  "name": "FMC NETWORK UAE MANAGEMENT CONSULTANCY",
+  "type": "TPA"
+ },
+ "TPA011": {
+  "name": "GLOBEMED GULF",
+  "type": "TPA"
+ },
+ "TPA012": {
+  "name": "M S H INTERNATIONAL ADMINISTRATIVE CONSULTANCY",
+  "type": "TPA"
+ },
+ "TPA013": {
+  "name": "PENTA CARE MEDICAL SERVICES LLC",
+  "type": "TPA"
+ },
+ "TPA014": {
+  "name": "WAPMED TPA SERVICES LLC",
+  "type": "TPA"
+ },
+ "TPA016": {
+  "name": "MSH INTERNATIONAL LLC",
+  "type": "TPA"
+ },
+ "TPA017": {
+  "name": "NOW HEALTH INTERNATIONAL LIMITED",
+  "type": "TPA"
+ },
+ "TPA021": {
+  "name": "VIDAL MEDICAL SERVICES LLC",
+  "type": "TPA"
+ },
+ "TPA022": {
+  "name": "MUSALLA NET TPA LLC",
+  "type": "TPA"
+ },
+ "TPA023": {
+  "name": "THIQA",
+  "type": "TPA"
+ },
+ "TPA025": {
+  "name": "FORTUNE HEALTHCARE L.L.C",
+  "type": "TPA"
+ },
+ "TPA026": {
+  "name": "AAFIYA MEDICAL BILLING SERVICES L.L.C",
+  "type": "TPA"
+ },
+ "TPA027": {
+  "name": "STARWELL NETWORK MANAGEMENT LLC",
+  "type": "TPA"
+ },
+ "TPA029": {
+  "name": "E CARE INTERNATIONAL MEDICAL BILLING SERVICES CO. LLC",
+  "type": "TPA"
+ },
+ "TPA030": {
+  "name": "IRIS HEALTH SERVICES L.L.C.",
+  "type": "TPA"
+ },
+ "TPA032": {
+  "name": "WHEALTH INTERNATIONAL LLC",
+  "type": "TPA"
+ },
+ "TPA033": {
+  "name": "VIDAL HEALTH TPA SERVICES AE LLC",
+  "type": "TPA"
+ },
+ "TPA036": {
+  "name": "MEDNET GLOBAL HEALTHCARE SOLUTIONS L.L.C.",
+  "type": "TPA"
+ },
+ "TPA037": {
+  "name": "KHAT AL HAYA MANAGEMENT OF HEALTH INSURANCE CLAIMS LLC",
+  "type": "TPA"
+ },
+ "TPA038": {
+  "name": "ENET TPA L.L.C",
+  "type": "TPA"
+ },
+ "TPA039": {
+  "name": "STARZ HEALTH INSURANCE CLAIMS MANAGEMENT LLC",
+  "type": "TPA"
+ },
+ "TPA040": {
+  "name": "ASPIRE SOLUTION OPERATIONS HEALTH INSURANCE CLAIMS MANAGEMENT LLC",
+  "type": "TPA"
+ },
+ "SF0050": {
+  "name": "EMARAT",
+  "type": "Self-paid",
+  "tpa": "TPA001"
+ },
+ "SF0051": {
+  "name": "DEWA",
+  "type": "Self-paid",
+  "tpa": "TPA001"
+ },
+ "SF0069": {
+  "name": "STRATEGIC PROJECT OFFICE",
+  "type": "Self-paid",
+  "tpa": "TPA002"
+ },
+ "SF0070": {
+  "name": "GENERAL SECRETARIAT OF THE CABINET",
+  "type": "Self-paid",
+  "tpa": "TPA002"
+ },
+ "SF0071": {
+  "name": "MINISTER FOR AI, DIGITAL ECONOMY & REMOTE WORK APP EMPLOYEES",
+  "type": "Self-paid",
+  "tpa": "TPA002"
+ },
+ "SP0001": {
+  "name": "ALMADALLAH HEALTHCARE MANAGEMENT FZ-LLC",
+  "type": "Self-paid",
+  "tpa": "TPA003"
+ },
+ "SP0002": {
+  "name": "CATEGORY B - GOVERNMENT OF DUBAI",
+  "type": "Self-paid",
+  "tpa": "TPA002"
+ },
+ "SP0003": {
+  "name": "CATEGORY C - GOVERNMENT OF DUBAI",
+  "type": "Self-paid",
+  "tpa": "TPA002"
+ },
+ "SP0004": {
+  "name": "CATEGORY D - GOVERNMENT OF DUBAI",
+  "type": "Self-paid",
+  "tpa": "TPA002"
+ },
+ "SP0005": {
+  "name": "CATEGORY V - GOVERNMENT OF DUBAI",
+  "type": "Self-paid",
+  "tpa": "TPA002"
+ },
+ "SP0006": {
+  "name": "CATEGORY 1 - DUBAI HOLDING",
+  "type": "Self-paid",
+  "tpa": "TPA002"
+ },
+ "SP0007": {
+  "name": "CATEGORY 2 - DUBAI HOLDING",
+  "type": "Self-paid",
+  "tpa": "TPA002"
+ },
+ "SP0008": {
+  "name": "CATEGORY 3 - DUBAI HOLDING",
+  "type": "Self-paid",
+  "tpa": "TPA002"
+ },
+ "SP0009": {
+  "name": "CATEGORY A - DUBAI HOLDING",
+  "type": "Self-paid",
+  "tpa": "TPA002"
+ },
+ "SP0014": {
+  "name": "EMPOWER",
+  "type": "Self-paid",
+  "tpa": "TPA001"
+ },
+ "SP0015": {
+  "name": "JUMEIRAH INTERNATIONAL LLC",
+  "type": "Self-paid",
+  "tpa": "TPA002"
+ },
+ "SP0017": {
+  "name": "MINISTRY OF CABINET AFFAIRS - MOCA",
+  "type": "Self-paid",
+  "tpa": "TPA002"
+ },
+ "SP0019": {
+  "name": "PRIME MINISTER'S OFFICE",
+  "type": "Self-paid",
+  "tpa": "TPA002"
+ },
+ "SP0020": {
+  "name": "RTA",
+  "type": "Self-paid",
+  "tpa": "TPA002"
+ },
+ "SP0023": {
+  "name": "THE EXECUTIVE OFFICE",
+  "type": "Self-paid",
+  "tpa": "TPA002"
+ },
+ "SP0025": {
+  "name": "DUBAI WORLD",
+  "type": "Self-paid",
+  "tpa": "TPA001"
+ },
+ "SP0026": {
+  "name": "DP WORLD",
+  "type": "Self-paid",
+  "tpa": "TPA001"
+ },
+ "SP0042": {
+  "name": "H. H. SHEIKH HAMDAN BIN RASHID AL MAKTOUM - ZABEEL PALACE",
+  "type": "Self-paid",
+  "tpa": "TPA002"
+ },
+ "SP0043": {
+  "name": "CATEGORY 4 - DUBAI HOLDING",
+  "type": "Self-paid",
+  "tpa": "TPA004"
+ },
+ "SP0057": {
+  "name": "SMART DUBAI OFFICE",
+  "type": "Self-paid",
+  "tpa": "TPA002"
+ },
+ "SP0058": {
+  "name": "DUBAI FUTURE FOUNDATION",
+  "type": "Self-paid",
+  "tpa": "TPA002"
+ },
+ "SP0059": {
+  "name": "DRY DOCKS WORLD - DUBAI LLC",
+  "type": "Self-paid",
+  "tpa": "TPA002"
+ },
+ "SP0061": {
+  "name": "PUBLIC DIPLOMACY OFFICE",
+  "type": "Self-paid",
+  "tpa": "TPA002"
+ },
+ "SP0062": {
+  "name": "EMIRATES FLIGHT CATERING CO (LLC)",
+  "type": "Self-paid",
+  "tpa": "TPA036"
+ },
+ "SP0069": {
+  "name": "DUBAI CABLE COMPANY (DUCAB)",
+  "type": "Self-paid",
+  "tpa": "TPA003"
+ },
+ "SP0070": {
+  "name": "EMIRATES HEALTH SERVICES",
+  "type": "Self-paid",
+  "tpa": "TPA003"
+ },
+ "SP0071": {
+  "name": "AL JALILA FOUNDATION",
+  "type": "Self-paid",
+  "tpa": "TPA003"
+ },
+ "SP0072": {
+  "name": "MBRU STUDENTS",
+  "type": "Self-paid",
+  "tpa": "TPA003"
+ },
+ "SP0073": {
+  "name": "DUBAI HEALTH",
+  "type": "Self-paid",
+  "tpa": "TPA003"
+ }
+}

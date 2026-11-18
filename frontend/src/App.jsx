@@ -16,6 +16,9 @@ const Scrubber = lazy(() => import("./pages/Scrubber"));
 const Calibration = lazy(() => import("./pages/Calibration"));
 const ResubWorklist = lazy(() => import("./pages/ResubWorklist"));
 const ReportPacks = lazy(() => import("./pages/ReportPacks"));
+const Alerts = lazy(() => import("./pages/Alerts"));
+const Turnaround = lazy(() => import("./pages/Turnaround"));
+const DenialTrends = lazy(() => import("./pages/DenialTrends"));
 const AccountSecurity = lazy(() => import("./pages/AccountSecurity"));
 
 // Pages load on demand, so the first screen downloads only what it needs.
@@ -51,6 +54,9 @@ export default function App() {
           <Route path="/scrubber" element={<Scrubber />} />
           <Route path="/doc-review" element={<DocReview />} />
           <Route path="/calibration" element={<Calibration />} />
+          <Route path="/denial-trends" element={<DenialTrends />} />
+          <Route path="/alerts" element={<Alerts />} />
+          <Route path="/turnaround" element={<Turnaround />} />
           <Route path="/resub-worklist" element={<ResubWorklist />} />
         </Route>
       </Route>

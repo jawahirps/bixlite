@@ -16,7 +16,7 @@ import threading
 
 from .config import get_settings
 from .database import SessionLocal, init_db
-from .routers import analytics, auth, bulk_resub, dashboard, calibration, clinical_profiles, dha_sync, doc_review, facilities, packs, reports, portal, receipts, resub, scrub
+from .routers import analytics, auth, bulk_resub, dashboard, calibration, clinical_profiles, dha_sync, doc_review, facilities, packs, reports, portal, receipts, resub, scrub, turnaround, denial_trends, alerts
 from .seed import run_seed
 
 settings = get_settings()
@@ -188,6 +188,15 @@ app.include_router(resub.router)                  # /api/resub/* — JWT-protect
 app.include_router(doc_review.router)             # /api/docreview/* — JWT-protected
 app.include_router(dashboard.router)              # /api/dashboard/* — JWT-protected
 app.include_router(bulk_resub.router)             # /api/resub/bulk/* — JWT-protected
+app.include_router(turnaround.router)             # /api/turnaround/* — JWT-protected
+app.include_router(denial_trends.router)          # /api/denial-trends/* — JWT-protected
+app.include_router(alerts.router)                 # /api/alerts — JWT-protected
+
+
+@app.on_event("startup")
+def _warm_alerts():
+    alerts.warm()
+
 app.include_router(packs.router)                  # /api/packs/* — JWT-protected
 
 # ── Serve React frontend (built with `npm run build`) ────────────────────────

@@ -33,6 +33,7 @@ const ICONS = {
   profiles: ["M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8z", "M4 21a8 8 0 0 1 16 0"],
   jobs: ["M21 12a9 9 0 1 1-3-6.7", "M21 4v5h-5", "M12 8v4l3 2"],
   settings: ["M4 21v-7", "M4 10V3", "M12 21v-9", "M12 8V3", "M20 21v-5", "M20 12V3", "M2 14h4", "M10 8h4", "M18 16h4"],
+  shield: ["M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z", "M9 12l2 2 4-4"],
   login: ["M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4", "M10 17l5-5-5-5", "M15 12H3"],
 };
 
@@ -60,15 +61,12 @@ export const NAV_SECTIONS = [
     ],
   },
   {
-    label: "Data sync",
-    items: [{ to: "/jobs", label: "Data sync & jobs", icon: "jobs" }],
-  },
-  {
-    label: "Administration",
+    label: "Data & administration",
     items: [
+      { to: "/jobs", label: "Data sync & jobs", icon: "jobs" },
       { to: "/facility-settings", label: "Facility settings", icon: "settings" },
       { to: "/login-activity", label: "Login activity", icon: "login" },
-      { to: "/account-security", label: "Authenticator app", icon: "settings" },
+      { to: "/account-security", label: "Authenticator app", icon: "shield" },
     ],
   },
 ];

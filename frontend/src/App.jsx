@@ -1,24 +1,36 @@
+import { lazy, Suspense } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import Layout from "./components/Layout";
 import ProtectedRoute from "./components/ProtectedRoute";
 import Login from "./pages/Login";
-import Dashboard from "./pages/Dashboard";
-import ClinicalProfiles from "./pages/ClinicalProfiles";
-import DhaSync from "./pages/DhaSync";
-import Analytics from "./pages/Analytics";
-import LoginActivity from "./pages/LoginActivity";
-import FacilitySettings from "./pages/FacilitySettings";
-import RemittancePortal from "./pages/portal/RemittancePortal";
-import Jobs from "./pages/Jobs";
-import DocReview from "./pages/DocReview";
-import Scrubber from "./pages/Scrubber";
-import Calibration from "./pages/Calibration";
-import ResubWorklist from "./pages/ResubWorklist";
-import ReportPacks from "./pages/ReportPacks";
-import AccountSecurity from "./pages/AccountSecurity";
+const Dashboard = lazy(() => import("./pages/Dashboard"));
+const ClinicalProfiles = lazy(() => import("./pages/ClinicalProfiles"));
+const DhaSync = lazy(() => import("./pages/DhaSync"));
+const Analytics = lazy(() => import("./pages/Analytics"));
+const LoginActivity = lazy(() => import("./pages/LoginActivity"));
+const FacilitySettings = lazy(() => import("./pages/FacilitySettings"));
+const RemittancePortal = lazy(() => import("./pages/portal/RemittancePortal"));
+const Jobs = lazy(() => import("./pages/Jobs"));
+const DocReview = lazy(() => import("./pages/DocReview"));
+const Scrubber = lazy(() => import("./pages/Scrubber"));
+const Calibration = lazy(() => import("./pages/Calibration"));
+const ResubWorklist = lazy(() => import("./pages/ResubWorklist"));
+const ReportPacks = lazy(() => import("./pages/ReportPacks"));
+const AccountSecurity = lazy(() => import("./pages/AccountSecurity"));
+
+// Pages load on demand, so the first screen downloads only what it needs.
+function PageLoading() {
+  return (
+    <div className="flex items-center gap-3 py-16 text-sm text-slate-600" role="status">
+      <span className="h-4 w-4 animate-spin rounded-full border-2 border-ghaf-200 border-t-ghaf-600" aria-hidden="true" />
+      Loading…
+    </div>
+  );
+}
 
 export default function App() {
   return (
+    <Suspense fallback={<PageLoading />}>
     <Routes>
       <Route path="/login" element={<Login />} />
 
@@ -45,5 +57,6 @@ export default function App() {
 
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
+    </Suspense>
   );
 }

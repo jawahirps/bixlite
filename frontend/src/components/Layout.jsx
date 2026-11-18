@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import Sidebar, { findNavItem } from "./Sidebar";
 import { useAuth } from "../context/AuthContext";
@@ -11,6 +11,11 @@ export default function Layout() {
 
   // Close the overlay sidebar on navigation
   useEffect(() => setSidebarOpen(false), [pathname]);
+
+  // Browser tab shows the page name, so several open tabs can be told apart
+  useEffect(() => {
+    document.title = current ? `${current.item.label} · BIX Lite` : "BIX Lite";
+  }, [current]);
 
   return (
     <div className="flex h-screen w-screen overflow-hidden">
@@ -55,7 +60,16 @@ export default function Layout() {
           </div>
         </header>
         <main className="flex-1 overflow-y-auto bg-white px-4 py-8 lg:px-8">
-          <Outlet />
+          <Suspense
+            fallback={
+              <div className="flex items-center gap-3 py-16 text-sm text-slate-600" role="status">
+                <span className="h-4 w-4 animate-spin rounded-full border-2 border-ghaf-200 border-t-ghaf-600" aria-hidden="true" />
+                Loading…
+              </div>
+            }
+          >
+            <Outlet />
+          </Suspense>
         </main>
       </div>
     </div>

@@ -1,4 +1,4 @@
-# Ghaf App — Windows Setup Guide
+# BIX Lite — Windows Setup Guide
 
 ## Prerequisites (install in this order)
 
@@ -82,12 +82,12 @@ Save as `start_ghaf.bat` in `C:\ghaf-app\`:
 
 ```bat
 @echo off
-echo Starting Ghaf App Backend...
+echo Starting BIX Lite Backend...
 start "Ghaf Backend" cmd /k "cd /d C:\ghaf-app\backend && .venv\Scripts\uvicorn app.main:app --reload --host 0.0.0.0 --port 8000"
 
 timeout /t 3
 
-echo Starting Ghaf App Frontend...
+echo Starting BIX Lite Frontend...
 start "Ghaf Frontend" cmd /k "cd /d C:\ghaf-app\frontend && npm run dev"
 
 echo.

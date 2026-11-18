@@ -1,6 +1,6 @@
-# Ghaf App — Deployment Guide (Windows Server)
+# BIX Lite — Deployment Guide (Windows Server)
 
-This guide covers deploying Ghaf App (FastAPI backend + React/Vite
+This guide covers deploying BIX Lite (FastAPI backend + React/Vite
 frontend) on **Windows Server** (2019/2022) using IIS as the web
 front door, a Windows Service for the FastAPI/Uvicorn backend, and
 Task Scheduler for the DHA XML Sync worker.
@@ -260,7 +260,7 @@ works unchanged and `CORS_ORIGINS` only needs your public site URL.
 
 ## 10. Metabase (Analytics & Financial Insights) — optional
 
-**You can deploy and run Ghaf App in full without this section.** If
+**You can deploy and run BIX Lite in full without this section.** If
 `METABASE_SECRET_KEY` is left blank in `backend\.env`, the Analytics &
 Financial Insights tab simply shows a "not configured" placeholder for
 each chart — every other feature (login, clinical profiles, DHA XML
@@ -296,7 +296,7 @@ a **Windows Task Scheduler** task that runs
 `backend\scripts\run_dha_sync.py` nightly:
 
 1. Open **Task Scheduler** → **Create Task...**
-2. **General**: name it `Ghaf App - DHA Sync`, run whether user is logged
+2. **General**: name it `BIX Lite - DHA Sync`, run whether user is logged
    on or not, run with highest privileges.
 3. **Triggers**: New → Daily, set the time (e.g. 02:00).
 4. **Actions**: New → Start a program:
@@ -340,8 +340,8 @@ exposed externally — only IIS (via the reverse proxy) and `localhost`
 need access to it:
 
 ```powershell
-New-NetFirewallRule -DisplayName "Ghaf App HTTPS" -Direction Inbound -Protocol TCP -LocalPort 443 -Action Allow
-New-NetFirewallRule -DisplayName "Ghaf App HTTP" -Direction Inbound -Protocol TCP -LocalPort 80 -Action Allow
+New-NetFirewallRule -DisplayName "BIX Lite HTTPS" -Direction Inbound -Protocol TCP -LocalPort 443 -Action Allow
+New-NetFirewallRule -DisplayName "BIX Lite HTTP" -Direction Inbound -Protocol TCP -LocalPort 80 -Action Allow
 ```
 
 ---

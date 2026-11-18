@@ -1,5 +1,5 @@
 """
-Ghaf App — application configuration.
+BIX Lite — application configuration.
 
 Settings are loaded from environment variables / a .env file. See
 backend/.env.example for the full list of supported variables.

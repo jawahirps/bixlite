@@ -1,5 +1,5 @@
 """
-Ghaf App — Seed/update facilities table from eClaimLink facilities list.
+BIX Lite — Seed/update facilities table from eClaimLink facilities list.
 
 Reads the Excel file exported from eClaimLink (cols: A=DHA-F-ID, B=Facility Name)
 and does an UPSERT into the facilities table:

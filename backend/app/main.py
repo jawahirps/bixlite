@@ -1,5 +1,5 @@
 """
-Ghaf App — FastAPI application entrypoint.
+BIX Lite — FastAPI application entrypoint.
 
 Run with:
     uvicorn app.main:app --reload --port 8000

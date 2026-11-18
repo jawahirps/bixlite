@@ -1,4 +1,4 @@
-# Ghaf App — RCM & Clinical Platform
+# BIX Lite — RCM & Clinical Platform
 
 React + FastAPI application for:
 

@@ -489,6 +489,70 @@ def list_fetch_logs(
     return query.order_by(FetchLog.started_at.desc()).limit(min(limit, 200)).all()
 
 
+@router.get("/fetch-health")
+def fetch_health(
+    stale_hours: int = 26,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Per facility and source (DHA / Riayati): last run, last success and an alert flag.
+
+    A source is flagged when its last run did not succeed or nothing succeeded
+    within `stale_hours`. Only sources that ran in the last 30 days are listed.
+    """
+    params = {"stale": stale_hours}
+    fac_filter = ""
+    if current_user.role != "admin" and current_user.facility_id is not None:
+        fac_filter = "AND f.facility_id = :fid"
+        params["fid"] = current_user.facility_id
+    rows = db.execute(text(f"""
+        WITH f AS (
+            SELECT facility_id,
+                   CASE WHEN fetch_type = 'Riayati' THEN 'Riayati' ELSE 'DHA' END AS source,
+                   status, started_at, completed_at, error_detail
+            FROM fetch_log
+            WHERE started_at > now() - interval '30 days'
+              AND fetch_type IN ('Backfill', 'Riayati', 'ClaimSubmission', 'RemittanceAdvice')
+        ), last_run AS (
+            SELECT DISTINCT ON (facility_id, source) facility_id, source, status,
+                   started_at, error_detail
+            FROM f WHERE status <> 'running'
+            ORDER BY facility_id, source, started_at DESC
+        ), last_ok AS (
+            SELECT facility_id, source, max(coalesce(completed_at, started_at)) AS ok_at
+            FROM f WHERE status = 'success' GROUP BY 1, 2
+        )
+        SELECT f.facility_id, fa.facility_name, f.source, f.status AS last_status,
+               f.started_at AS last_run_at, o.ok_at AS last_success_at,
+               f.error_detail
+        FROM last_run f
+        JOIN facilities fa ON fa.id = f.facility_id AND fa.is_active
+        LEFT JOIN last_ok o USING (facility_id, source)
+        WHERE fa.facility_code <> 'GHAF-001' {fac_filter}
+        ORDER BY fa.facility_name, f.source
+    """), params).mappings().all()
+    now = datetime.now().astimezone()
+    out = []
+    for r in rows:
+        ok_at = r["last_success_at"]
+        hours = round((now - ok_at).total_seconds() / 3600, 1) if ok_at else None
+        reasons = []
+        if r["last_status"] != "success":
+            reasons.append(f"last run {r['last_status']}")
+        if hours is None or hours > stale_hours:
+            reasons.append("no success in 30 days" if hours is None else f"no success for {hours:.0f} h")
+        err = None
+        if r["error_detail"] and r["last_status"] != "success":
+            errs = (r["error_detail"] or {}).get("errors") or []
+            err = str(errs[0])[:200] if errs else str(r["error_detail"])[:200]
+        out.append({**{k: r[k] for k in ("facility_id", "facility_name", "source", "last_status",
+                                           "last_run_at", "last_success_at")},
+                    "hours_since_success": hours, "alert": bool(reasons),
+                    "reason": "; ".join(reasons) or None, "error": err})
+    return {"stale_hours": stale_hours, "generated_at": now, "items": out,
+            "alerts": sum(1 for o in out if o["alert"])}
+
+
 # ---------------------------------------------------------------------------
 # Layer 2: XML scrub findings for a raw_xml_store record
 # ---------------------------------------------------------------------------

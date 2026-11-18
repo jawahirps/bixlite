@@ -87,6 +87,63 @@ function Stat({ label, value, sub, tone }) {
   );
 }
 
+function FetchHealth() {
+  const [data, setData] = useState(null);
+  const [showAll, setShowAll] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    const load = () => apiClient.get("/dha-sync/fetch-health")
+      .then(r => alive && setData(r.data)).catch(() => {});
+    load();
+    const t = setInterval(load, 60000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
+  if (!data) return null;
+  const rows = showAll ? data.items : data.items.filter(i => i.alert);
+  const ok = data.alerts === 0;
+  return (
+    <section className={`gh-section ${ok ? "" : "border-l-4 border-l-denied"}`}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 className="gh-section-title">Fetch health</h2>
+          <p className="mt-0.5 text-sm text-slate-500">
+            {ok
+              ? `All ${data.items.length} facility sources fetched successfully in the last ${data.stale_hours} hours.`
+              : `${data.alerts} of ${data.items.length} facility sources need attention: last run failed or nothing fetched in ${data.stale_hours} hours.`}
+          </p>
+        </div>
+        <button className="text-sm font-medium text-ghaf-600 hover:underline" onClick={() => setShowAll(v => !v)}>
+          {showAll ? "Show alerts only" : "Show all sources"}
+        </button>
+      </div>
+      {rows.length > 0 && (
+        <div className="mt-3 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="text-left text-xs uppercase tracking-wide text-slate-500">
+              <tr><th className="py-2 pr-4">Facility</th><th className="py-2 pr-4">Source</th>
+                <th className="py-2 pr-4">Last run</th><th className="py-2 pr-4">Last success</th><th className="py-2">Issue</th></tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {rows.map(i => (
+                <tr key={`${i.facility_id}-${i.source}`}>
+                  <td className="py-2 pr-4 font-medium">{i.facility_name}</td>
+                  <td className="py-2 pr-4">{i.source}</td>
+                  <td className="py-2 pr-4 whitespace-nowrap">{fmtWhen(i.last_run_at)} <StatusBadge status={i.last_status} /></td>
+                  <td className="py-2 pr-4 whitespace-nowrap">{i.last_success_at ? fmtWhen(i.last_success_at) : "—"}</td>
+                  <td className="py-2 text-slate-600">
+                    {i.alert ? <span className="text-denied">{i.reason}</span> : "OK"}
+                    {i.error && <span className="block max-w-md truncate text-xs text-slate-400" title={i.error}>{i.error}</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export default function Jobs() {
   const { user } = useAuth();
 
@@ -344,6 +401,8 @@ export default function Jobs() {
         <Stat label="Last successful job" value={ago(lastOk?.completed_at)}
           sub={lastOk ? `${lastOk.fetch_type} · ${facMap[lastOk.facility_id] || `Facility ${lastOk.facility_id}`}` : "No successful job in the list"} />
       </div>
+
+      <FetchHealth />
 
       {/* Fetch */}
       <section>

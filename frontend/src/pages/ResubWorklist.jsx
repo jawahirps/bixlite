@@ -343,7 +343,7 @@ export default function ResubWorklist() {
                 <option value="">All owners</option><option>Ghaf</option><option>Facility</option>
               </select>
             )}
-            <label className="flex items-center gap-2 rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-700">
+            <label className="flex items-center gap-2 rounded border border-sage-line px-3 py-1.5 text-sm text-ink">
               <input type="checkbox" checked={groupByClaim} onChange={e => { setGroupByClaim(e.target.checked); setOpenClaims(new Set()); }} />
               Group by claim
             </label>

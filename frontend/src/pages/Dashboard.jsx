@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
+import StackedBars from "../components/StackedBars";
 import apiClient from "../api/client";
 import DashboardTables, { TABLE_TABS } from "./DashboardTables";
 
@@ -17,6 +17,7 @@ const monthLabel = (m) => new Date(`${m}-01`).toLocaleDateString("en-GB", { mont
 
 // cycle colours: paid / denied / awaiting, from the Ghaf palette
 const C = { paid: "#0f7c97", denied: "#c2410c", awaiting: "#cad5ca", overdue: "#b45309" };
+const SERIES = [{ key: "Paid", color: C.paid }, { key: "Denied", color: C.denied }, { key: "Awaiting RA", color: C.awaiting }];
 
 function presets() {
   const t = new Date();
@@ -92,7 +93,7 @@ function MoneyTooltip({ active, payload, label }) {
   if (!active || !payload?.length) return null;
   const sum = payload.reduce((s, p) => s + Number(p.value || 0), 0);
   return (
-    <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs shadow-lg">
+    <div className="whitespace-nowrap rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs shadow-lg">
       <p className="mb-1 font-semibold text-slate-700">{label}</p>
       {payload.map((p) => (
         <p key={p.dataKey} className="tabular-nums" style={{ color: p.color === C.awaiting ? "#596d66" : p.color }}>
@@ -243,19 +244,15 @@ export default function Dashboard() {
               <div className="gh-card p-5">
                 <p className="gh-label">Monthly submitted amount by cycle status</p>
                 <p className="mb-3 text-xs text-slate-500">Each bar is one encounter month; the grey part has no RA yet.</p>
-                <ResponsiveContainer width="100%" height={320}>
-                  <BarChart data={chart} margin={{ top: 8, right: 8, left: 8, bottom: 0 }} barCategoryGap="20%">
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5eee6" />
-                    <XAxis dataKey="month" tick={{ fontSize: 12, fill: "#596d66" }} axisLine={false} tickLine={false} />
-                    <YAxis tickFormatter={compact} tick={{ fontSize: 12, fill: "#596d66" }} axisLine={false} tickLine={false} width={56} />
-                    <Tooltip content={<MoneyTooltip />} cursor={{ fill: "#f1f7f9" }} />
-                    <Legend wrapperStyle={{ fontSize: 12 }} iconType="square"
-                            formatter={(v) => <span className="text-slate-700">{v}</span>} />
-                    <Bar dataKey="Paid" stackId="a" fill={C.paid} />
-                    <Bar dataKey="Denied" stackId="a" fill={C.denied} />
-                    <Bar dataKey="Awaiting RA" stackId="a" fill={C.awaiting} radius={[4, 4, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
+                <StackedBars
+                  data={chart.map((m) => ({ label: m.month, values: m }))}
+                  series={SERIES}
+                  format={compact}
+                  tooltip={(d) => (
+                    <MoneyTooltip active label={d.label}
+                      payload={SERIES.map((x) => ({ dataKey: x.key, name: x.key, value: d.values[x.key], color: x.color }))} />
+                  )}
+                />
               </div>
             </>
           )}

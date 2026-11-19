@@ -338,7 +338,7 @@ export default function Calibration() {
                     <tr key={r.rule_id} className={`hover:bg-slate-50 ${r.suggested_severity === "BLOCK" ? "bg-red-50/30" : ""}`}>
                       <td className="px-3 py-2 font-mono text-xs text-slate-800">{r.rule_id}</td>
                       <td className="px-3 py-2">
-                        <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${SEV_STYLE[r.current_severity] || "bg-slate-100 text-slate-600"}`}>
+                        <span className={`gh-chip ${SEV_STYLE[r.current_severity] || "bg-slate-100 text-slate-600"}`}>
                           {r.current_severity}
                         </span>
                       </td>
@@ -350,7 +350,7 @@ export default function Calibration() {
                       <td className="px-3 py-2 text-right text-slate-700">{fmt(r.total_denial_amount)}</td>
                       <td className="px-3 py-2">
                         {r.suggested_severity ? (
-                          <span className={`rounded-full px-2 py-0.5 text-xs font-bold ${SEV_STYLE[r.suggested_severity]}`}>
+                          <span className={`gh-chip font-bold ${SEV_STYLE[r.suggested_severity]}`}>
                             → {r.suggested_severity}
                           </span>
                         ) : <span className="text-slate-300 text-xs">—</span>}
@@ -401,7 +401,7 @@ export default function Calibration() {
               </button>
             )}
             {/* View toggle */}
-            <div className="flex rounded-lg border border-slate-300 overflow-hidden text-sm">
+            <div className="flex overflow-hidden rounded border border-sage-line text-sm">
               {[["claims","By Claim"],["by_file","By RA File"]].map(([v, label]) => (
                 <button key={v} onClick={() => setQueueView(v)}
                   className={`px-3 py-1.5 font-medium transition-colors ${
@@ -455,16 +455,16 @@ export default function Calibration() {
                         <tr key={`${d.claim_id}-${d.remittance_date}`} className="hover:bg-slate-50">
                           <td className="px-3 py-2">
                             <div className="flex flex-col gap-1">
-                              <span className={`rounded-full px-2 py-0.5 text-xs w-fit ${PRIORITY_STYLE[d.priority] || "bg-slate-100 text-slate-600"}`}>
+                              <span className={`gh-chip w-fit ${PRIORITY_STYLE[d.priority] || "bg-slate-100 text-slate-600"}`}>
                                 {d.priority}
                               </span>
                               {d.recall_flag && (
-                                <span className="rounded-full px-2 py-0.5 text-xs bg-red-600 text-white font-bold w-fit">
+                                <span className="gh-chip w-fit bg-denied font-bold text-white">
                                   🚨 RECALL
                                 </span>
                               )}
                               {d.recall_type === "PROACTIVE" && (
-                                <span className="rounded-full px-2 py-0.5 text-xs bg-purple-600 text-white font-semibold w-fit">
+                                <span className="gh-chip w-fit bg-ink-deep font-semibold text-white">
                                   ⚡ PROACTIVE
                                 </span>
                               )}
@@ -563,7 +563,7 @@ export default function Calibration() {
                         })}
                       >
                         <span className="text-slate-400 text-sm w-4">{isOpen ? "▾" : "▸"}</span>
-                        <span className={`rounded-full px-2 py-0.5 text-xs ${PRIORITY_STYLE[prio]}`}>{prio}</span>
+                        <span className={`gh-chip ${PRIORITY_STYLE[prio]}`}>{prio}</span>
                         <span className="font-mono text-sm font-semibold text-slate-800 flex-1 truncate" title={g.ra_file_name || g.ra_file_id}>
                           {g.ra_file_name || g.ra_file_id}
                         </span>
@@ -608,7 +608,7 @@ export default function Calibration() {
                               {g.claims.map(d => (
                                 <tr key={`${d.claim_id}-${d.remittance_date}`} className="hover:bg-slate-50/60">
                                   <td className="pl-8 pr-3 py-2">
-                                    <span className={`rounded-full px-2 py-0.5 text-xs ${PRIORITY_STYLE[d.priority]}`}>{d.priority}</span>
+                                    <span className={`gh-chip ${PRIORITY_STYLE[d.priority]}`}>{d.priority}</span>
                                   </td>
                                   <td className="px-3 py-2 font-mono text-xs text-slate-800">{d.claim_id}</td>
                                   <td className="px-3 py-2 text-slate-600 text-xs">

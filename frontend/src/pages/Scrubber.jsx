@@ -57,7 +57,7 @@ function fmtDay(iso) {
 // Download options shared by the single-batch and combined query Excel
 function ExportControls({ value, onChange }) {
   const set = (k) => (e) => onChange({ ...value, [k]: e.target.value });
-  const cls = "rounded-lg border border-slate-300 px-2 py-1.5 text-xs";
+  const cls = "gh-input px-2 py-1.5 text-xs";
   return (
     <div className="flex flex-wrap items-center gap-2">
       <label className="text-xs text-slate-500">Visit date</label>
@@ -147,7 +147,7 @@ function UploadPanel({ onUploaded }) {
   }
 
   return (
-    <form onSubmit={handleUpload} className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+    <form onSubmit={handleUpload} className="gh-section">
       <h2 className="mb-1 text-base font-semibold text-slate-700">Upload batch — ERP test XML or Excel</h2>
       <p className="mb-4 text-xs text-slate-500">
         Excel: one row per activity with columns Claim ID (or Invoice), MRN, Member ID, Payer ID, Receiver ID, Date,
@@ -160,7 +160,7 @@ function UploadPanel({ onUploaded }) {
             required
             value={facilityId}
             onChange={(e) => setFacilityId(e.target.value)}
-            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ghaf-500"
+            className="gh-input w-full"
           >
             <option value="">Select facility…</option>
             {facilities.map((f) => (
@@ -183,12 +183,12 @@ function UploadPanel({ onUploaded }) {
           type="submit"
           disabled={busy || !files.length || !facilityId}
           title={!facilityId ? "Pick a facility first" : !files.length ? "Choose one or more XML / Excel files" : undefined}
-          className="rounded-lg bg-ghaf-600 px-5 py-2 text-sm font-semibold text-white hover:bg-ghaf-700 disabled:opacity-40"
+          className="gh-btn"
         >
           {busy ? `Processing ${progress}…` : files.length > 1 ? `Upload & Scrub ${files.length} files` : "Upload & Scrub"}
         </button>
       </div>
-      {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
+      {error && <p className="mt-2 text-sm text-denied">{error}</p>}
     </form>
   );
 }
@@ -215,7 +215,7 @@ function SessionsList({ refreshKey, onSelect, selectedId, checked, onCheck }) {
   if (!sessions.length) return <p className="py-4 text-sm text-slate-400">No scrub sessions yet.</p>;
 
   return (
-    <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
+    <div className="gh-card overflow-x-auto">
       <table className="min-w-full text-sm">
         <thead className="bg-slate-50 text-xs font-semibold uppercase text-slate-500">
           <tr>
@@ -294,7 +294,7 @@ function RuleCoveragePanel({ sessionId }) {
   if (!summary) return null;
 
   return (
-    <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+    <div className="gh-card p-4">
       <h3 className="mb-3 text-sm font-semibold text-slate-700">
         Rule Coverage — {summary.total_claims} claims checked against all 5 rules
       </h3>
@@ -321,21 +321,21 @@ function RuleCoveragePanel({ sessionId }) {
                 </td>
                 <td className="py-2 text-center">
                   {r.errors > 0
-                    ? <span className="font-bold text-red-600">{r.errors}</span>
+                    ? <span className="font-bold text-denied">{r.errors}</span>
                     : <span className="text-slate-300">0</span>}
                 </td>
                 <td className="py-2 text-center">
                   {r.warnings > 0
-                    ? <span className="font-bold text-yellow-600">{r.warnings}</span>
+                    ? <span className="font-bold text-pending">{r.warnings}</span>
                     : <span className="text-slate-300">0</span>}
                 </td>
                 <td className="py-2 text-center text-slate-500">{r.passed}</td>
                 <td className="py-2 text-center">
                   {r.errors > 0
-                    ? <span className="rounded-full bg-red-100 px-2 py-0.5 text-xs font-semibold text-red-700">Issues found</span>
+                    ? <span className="gh-chip gh-chip-denied">Issues found</span>
                     : r.warnings > 0
-                    ? <span className="rounded-full bg-yellow-100 px-2 py-0.5 text-xs font-semibold text-yellow-700">Warnings</span>
-                    : <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs font-semibold text-green-700">✓ All clear</span>}
+                    ? <span className="gh-chip gh-chip-pending">Warnings</span>
+                    : <span className="gh-chip gh-chip-paid">✓ All clear</span>}
                 </td>
               </tr>
             );
@@ -382,7 +382,7 @@ function ResultsPanel({ sessionId }) {
 
   if (!sessionId) {
     return (
-      <div className="flex h-40 items-center justify-center rounded-xl border border-dashed border-slate-200 text-sm text-slate-400">
+      <div className="flex h-40 items-center justify-center rounded-lg border border-dashed border-hairline text-sm text-slate-400">
         Select a session above to view results
       </div>
     );
@@ -426,7 +426,7 @@ function ResultsPanel({ sessionId }) {
         <span className="flex-1" />
         <button
           onClick={handleExport}
-          className="rounded-lg border border-ghaf-300 bg-white px-4 py-1.5 text-xs font-semibold text-ghaf-700 hover:bg-ghaf-50"
+          className="gh-btn-secondary gh-btn-sm"
         >
           Export Excel
         </button>
@@ -435,7 +435,7 @@ function ResultsPanel({ sessionId }) {
       {loading ? (
         <p className="py-4 text-sm text-slate-400">Loading results…</p>
       ) : (
-        <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
+        <div className="gh-card overflow-x-auto">
           <table className="min-w-full text-sm">
             <thead className="bg-slate-50 text-xs font-semibold uppercase text-slate-500">
               <tr>
@@ -527,7 +527,7 @@ function ExclusionsPanel() {
   return (
     <div className="space-y-6">
       {/* Add form */}
-      <form onSubmit={handleAdd} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+      <form onSubmit={handleAdd} className="gh-section">
         <h3 className="mb-3 text-sm font-semibold text-slate-700">Add Exclusion Code</h3>
         <div className="flex flex-wrap gap-3">
           <select
@@ -562,19 +562,19 @@ function ExclusionsPanel() {
           <button
             type="submit"
             disabled={saving}
-            className="rounded-lg bg-ghaf-600 px-4 py-2 text-sm font-semibold text-white hover:bg-ghaf-700 disabled:opacity-40"
+            className="gh-btn"
           >
             {saving ? "Saving…" : "Add"}
           </button>
         </div>
-        {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
+        {error && <p className="mt-2 text-sm text-denied">{error}</p>}
       </form>
 
       {/* Table */}
       {loading ? (
         <p className="text-sm text-slate-400">Loading…</p>
       ) : (
-        <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
+        <div className="gh-card overflow-x-auto">
           <table className="min-w-full text-sm">
             <thead className="bg-slate-50 text-xs font-semibold uppercase text-slate-500">
               <tr>
@@ -605,7 +605,7 @@ function ExclusionsPanel() {
                     {c.is_active && (
                       <button
                         onClick={() => handleDelete(c.id)}
-                        className="text-xs text-red-500 hover:underline"
+                        className="text-xs text-denied hover:underline"
                       >
                         Remove
                       </button>
@@ -722,7 +722,7 @@ function XmlCheckPanel({ sessionId }) {
     <div className="space-y-4">
       {/* Summary bar */}
       {summary && (
-        <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex flex-wrap items-center gap-3 gh-card p-4">
           <div>
             <p className="text-xs font-semibold uppercase text-slate-400">XML Status</p>
             <Badge label={summary.status} style={SEVERITY_STYLES[summary.status] || SEVERITY_STYLES.PASS} />
@@ -776,7 +776,7 @@ function XmlCheckPanel({ sessionId }) {
       {loading ? (
         <p className="py-4 text-sm text-slate-400">Loading XML findings…</p>
       ) : (
-        <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
+        <div className="gh-card overflow-x-auto">
           <table className="min-w-full text-sm">
             <thead className="bg-slate-50 text-xs font-semibold uppercase text-slate-500">
               <tr>
@@ -862,7 +862,7 @@ function ClaimQueriesPanel({ sessionId }) {
   const corrections = rows.filter((r) => r.status === "CORRECTION APPLIED").length;
 
   return (
-    <div className="rounded-xl border border-slate-200 bg-white shadow-sm">
+    <div className="gh-card">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-4">
         <div className="text-sm text-slate-600">
           <span className="font-semibold text-slate-800">{rows.length}</span> queries on{" "}
@@ -875,13 +875,13 @@ function ClaimQueriesPanel({ sessionId }) {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <select value={type} onChange={(e) => setType(e.target.value)}
-            className="rounded-lg border border-slate-300 px-2 py-1.5 text-xs">
+            className="gh-input px-2 py-1.5 text-xs">
             <option value="ALL">All query types</option>
             {types.map((t) => <option key={t} value={t}>{t}</option>)}
           </select>
           <ExportControls value={opts} onChange={setOpts} />
           <button onClick={handleDownload} disabled={!rows.length} title={!rows.length ? "No queries in this batch" : undefined}
-            className="rounded-lg bg-ghaf-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-ghaf-700 disabled:opacity-40">
+            className="gh-btn gh-btn-sm">
             Download query Excel
           </button>
         </div>
@@ -989,7 +989,7 @@ export default function Scrubber() {
     }`;
 
   return (
-    <div className="mx-auto max-w-7xl space-y-6 p-6">
+    <div className="space-y-6">
       {/* Page header */}
       <div>
         <p className="gh-eyebrow">Pre-submission</p>
@@ -1052,7 +1052,7 @@ export default function Scrubber() {
               </span>
               <ExportControls value={combinedOpts} onChange={setCombinedOpts} />
               <button onClick={handleCombinedDownload} disabled={!checked.length} title={!checked.length ? "Tick one or more batches below first" : undefined}
-                className="rounded-lg bg-ghaf-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-ghaf-700 disabled:opacity-40">
+                className="gh-btn gh-btn-sm">
                 Download combined query Excel
               </button>
             </div>

@@ -183,6 +183,15 @@ def _matcher(playbook: List[ResubPlaybook]):
     return match
 
 
+def _valid_until(first_sub, fallback):
+    """Claim validity: 24 months from the first submission (SN 03/2019 3.10.5, eClaimLink archiving)."""
+    d = first_sub or fallback
+    try:
+        return d.replace(year=d.year + 2)
+    except ValueError:   # 29 Feb
+        return d.replace(year=d.year + 2, day=28)
+
+
 def norm_code(c: Optional[str]) -> str:
     return (c or "").split("|")[0].split(",")[0].strip().upper() or "—"
 
@@ -262,7 +271,7 @@ WITH den AS (
 )
 SELECT den.*,
        c.encounter_start::date AS treatment_date, c.receiver_id, c.receiver_name, c.payer_name,
-       c.clinician_name, c.member_id, c.payer_id AS claim_payer_id,
+       c.clinician_name, c.member_id, c.payer_id AS claim_payer_id, c.submission_date::date AS first_sub,
        (SELECT count(*) FROM claim_activities a WHERE a.claim_id_fk = c.id) AS claim_activities,
        c.net_amount AS claim_net,
        (SELECT a.authorization_id FROM claim_activities a
@@ -276,8 +285,9 @@ LEFT JOIN LATERAL (SELECT * FROM claims c WHERE c.facility_id = den.facility_id 
                    AND c.resubmission_key = '' ORDER BY c.id LIMIT 1) c ON true
 """)
 
-# Reconciliation has no 21-day clock from the RA (the 2nd resubmission is due 21 days from the
-# reconciliation date), so eligible claims are kept from RECON_SINCE onward, not just the window.
+# Reconciliation (the 2nd and last resubmission) has no 21-day clock (SN 03/2019 3.10.4): it is allowed only
+# after the facility and the payer agree (3.10.1), within the 24-month claim validity (3.10.5). Eligible
+# claims are kept from RECON_SINCE onward, not just the window.
 RECON_SINCE = date(2026, 1, 1)
 _RECON_SQL = text("SELECT * FROM (" + _OPEN_SQL.text + ") q WHERE q.resub_before AND NOT q.resub_after")
 
@@ -577,14 +587,15 @@ def build_worklist(db: Session, fid: int, window: int = WINDOW_DAYS, recon_histo
         elif status in CLOSED_BY_TEAM:
             bucket = "closed_team"
         elif reconciliation and status == RECON_AGREED:
-            # facility confirmed mutual agreement with the payer: Ghaf resubmits as type Reconciliation
-            # within 21 days of the reconciliation (agreement) date
+            # facility confirmed mutual agreement with the payer: Ghaf resubmits as type Reconciliation.
+            # No SN time limit (3.10.4); the claim must still be within its 24-month validity (3.10.5).
             bucket = "open"
-            agreed_on = t.updated_at.date() if t and t.updated_at else today
-            deadline = agreed_on + timedelta(days=WINDOW_DAYS)
+            deadline = _valid_until(r.first_sub, r.ra_date)
             days_left = (deadline - today).days
         elif reconciliation:
             bucket = "reconciliation"   # second denial: sent to the facility, who takes it up with the payer
+            deadline = _valid_until(r.first_sub, r.ra_date)
+            days_left = (deadline - today).days
         elif days_left < 0:
             bucket = "expired"
         else:
@@ -629,8 +640,9 @@ def build_worklist(db: Session, fid: int, window: int = WINDOW_DAYS, recon_histo
             "route": "Reconciliation" if reconciliation else "Resubmission",
             "recon_remark": (RECON_REMARKS.get(pb.category if pb else "Other", RECON_DEFAULT)
                              if reconciliation else None),
+            "valid_until": deadline.isoformat() if reconciliation else None,
             "action": (("Facility confirmed agreement with the payer — resubmit this claim under resubmission type "
-                        "'Reconciliation' before the deadline (21 days from the reconciliation date).")
+                        "'Reconciliation'. No SN time limit (3.10.4); the claim must be within its 24-month validity.")
                        if reconciliation and status == RECON_AGREED else
                        ("Denied again after resubmission — reconciliation. Ghaf sends it to the facility in the "
                         "month-end reconciliation pack; the facility takes it up with the payer and, once mutually "
@@ -760,7 +772,8 @@ def to_workbook(facility_name: str, data: dict, audience: str = "ghaf"):
                 ("Treatment Date", "treatment_date"), ("RA Date", "ra_date"), ("Receiver", "receiver"), ("Payer", "payer"), ("Member ID", "member_id"),
                 ("Auth ID", "authorization_id"), ("Clinician", "clinician"), ("Activity Code", "activity_code"),
                 ("Denial Code", "denial_code"), ("Denial Reason", "denial_reason"), ("Denied (AED)", "denied"),
-                ("Category", "category"), ("Suggested Remark to Payer", "recon_remark"),
+                ("Category", "category"), ("Claim Valid Until (24 months)", "valid_until"),
+                ("Suggested Remark to Payer", "recon_remark"),
                 ("Outcome with Payer (Agreed / Not agreed, date)", "facility_reply")]
         recon = [x for x in items if x["bucket"] == "reconciliation"]
         by_rcv = defaultdict(list)
@@ -772,7 +785,9 @@ def to_workbook(facility_name: str, data: dict, audience: str = "ghaf"):
         team_from = len(cols) - 1
         intro = (f"{facility_name} — claims eligible for reconciliation (denied again after resubmission). "
                  f"Please take these up with the payer. Once mutually agreed, record the outcome and date in the "
-                 f"last column and inform Ghaf — we will resubmit under type 'Reconciliation' within 21 days.")
+                 f"last column and inform Ghaf — we will then resubmit under type 'Reconciliation'. "
+                 f"As per DHA SN 03/2019, reconciliation needs agreement with the payer (3.10.1) and has no 21-day "
+                 f"limit (3.10.4); claims stay valid for 24 months from submission (3.10.5).")
     elif audience == "facility":
         cols = [("Priority", "priority"), ("Days Left", "days_left"), ("Reply By", "reply_by"),
                 ("Claim ID", "claim_id"), ("Activity ID", "activity_id"), ("Denied / Claimed Activities", "denied_of"),

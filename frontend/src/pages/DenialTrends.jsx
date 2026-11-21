@@ -59,6 +59,82 @@ function Coverage({ c }) {
   return <span className="gh-chip gh-chip-denied">no rule</span>;
 }
 
+const STAGE_LABEL = { new: "New denials", redenied: "Re-denied after resubmission", all: "All denials" };
+
+function Outcomes({ facilityId, payer }) {
+  const [months, setMonths] = useState(3);
+  const [d, setD] = useState(null);
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    setD(null); setErr("");
+    const params = { months };
+    if (facilityId) params.facility_id = facilityId;
+    if (payer) params.payer = payer;
+    apiClient.get("/denial-trends/resub-outcomes", { params, timeout: 300000 })
+      .then(r => setD(r.data)).catch(e => setErr(e?.response?.data?.detail || "Could not load outcomes"));
+  }, [facilityId, payer, months]);
+  const t = d?.totals;
+  const answered = t ? t.paid_full + t.paid_part + t.redenied : 0;
+  const n = v => (v == null ? "—" : Math.round(v).toLocaleString());
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="max-w-3xl text-sm text-slate-600">
+          What happened to the lines the team <b>resubmitted</b>, by payer and original denial code. <b>Success</b> =
+          paid in full or in part on the resubmission RA. <b>Re-denied</b> lines can only go to reconciliation with the
+          insurer (Resubmission worklist → Reconciliation). Use a low success rate to change the approach or stop
+          routine resubmission for that code.
+        </p>
+        <select className="gh-input py-1.5 text-sm" value={months} onChange={e => setMonths(Number(e.target.value))}>
+          {[1, 3, 6, 12].map(m => <option key={m} value={m}>Resubmitted in last {m} month{m > 1 ? "s" : ""}</option>)}
+        </select>
+      </div>
+      {err && <p className="text-sm text-denied">{err}</p>}
+      {!d && !err && <p className="text-sm text-slate-500">Matching resubmissions with their remittances…</p>}
+      {t && (
+        <div className="grid gap-3 sm:grid-cols-4">
+          <div className="gh-card p-4"><p className="gh-label">Lines resubmitted</p><p className="mt-1 text-2xl font-semibold">{n(t.lines)}</p><p className="text-xs text-slate-500">AED {n(t.denied_amount)} originally denied</p></div>
+          <div className="gh-card p-4"><p className="gh-label">Awaiting resubmission RA</p><p className="mt-1 text-2xl font-semibold">{n(t.pending)}</p><p className="text-xs text-slate-500">insurer must answer within 30 days (SN 3.9.2)</p></div>
+          <div className="gh-card border-l-4 border-l-paid p-4"><p className="gh-label">Paid after resubmission</p><p className="mt-1 text-2xl font-semibold">{answered ? Math.round(100 * (t.paid_full + t.paid_part) / answered) : 0}%</p><p className="text-xs text-slate-500">AED {n(t.recovered)} recovered</p></div>
+          <div className="gh-card border-l-4 border-l-denied p-4"><p className="gh-label">Re-denied</p><p className="mt-1 text-2xl font-semibold">{answered ? Math.round(100 * t.redenied / answered) : 0}%</p><p className="text-xs text-slate-500">AED {n(t.redenied_amount)} → reconciliation</p></div>
+        </div>
+      )}
+      {d && (
+        <section className="gh-card overflow-x-auto p-4">
+          <table className="min-w-full text-sm">
+            <thead className="text-left text-xs uppercase tracking-wide text-slate-500">
+              <tr><th className="py-2 pr-3">Payer</th><th className="py-2 pr-3">Original code</th>
+                <th className="py-2 pr-3 text-right">Lines</th><th className="py-2 pr-3 text-right">Awaiting RA</th>
+                <th className="py-2 pr-3 text-right">Paid</th><th className="py-2 pr-3 text-right">Re-denied</th>
+                <th className="py-2 pr-3 text-right">Success</th><th className="py-2 pr-3 text-right">Recovered AED</th>
+                <th className="py-2 pr-3 text-right">Re-denied AED</th><th className="py-2">Top re-denial remark</th></tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {d.rows.slice(0, 60).map(r => (
+                <tr key={r.payer + r.denial_code}>
+                  <td className="py-1.5 pr-3">{r.payer}<span className="block max-w-[180px] truncate text-xs text-slate-500">{r.payer_name}</span></td>
+                  <td className="py-1.5 pr-3"><span className="font-mono">{r.denial_code}</span><span className="block max-w-[220px] truncate text-xs text-slate-500">{r.description}</span></td>
+                  <td className="py-1.5 pr-3 text-right tabular-nums">{n(r.lines)}</td>
+                  <td className="py-1.5 pr-3 text-right tabular-nums text-slate-500">{n(r.pending)}</td>
+                  <td className="py-1.5 pr-3 text-right tabular-nums">{n(r.paid_full + r.paid_part)}</td>
+                  <td className="py-1.5 pr-3 text-right tabular-nums">{n(r.redenied)}</td>
+                  <td className="py-1.5 pr-3 text-right tabular-nums">
+                    {r.success_pct == null ? "—" : <span className={`gh-chip ${r.success_pct < 20 ? "gh-chip-denied" : r.success_pct < 50 ? "gh-chip-pending" : "gh-chip-paid"}`}>{Math.round(r.success_pct)}%</span>}
+                  </td>
+                  <td className="py-1.5 pr-3 text-right tabular-nums">{n(r.recovered)}</td>
+                  <td className="py-1.5 pr-3 text-right tabular-nums">{n(r.redenied_amount)}</td>
+                  <td className="max-w-[260px] py-1.5 text-xs text-slate-600">{r.top_redenial_remark || "—"}</td>
+                </tr>
+              ))}
+              {!d.rows.length && <tr><td colSpan={10} className="py-4 text-center text-slate-500">No resubmissions in this period.</td></tr>}
+            </tbody>
+          </table>
+        </section>
+      )}
+    </div>
+  );
+}
+
 export default function DenialTrends() {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
@@ -71,8 +147,10 @@ export default function DenialTrends() {
   const [month, setMonth] = useState(() => params.get("month") || "");
   const [exporting, setExporting] = useState(false);
   const [drill, setDrill] = useState(null);
+  const [stage, setStage] = useState("new");
+  const [view, setView] = useState("trends");
   const exportXlsx = async () => {
-    const q = new URLSearchParams({ months: String(months) });
+    const q = new URLSearchParams({ months: String(months), stage });
     if (facilityId) q.set("facility_id", facilityId);
     if (payer) q.set("payer", payer);
     setExporting(true);
@@ -99,7 +177,7 @@ export default function DenialTrends() {
   }, [isAdmin]);
 
   useEffect(() => {
-    const params = { months };
+    const params = { months, stage };
     if (facilityId) params.facility_id = facilityId;
     if (payer) params.payer = payer;
     setLoading(true); setError("");
@@ -116,7 +194,7 @@ export default function DenialTrends() {
       })
       .catch(e => setError(e?.response?.data?.detail || "Could not load denial trends"))
       .finally(() => setLoading(false));
-  }, [facilityId, payer, months]);
+  }, [facilityId, payer, months, stage]);
 
   const payerOptions = monthly?.payers || [];
   const [attnFirst, setAttnFirst] = useState(true);
@@ -148,6 +226,25 @@ export default function DenialTrends() {
           {exporting ? "Preparing…" : "Download Excel"}
         </button>
       </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200">
+        <div className="flex gap-1">
+          {[["trends", "Denial trends (new denials)"], ["outcomes", "Resubmission outcomes"]].map(([k, l]) => (
+            <button key={k} onClick={() => setView(k)}
+              className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium ${view === k ? "border-ghaf-600 text-ghaf-700" : "border-transparent text-slate-500 hover:text-slate-700"}`}>{l}</button>
+          ))}
+        </div>
+        {view === "trends" && (
+          <div className="flex items-center gap-1 pb-1 text-xs">
+            {Object.entries(STAGE_LABEL).map(([k, l]) => (
+              <button key={k} onClick={() => setStage(k)} className={`gh-chip ${stage === k ? "gh-chip-brand" : "gh-chip-neutral"}`}>{l}</button>
+            ))}
+          </div>
+        )}
+      </div>
+      {view === "trends" && stage === "new" && (
+        <p className="-mt-3 text-xs text-slate-500">Counting lines denied on the claim's <b>first</b> remittance only — the current denial pattern. Denials of resubmitted claims are on the Resubmission outcomes tab.</p>
+      )}
 
       <section className="gh-section">
         <div className="flex flex-wrap items-end gap-3">
@@ -187,6 +284,7 @@ export default function DenialTrends() {
         {loading && <p className="mt-3 text-sm text-slate-500">Loading… (first load of all facilities can take ~10 s)</p>}
         {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
       </section>
+      {view === "outcomes" ? <Outcomes facilityId={facilityId} payer={payer} /> : (<>
 
       {monthly && (
         <div className="grid gap-4 md:grid-cols-4">
@@ -221,7 +319,7 @@ export default function DenialTrends() {
       <section className="gh-card overflow-x-auto p-4">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <p className="gh-eyebrow">
-            Top denial codes by payer · RA {monthLabel(month)}
+            Top denial codes by payer · RA {monthLabel(month)} · {STAGE_LABEL[stage].toLowerCase()}
             {isPartial ? " · compared with the same days of last month" : " · compared with the previous month"}
           </p>
           <label className="flex items-center gap-2 text-xs text-slate-600">
@@ -298,7 +396,8 @@ export default function DenialTrends() {
           </tbody>
         </table>
       </section>
-      {drill && <DenialDrill code={drill.code} payer={drill.payer} facilityId={facilityId} month={drill.month} onClose={() => setDrill(null)} />}
+      </>)}
+      {drill && <DenialDrill code={drill.code} payer={drill.payer} facilityId={facilityId} month={drill.month} stage={stage} onClose={() => setDrill(null)} />}
     </div>
   );
 }

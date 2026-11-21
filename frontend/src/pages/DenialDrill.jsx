@@ -26,7 +26,49 @@ function Bars({ title, rows, label, sub }) {
   );
 }
 
-export default function DenialDrill({ code, payer, facilityId, month, onClose }) {
+function Patterns({ rows }) {
+  if (!rows?.length) return null;
+  const clean = t => (t || "").replace(/^\s*\d+[.)]\s*/, "").replace(/\{[^}]*\}/g, "").split("~")[0].trim();
+  const rate = v => (v == null ? "—" : `${Math.round(v)}%`);
+  return (
+    <section>
+      <h3 className="gh-label">Patterns: service × principal diagnosis</h3>
+      <p className="mb-2 mt-0.5 text-xs text-slate-500">
+        Which service is denied with which principal diagnosis. <b>Denial rate</b> = these denied lines ÷ all remitted
+        lines of the same service with the same principal diagnosis (same TPA, facility and RA period). A high rate on
+        many lines is a payer rule worth adding to the scrubber.
+      </p>
+      <div className="overflow-x-auto">
+        <table className="min-w-full text-sm">
+          <thead className="text-left text-xs uppercase tracking-wide text-slate-500">
+            <tr><th className="py-1.5 pr-3">Service</th><th className="py-1.5 pr-3">Principal Dx</th>
+              <th className="py-1.5 pr-3 text-right">Denied</th><th className="py-1.5 pr-3 text-right">AED</th>
+              <th className="py-1.5 pr-3 text-right">Denial rate</th><th className="py-1.5 pr-3">Most used TPA remark</th>
+              <th className="py-1.5">Main clinician</th></tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {rows.map((p, i) => (
+              <tr key={i} className={p.denial_rate_pct >= 70 && p.lines >= 10 ? "bg-denied/5" : ""}>
+                <td className="py-1.5 pr-3 font-mono text-xs">{p.activity_code}{p.activity && <span className="block font-sans text-slate-500">{p.activity}</span>}</td>
+                <td className="py-1.5 pr-3 font-mono text-xs">{p.diagnosis_code}{p.diagnosis && <span className="block font-sans text-slate-500">{p.diagnosis}</span>}</td>
+                <td className="py-1.5 pr-3 text-right tabular-nums">{p.lines.toLocaleString()}</td>
+                <td className="py-1.5 pr-3 text-right tabular-nums">{Math.round(p.amount).toLocaleString()}</td>
+                <td className="py-1.5 pr-3 text-right tabular-nums">
+                  <span className={p.denial_rate_pct >= 70 ? "font-semibold text-denied" : ""}>{rate(p.denial_rate_pct)}</span>
+                  {p.remitted_lines ? <span className="block text-xs text-slate-400">of {p.remitted_lines}</span> : null}
+                </td>
+                <td className="py-1.5 pr-3 text-xs text-slate-700">{clean(p.remark) || "—"}</td>
+                <td className="py-1.5 text-xs">{p.clinician || "—"}{p.clinician_share_pct != null && <span className="text-slate-400"> · {p.clinician_share_pct}%</span>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+export default function DenialDrill({ code, payer, facilityId, month, stage = "new", onClose }) {
   const [d, setD] = useState(null);
   const [err, setErr] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -34,6 +76,7 @@ export default function DenialDrill({ code, payer, facilityId, month, onClose })
   if (payer) q.set("payer", payer);
   if (facilityId) q.set("facility_id", facilityId);
   if (month) q.set("month", month);
+  q.set("stage", stage);
 
   useEffect(() => {
     setD(null); setErr(null);
@@ -89,6 +132,7 @@ export default function DenialDrill({ code, payer, facilityId, month, onClose })
                 SN 03/2019 6.1.3 makes a denial comment mandatory — worth raising with the TPA.
               </p>
             )}
+            <Patterns rows={d.patterns} />
             <Bars title="TPA reasons (comment themes)" rows={d.themes} label={r => r.theme} />
             <Bars title="Services denied" rows={d.activities} label={r => r.activity_code} sub={r => r.description} />
             <div className="grid gap-6 md:grid-cols-2">

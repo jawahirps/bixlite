@@ -39,10 +39,72 @@ function fmtDate(s) {
   return `${d}/${m}/${y}`;
 }
 
-function DaysChip({ d, bucket }) {
+function DaysChip({ d, bucket, route }) {
+  if (route === "Reconciliation") return <span className="gh-chip gh-chip-brand" title="SN 03/2019 3.10.4: no 21-day limit for reconciliation; the claim is valid 24 months from submission">No 21-day limit</span>;
   if (bucket === "expired" || d < 0) return <span className="gh-chip gh-chip-neutral">Expired</span>;
   if (d <= 5) return <span className="gh-chip gh-chip-pending font-bold">{d}d left</span>;
   return <span className="gh-chip gh-chip-paid">{d}d left</span>;
+}
+
+function ReconSummary({ rows, onPick }) {
+  const groups = useMemo(() => {
+    const m = new Map();
+    for (const x of rows) {
+      const k = `${x.receiver || "—"}|${x.denial_code}`;
+      const g = m.get(k) || { receiver: x.receiver || "—", code: x.denial_code, claims: new Set(), lines: 0, denied: 0, status: {} };
+      g.claims.add(x.claim_id); g.lines += 1; g.denied += x.denied;
+      g.status[x.status] = (g.status[x.status] || 0) + 1;
+      m.set(k, g);
+    }
+    return [...m.values()].sort((a, b) => b.denied - a.denied);
+  }, [rows]);
+  const [all, setAll] = useState(false);
+  if (!rows.length) return null;
+  const tot = rows.reduce((a, x) => a + x.denied, 0);
+  const st = s => ["Sent to facility (reconciliation)", "Facility discussing with payer"].includes(s) ? "gh-chip-pending" : s === "New" ? "gh-chip-neutral" : "gh-chip-brand";
+  return (
+    <section className="gh-card p-4">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h2 className="gh-section-title">By insurer and denial code</h2>
+        <p className="text-xs text-slate-500">{rows.length.toLocaleString()} lines · AED {Math.round(tot).toLocaleString()}</p>
+      </div>
+      <p className="mb-2 mt-0.5 text-xs text-slate-500">
+        Claims denied again after resubmission. Reconciliation (the 2nd and last resubmission) is allowed only after the
+        facility and the insurer agree (SN 03/2019 3.10.1), so send these to the facility to take up with the insurer.
+        No 21-day limit (3.10.4); claims stay valid 24 months from submission (3.10.5). Click a row to filter the list.
+      </p>
+      <div className="overflow-x-auto">
+        <table className="min-w-full text-sm">
+          <thead className="text-left text-xs uppercase tracking-wide text-slate-500">
+            <tr><th className="py-1.5 pr-3">Receiver / insurer</th><th className="py-1.5 pr-3">Denial code</th>
+              <th className="py-1.5 pr-3 text-right">Claims</th><th className="py-1.5 pr-3 text-right">Lines</th>
+              <th className="py-1.5 pr-3 text-right">Denied AED</th><th className="py-1.5">Status</th></tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {groups.slice(0, all ? undefined : 12).map(g => (
+              <tr key={g.receiver + g.code} className="cursor-pointer hover:bg-sage-mint" onClick={() => onPick(`${g.code}`, g.receiver)}>
+                <td className="py-1.5 pr-3">{g.receiver}</td>
+                <td className="py-1.5 pr-3 font-mono text-xs">{g.code}</td>
+                <td className="py-1.5 pr-3 text-right tabular-nums">{g.claims.size.toLocaleString()}</td>
+                <td className="py-1.5 pr-3 text-right tabular-nums">{g.lines.toLocaleString()}</td>
+                <td className="py-1.5 pr-3 text-right tabular-nums">{Math.round(g.denied).toLocaleString()}</td>
+                <td className="py-1.5">
+                  <div className="flex flex-wrap gap-1">
+                    {Object.entries(g.status).map(([k, v]) => <span key={k} className={`gh-chip ${st(k)}`}>{k.replace(" (reconciliation)", "")}: {v}</span>)}
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {groups.length > 12 && (
+        <button className="mt-2 text-sm text-ghaf-600 hover:underline" onClick={() => setAll(v => !v)}>
+          {all ? "Show top 12" : `Show all ${groups.length}`}
+        </button>
+      )}
+    </section>
+  );
 }
 
 function CopyButton({ text }) {
@@ -332,6 +394,10 @@ export default function ResubWorklist() {
         <Playbook rows={playbook} setRows={setPlaybook} canEdit={canEditPlaybook} setError={setError} />
       ) : (
         <>
+          {tab === "reconciliation" && (
+            <ReconSummary rows={lists.reconciliation}
+              onPick={(code, rec) => setFilters(f => ({ ...f, q: `${code}` }))} />
+          )}
           {/* Filters */}
           <div className="flex flex-wrap gap-2">
             <input placeholder="Search claim, code, receiver, payer, auth ID, clinician, member…" value={filters.q}
@@ -427,8 +493,8 @@ function Row({ x, expanded, onToggle, onSave, saving, statuses, facilityView, ne
           {x.is_new && <span className="ml-1 rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700">NEW</span>}
         </td>
         <td className="whitespace-nowrap px-3 py-2">
-          <DaysChip d={x.days_left} bucket={x.bucket} />
-          <div className="mt-0.5 text-xs text-slate-600">{fmtDate(x.deadline)}</div>
+          <DaysChip d={x.days_left} bucket={x.bucket} route={x.route} />
+          <div className="mt-0.5 text-xs text-slate-600">{x.route === "Reconciliation" ? `valid to ${fmtDate(x.deadline)}` : fmtDate(x.deadline)}</div>
         </td>
         <td className={`px-3 py-2 ${nested ? "pl-8" : ""}`}>
           {nested
@@ -561,8 +627,8 @@ function ClaimGroup({ g, open, onToggle, onSaveAll, facilityView, statuses, chil
           {g.lines.some(l => l.is_new) && <span className="ml-1 rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700">NEW</span>}
         </td>
         <td className="whitespace-nowrap px-3 py-2">
-          <DaysChip d={g.days_left} bucket={x.bucket} />
-          <div className="mt-0.5 text-xs text-slate-600">{fmtDate(x.deadline)}</div>
+          <DaysChip d={g.days_left} bucket={x.bucket} route={x.route} />
+          <div className="mt-0.5 text-xs text-slate-600">{x.route === "Reconciliation" ? `valid to ${fmtDate(x.deadline)}` : fmtDate(x.deadline)}</div>
         </td>
         <td className="px-3 py-2">
           <div className="flex items-center gap-2 font-semibold text-slate-800">

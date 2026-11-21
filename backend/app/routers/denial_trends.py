@@ -97,6 +97,19 @@ def _month_start(months_back: int) -> date:
     return date(y, m, 1)
 
 
+# A line is a NEW denial when it is on the claim's first remittance (no resubmission before the RA);
+# otherwise it is a RE-DENIAL of a resubmission. Trends use new denials only (the current pattern);
+# re-denials are analysed on the Resubmission outcomes tab.
+_REDENIED = ("EXISTS (SELECT 1 FROM claims x WHERE x.facility_id = r.facility_id AND x.claim_id = r.claim_id "
+             "AND x.resubmission_key IN ('internal complaint', 'correction', 'reconciliation') "
+             "AND x.submission_date::date < r.remittance_date::date)")
+STAGES = ("new", "redenied", "all")
+
+
+def _stage_sql(stage: str) -> str:
+    return {"new": f"AND NOT {_REDENIED}", "redenied": f"AND {_REDENIED}"}.get(stage, "")
+
+
 _AGG_SQL = """
 SELECT to_char(r.remittance_date, 'YYYY-MM') AS month,
        upper(coalesce(nullif(c.receiver_id, ''), nullif(c.payer_id, ''), r.payer_id)) AS payer,
@@ -112,17 +125,17 @@ LEFT JOIN claims c ON c.facility_id = r.facility_id AND c.claim_id = r.claim_id 
 WHERE r.remittance_date >= :since
   AND r.facility_id NOT IN (SELECT id FROM facilities WHERE facility_code = 'GHAF-001')
   AND d.denial_code IS NOT NULL AND d.denial_code <> ''
-  {fac} {payer}
+  {fac} {payer} {stage}
 GROUP BY 1, 2, 4
 """
 
 
-def _aggregate(db: Session, fid: Optional[int], payer: Optional[str], months: int) -> list[dict]:
-    key = ("agg", fid, payer, months, date.today())
+def _aggregate(db: Session, fid: Optional[int], payer: Optional[str], months: int, stage: str = "new") -> list[dict]:
+    key = ("agg", fid, payer, months, stage, date.today())
     hit = _CACHE.get(key)
     if hit and time.time() - hit[0] < TTL:
         return hit[1]
-    sql = _AGG_SQL.format(fac="AND r.facility_id = :fid" if fid else "",
+    sql = _AGG_SQL.format(fac="AND r.facility_id = :fid" if fid else "", stage=_stage_sql(stage),
                           payer="AND upper(coalesce(nullif(c.receiver_id, ''), nullif(c.payer_id, ''), r.payer_id)) = upper(:payer)" if payer else "")
     # one extra month so the first displayed month has a "previous" to compare with
     rows = [dict(r) for r in db.execute(text(sql), {"since": _month_start(months), "fid": fid,
@@ -141,6 +154,7 @@ def _pct(cur: float, prev: float) -> Optional[float]:
 def monthly(
     facility_id: Optional[int] = None,
     payer: Optional[str] = None,
+    stage: str = Query("new", pattern="^(new|redenied|all)$"),
     months: int = Query(6, ge=1, le=24),
     top: int = Query(15, ge=1, le=100),
     db: Session = Depends(get_db),
@@ -148,7 +162,7 @@ def monthly(
 ):
     """Top denial codes per payer per month with change vs the previous month."""
     fid = _scope(user, facility_id)
-    rows = _aggregate(db, fid, payer, months)
+    rows = _aggregate(db, fid, payer, months, stage)
     all_months = sorted({r["month"] for r in rows})
     shown = all_months[-months:]
     prev_of = {m: (all_months[i - 1] if i else None) for i, m in enumerate(all_months)}
@@ -164,7 +178,7 @@ def monthly(
         pm_cut = pm_start.replace(day=min(today.day - 1, 28 if pm_start.month == 2 else 30))
         sql = _AGG_SQL.replace("WHERE r.remittance_date >= :since",
                                "WHERE r.remittance_date >= :since AND r.remittance_date <= :cut").format(
-            fac="AND r.facility_id = :fid" if fid else "",
+            fac="AND r.facility_id = :fid" if fid else "", stage=_stage_sql(stage),
             payer="AND upper(coalesce(nullif(c.receiver_id, ''), nullif(c.payer_id, ''), r.payer_id)) = upper(:payer)" if payer else "")
         for r in db.execute(text(sql), {"since": pm_start, "cut": pm_cut, "fid": fid, "payer": payer}).mappings():
             mtd_prev[(r["payer"], r["code"])] = (int(r["lines"]), float(r["amount"] or 0))
@@ -223,13 +237,14 @@ def monthly(
 def rule_coverage(
     facility_id: Optional[int] = None,
     payer: Optional[str] = None,
+    stage: str = Query("new", pattern="^(new|redenied|all)$"),
     months: int = Query(6, ge=1, le=24),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     """Per denial code: volume, amount, trend, and which scrubber rules / playbook entries cover it."""
     fid = _scope(user, facility_id)
-    rows = _aggregate(db, fid, payer, months)
+    rows = _aggregate(db, fid, payer, months, stage)
     all_months = sorted({r["month"] for r in rows})
     shown = set(all_months[-months:])
     # trend compares the last two COMPLETE months (the current month is partial)
@@ -296,6 +311,7 @@ def rule_coverage(
 def export_xlsx(
     facility_id: Optional[int] = None,
     payer: Optional[str] = None,
+    stage: str = Query("new", pattern="^(new|redenied|all)$"),
     months: int = Query(6, ge=1, le=24),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -307,8 +323,8 @@ def export_xlsx(
     from openpyxl.styles import Font, PatternFill
     from openpyxl.utils import get_column_letter
 
-    m = monthly(facility_id=facility_id, payer=payer, months=months, top=100, db=db, user=user)
-    cov = rule_coverage(facility_id=facility_id, payer=payer, months=months, db=db, user=user)
+    m = monthly(facility_id=facility_id, payer=payer, stage=stage, months=months, top=100, db=db, user=user)
+    cov = rule_coverage(facility_id=facility_id, payer=payer, stage=stage, months=months, db=db, user=user)
     wb = Workbook()
 
     def sheet(ws, header, rows, money=()):
@@ -380,9 +396,67 @@ LEFT JOIN claims c ON c.facility_id = r.facility_id AND c.claim_id = r.claim_id 
 LEFT JOIN claim_activities a ON a.claim_id_fk = c.id AND a.activity_id = d.activity_id
 WHERE r.remittance_date >= :since AND r.remittance_date < :until
   AND d.denial_code = :code
-  {fac} {payer}
+  {fac} {payer} {stage}
 LIMIT 50000
 """
+
+
+_RATE_SQL = """
+SELECT d.activity_code act,
+       split_part((SELECT dx.diagnosis_code FROM claim_diagnoses dx WHERE dx.claim_id_fk = c.id
+                   ORDER BY (dx.diagnosis_type ILIKE 'principal') DESC, dx.sequence_no NULLS LAST LIMIT 1), ' ', 1) dx,
+       count(*) n
+FROM remittances r
+JOIN remittance_activity_details d ON d.remittance_id_fk = r.id
+JOIN facilities f ON f.id = r.facility_id AND f.facility_code <> 'GHAF-001'
+LEFT JOIN claims c ON c.facility_id = r.facility_id AND c.claim_id = r.claim_id AND c.resubmission_key = ''
+WHERE r.remittance_date >= :since AND r.remittance_date < :until
+  AND d.activity_code = ANY(:acts)
+  {fac} {payer} {stage}
+GROUP BY 1, 2
+"""
+
+
+def _patterns(db, rows, fid, payer, month, months, top_n=12, stage="new"):
+    """Service x principal diagnosis pairs behind a denial code, with how often the pair is denied when
+    remitted (same RA window, payer and facility), the most used TPA remark and the main clinician."""
+    from collections import Counter, defaultdict
+    if not rows:
+        return []
+    g = defaultdict(list)
+    for r in rows:
+        dxc = (r["dx"] or "—").split(" ", 1)[0]
+        g[(r["activity_code"] or "—", dxc)].append(r)
+    total = len(rows)
+    top = sorted(g.items(), key=lambda kv: -sum(x["amt"] for x in kv[1]))[:top_n]
+    since, until = _month_range(month, months)
+    sql = _RATE_SQL.format(
+        fac="AND r.facility_id = :fid" if fid else "", stage=_stage_sql(stage),
+        payer="AND upper(coalesce(nullif(c.receiver_id, ''), nullif(c.payer_id, ''), r.payer_id)) = upper(:payer)" if payer else "")
+    billed = {(x.act, x.dx): x.n for x in db.execute(text(sql), {
+        "since": since, "until": until, "fid": fid, "payer": payer,
+        "acts": list({k[0] for k, _ in top})})}
+    out = []
+    for (act, dxc), rs in top:
+        themes = Counter(t for x in rs for t in x["themes"])
+        clin = Counter(x["clin"] for x in rs).most_common(1)
+        ex_theme = themes.most_common(1)
+        example = None
+        if ex_theme:
+            example = next((x["tpa_comments"] for x in rs if ex_theme[0][0] in x["themes"]), None)
+        n_b = billed.get((act, dxc))
+        out.append({
+            "activity_code": act, "activity": rs[0]["adesc"], "diagnosis_code": dxc,
+            "diagnosis": (rs[0]["dx"] or "").split(" ", 1)[1] if " " in (rs[0]["dx"] or "") else "",
+            "lines": len(rs), "claims": len({x["rid"] for x in rs}),
+            "amount": round(sum(x["amt"] for x in rs), 2), "share_pct": round(100 * len(rs) / total, 1),
+            "remitted_lines": n_b, "denial_rate_pct": round(100 * len(rs) / n_b, 1) if n_b else None,
+            "remark": (example or "")[:200] if example else None,
+            "remark_lines": ex_theme[0][1] if ex_theme else 0,
+            "clinician": clin[0][0] if clin else None,
+            "clinician_share_pct": round(100 * clin[0][1] / len(rs)) if clin else None,
+        })
+    return out
 
 _ID_TOKEN = re.compile(r"\b(?=[A-Za-z0-9/._-]*\d)[A-Za-z0-9/._-]{3,}\b")
 
@@ -409,14 +483,14 @@ def _month_range(month: Optional[str], months: int):
     return _month_start(months - 1), date.today().replace(day=28) + __import__("datetime").timedelta(days=10)
 
 
-def _drill_rows(db, fid, payer, code, month, months):
+def _drill_rows(db, fid, payer, code, month, months, stage="new"):
     since, until = _month_range(month, months)
-    key = ("drill", fid, payer, code, since, until, date.today())
+    key = ("drill", fid, payer, code, since, until, stage, date.today())
     hit = _CACHE.get(key)
     if hit and time.time() - hit[0] < TTL:
         return hit[1]
     sql = _DRILL_SQL.format(
-        fac="AND r.facility_id = :fid" if fid else "",
+        fac="AND r.facility_id = :fid" if fid else "", stage=_stage_sql(stage),
         payer="AND upper(coalesce(nullif(c.receiver_id, ''), nullif(c.payer_id, ''), r.payer_id)) = upper(:payer)" if payer else "")
     rows = [dict(r) for r in db.execute(text(sql), {"since": since, "until": until, "code": code,
                                                      "fid": fid, "payer": payer}).mappings()]
@@ -451,13 +525,14 @@ def drilldown(
     facility_id: Optional[int] = None,
     payer: Optional[str] = None,
     month: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}$"),
+    stage: str = Query("new", pattern="^(new|redenied|all)$"),
     months: int = Query(6, ge=1, le=24),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     """One denial code: TPA comment themes, services, clinicians, diagnoses, payers and sample claims."""
     fid = _scope(user, facility_id)
-    rows = _drill_rows(db, fid, payer, code, month, months)
+    rows = _drill_rows(db, fid, payer, code, month, months, stage)
     with_comment = sum(1 for r in rows if (r["tpa_comments"] or "").strip())
     ref_only = sum(1 for r in rows if (r["tpa_comments"] or "").strip() and not r["themes"])
     exploded = [dict(r, theme=t) for r in rows for t in r["themes"]]
@@ -486,6 +561,7 @@ def drilldown(
         "reference_only_pct": round(100 * ref_only / len(rows), 1) if rows else None,
         "truncated": len(rows) >= 50000,
         "themes": themes, "activities": acts, "clinicians": clins, "diagnoses": dxs,
+        "patterns": _patterns(db, rows, fid, payer, month, months, stage=stage), "stage": stage,
         "payers": pays, "facilities": facs,
         "samples": [{"facility_name": r["facility_name"], "claim_id": r["claim_id"],
                      "ra_date": r["remittance_date"].isoformat(), "payer": r["payer"], "insurer": r["ins"],
@@ -501,6 +577,7 @@ def drilldown_xlsx(
     facility_id: Optional[int] = None,
     payer: Optional[str] = None,
     month: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}$"),
+    stage: str = Query("new", pattern="^(new|redenied|all)$"),
     months: int = Query(6, ge=1, le=24),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -513,8 +590,8 @@ def drilldown_xlsx(
     from openpyxl.utils import get_column_letter
 
     fid = _scope(user, facility_id)
-    rows = _drill_rows(db, fid, payer, code, month, months)
-    d = drilldown(code=code, facility_id=facility_id, payer=payer, month=month, months=months, db=db, user=user)
+    rows = _drill_rows(db, fid, payer, code, month, months, stage)
+    d = drilldown(code=code, facility_id=facility_id, payer=payer, month=month, stage=stage, months=months, db=db, user=user)
     wb = Workbook()
 
     def sheet(ws, header, data):
@@ -553,3 +630,101 @@ def drilldown_xlsx(
     name = f"denial_{code}_{facility_id or 'all'}_{payer or 'all'}_{month or 'window'}.xlsx"
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                              headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+# ---------------------------------------------------------------------------------------------------
+# Resubmission outcomes: what happened to lines the team resubmitted (paid / partly paid / re-denied /
+# awaiting the resubmission RA), per payer and ORIGINAL denial code. Re-denied lines go to reconciliation.
+_OUTCOME_SQL = """
+WITH rs AS (
+  SELECT DISTINCT ON (c.facility_id, c.claim_id) c.facility_id, c.claim_id, c.submission_date::date rsd
+  FROM claims c
+  WHERE c.resubmission_key IN ('internal complaint', 'correction')
+    AND c.submission_date >= :since AND c.submission_date < :until
+    AND c.facility_id NOT IN (SELECT id FROM facilities WHERE facility_code = 'GHAF-001') {fac_c}
+  ORDER BY c.facility_id, c.claim_id, c.submission_date),
+pre AS (
+  SELECT DISTINCT ON (r.facility_id, r.claim_id) r.id, r.facility_id, r.claim_id
+  FROM remittances r JOIN rs USING (facility_id, claim_id)
+  WHERE r.remittance_date::date <= rs.rsd
+  ORDER BY r.facility_id, r.claim_id, r.remittance_date DESC, r.id DESC),
+post AS (
+  SELECT DISTINCT ON (r.facility_id, r.claim_id) r.id, r.facility_id, r.claim_id, r.tpa_comments
+  FROM remittances r JOIN rs USING (facility_id, claim_id)
+  WHERE r.remittance_date::date >= rs.rsd
+  ORDER BY r.facility_id, r.claim_id, r.remittance_date, r.id),
+c0 AS (
+  SELECT DISTINCT ON (c.facility_id, c.claim_id) c.facility_id, c.claim_id,
+         upper(coalesce(nullif(c.receiver_id, ''), nullif(c.payer_id, ''))) payer,
+         coalesce(nullif(c.receiver_name, ''), c.payer_name) payer_name
+  FROM claims c JOIN rs USING (facility_id, claim_id)
+  WHERE c.resubmission_key = ''
+  ORDER BY c.facility_id, c.claim_id, c.id)
+SELECT c0.payer, max(c0.payer_name) payer_name, upper(d0.denial_code) code,
+       count(*) lines, count(DISTINCT pre.claim_id) claims,
+       sum(greatest(coalesce(d0.net, 0) - coalesce(d0.paid_amount, 0), 0)) denied0,
+       count(*) FILTER (WHERE post.id IS NULL) pending,
+       count(*) FILTER (WHERE post.id IS NOT NULL AND greatest(coalesce(d1.net, 0) - coalesce(d1.paid_amount, 0), 0) <= 0.01) paid_full,
+       count(*) FILTER (WHERE post.id IS NOT NULL AND coalesce(d1.paid_amount, 0) > 0
+                        AND greatest(coalesce(d1.net, 0) - coalesce(d1.paid_amount, 0), 0) > 0.01) paid_part,
+       count(*) FILTER (WHERE post.id IS NOT NULL AND coalesce(d1.paid_amount, 0) <= 0
+                        AND greatest(coalesce(d1.net, 0) - coalesce(d1.paid_amount, 0), 0) > 0.01) redenied,
+       sum(CASE WHEN post.id IS NOT NULL THEN least(coalesce(d1.paid_amount, 0),
+               greatest(coalesce(d0.net, 0) - coalesce(d0.paid_amount, 0), 0)) ELSE 0 END) recovered,
+       sum(CASE WHEN post.id IS NOT NULL THEN greatest(coalesce(d1.net, 0) - coalesce(d1.paid_amount, 0), 0) ELSE 0 END) redenied_amt,
+       array_agg(post.tpa_comments) FILTER (WHERE post.id IS NOT NULL AND coalesce(d1.paid_amount, 0) <= 0
+                        AND coalesce(post.tpa_comments, '') <> '') remarks
+FROM pre
+JOIN remittance_activity_details d0 ON d0.remittance_id_fk = pre.id
+JOIN c0 ON c0.facility_id = pre.facility_id AND c0.claim_id = pre.claim_id
+LEFT JOIN post ON post.facility_id = pre.facility_id AND post.claim_id = pre.claim_id
+LEFT JOIN remittance_activity_details d1 ON d1.remittance_id_fk = post.id AND d1.activity_id = d0.activity_id
+WHERE coalesce(d0.denial_code, '') <> '' AND coalesce(d0.net, 0) - coalesce(d0.paid_amount, 0) > 0.01
+  {payer}
+GROUP BY 1, 3
+"""
+
+
+@router.get("/resub-outcomes")
+def resub_outcomes(
+    facility_id: Optional[int] = None,
+    payer: Optional[str] = None,
+    months: int = Query(3, ge=1, le=12),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Outcome of resubmitted lines by payer x original denial code (resubmissions sent in the last N months)."""
+    from collections import Counter
+    fid = _scope(user, facility_id)
+    since, until = _month_start(months - 1), date.today() + __import__("datetime").timedelta(days=1)
+    key = ("outcomes", fid, payer, months, date.today())
+    hit = _CACHE.get(key)
+    if hit and time.time() - hit[0] < TTL:
+        return hit[1]
+    sql = _OUTCOME_SQL.format(fac_c="AND c.facility_id = :fid" if fid else "",
+                              payer="AND c0.payer = upper(:payer)" if payer else "")
+    out = []
+    for r in db.execute(text(sql), {"since": since, "until": until, "fid": fid, "payer": payer}).mappings():
+        answered = r["paid_full"] + r["paid_part"] + r["redenied"]
+        themes = Counter()
+        for t in (r["remarks"] or []):
+            for p in re.split(r"~|\n|\s\d+\.\s", t or ""):
+                th = comment_theme(p)
+                if th and not th.startswith("activity id"): themes[th] += 1
+        out.append({
+            "payer": r["payer"], "payer_name": payer_name(r["payer"], r["payer_name"]),
+            "denial_code": r["code"], "description": denial_description(r["code"]),
+            "lines": r["lines"], "claims": r["claims"], "denied_amount": round(float(r["denied0"] or 0), 2),
+            "pending": r["pending"], "paid_full": r["paid_full"], "paid_part": r["paid_part"], "redenied": r["redenied"],
+            "success_pct": round(100 * (r["paid_full"] + r["paid_part"]) / answered, 1) if answered else None,
+            "redenied_pct": round(100 * r["redenied"] / answered, 1) if answered else None,
+            "recovered": round(float(r["recovered"] or 0), 2), "redenied_amount": round(float(r["redenied_amt"] or 0), 2),
+            "top_redenial_remark": themes.most_common(1)[0][0] if themes else None,
+        })
+    out.sort(key=lambda x: -x["denied_amount"])
+    tot = lambda k: sum(x[k] for x in out)
+    res = {"months": months, "since": since.isoformat(), "rows": out,
+           "totals": {k: round(tot(k), 2) for k in ("lines", "denied_amount", "pending", "paid_full", "paid_part",
+                                                    "redenied", "recovered", "redenied_amount")}}
+    _CACHE[key] = (time.time(), res)
+    return res

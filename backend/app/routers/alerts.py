@@ -14,10 +14,13 @@ Alert types
                  paid / net, both against the facility's own baseline
   overdue        claims with no RA more than 45 days after submission (payer breach of SN 3.9.1)
                  above the facility's normal share
-  submission_gap no first submission for longer than the facility's own longest normal gap
-                 (learned over 120 days) + 3 days
+  submission_gap no first-submission batch when expected: monthly-batch facilities 3 days after their usual
+                 batch day; others after their longest normal gap + 3 days (batch days = >= 5% of the month)
   sn_deadline    service month not yet submitted at the usual volume near / after the 15th
   credentials    DHPO / Riayati fetch failing with 401 / login errors
+  Denial spikes / above-usual count only NEW denials (first RA); re-denials after a resubmission are left to
+                 the reconciliation worklists. Denial spikes / above-usual now count only NEW denials (first RA); each
+                 denial alert carries a split: new lines -> resubmit, re-denied lines -> reconciliation.
 """
 import statistics
 import time
@@ -43,6 +46,33 @@ _TTL = 3600
 
 def _sd(xs):
     return statistics.pstdev(xs) if len(xs) > 1 else 0.0
+
+
+def _blank_split():
+    return {"new_lines": 0, "new_amt": 0.0, "new_first_ra": None, "re_lines": 0, "re_amt": 0.0, "re_first_ra": None}
+
+
+def _add_split(sp, redenied, n, amt, first_ra):
+    k = "re" if redenied else "new"
+    sp[f"{k}_lines"] += int(n); sp[f"{k}_amt"] += float(amt or 0)
+    if first_ra and (sp[f"{k}_first_ra"] is None or first_ra < sp[f"{k}_first_ra"]):
+        sp[f"{k}_first_ra"] = first_ra
+
+
+def _finish_split(per_fac: dict, fids) -> dict:
+    """Sum the per-facility splits; deadlines are first RA + 21 days (SN 03/2019 3.8.1)."""
+    out = _blank_split()
+    for f in fids:
+        sp = per_fac.get(f)
+        if not sp: continue
+        for k in ("new", "re"):
+            _add_split(out, k == "re", sp[f"{k}_lines"], sp[f"{k}_amt"], sp[f"{k}_first_ra"])
+    d = out.pop("new_first_ra")
+    out["new_due"] = (d + timedelta(days=21)).isoformat() if d else None   # resubmit within 21 days (3.8.1)
+    out.pop("re_first_ra")
+    out["re_due"] = None   # reconciliation: no 21-day limit (SN 03/2019 3.10.4), only after insurer agreement
+    out["new_amt"] = round(out["new_amt"], 2); out["re_amt"] = round(out["re_amt"], 2)
+    return out
 
 
 def _month_start(d: date, back: int = 0) -> date:
@@ -107,7 +137,11 @@ def _compute(db: Session, today: date) -> dict:  # today can be set in the past 
     wk_start = wk_end - timedelta(days=6)
     rows = db.execute(text("""
         WITH r AS (
-          SELECT id, facility_id, claim_id, remittance_date FROM remittances
+          SELECT id, facility_id, claim_id, remittance_date, EXISTS (SELECT 1 FROM claims x WHERE x.facility_id = remittances.facility_id
+                         AND x.claim_id = remittances.claim_id
+                         AND x.resubmission_key IN ('internal complaint', 'correction', 'reconciliation')
+                         AND x.submission_date::date < remittances.remittance_date::date) AS redenied
+          FROM remittances
           WHERE remittance_date BETWEEN :b0 AND :e AND facility_id = ANY(:ids)),
         c AS (
           SELECT DISTINCT ON (c.facility_id, c.claim_id) c.facility_id, c.claim_id,
@@ -118,17 +152,24 @@ def _compute(db: Session, today: date) -> dict:  # today can be set in the past 
         SELECT c.rec, d.denial_code code, r.facility_id,
                CASE WHEN r.remittance_date >= :w0 THEN -1
                     ELSE ((:w0 - r.remittance_date) - 1) / 7 END wk,
+               r.redenied, min(r.remittance_date) first_ra,
                count(*) n, sum(greatest(coalesce(d.net, 0) - coalesce(d.paid_amount, 0), 0)) amt
         FROM remittance_activity_details d
         JOIN r ON r.id = d.remittance_id_fk
         JOIN c ON c.facility_id = r.facility_id AND c.claim_id = r.claim_id
         WHERE coalesce(d.denial_code, '') <> ''
-        GROUP BY 1, 2, 3, 4
+        GROUP BY 1, 2, 3, 4, 5
     """), {"b0": wk_start - timedelta(days=56), "e": wk_end, "w0": wk_start, "ids": ids}).all()
     from ..services.payer_names import payer_name
     agg = {}   # (rec, code) -> {"cur": n, "amt": x, "hist": [8], "facs": {fid: n}, "base_facs": set}
     for r in rows:
-        a = agg.setdefault((r.rec, r.code), {"cur": 0, "amt": 0.0, "hist": [0] * 8, "facs": {}, "fac_hist": {}})
+        a = agg.setdefault((r.rec, r.code), {"cur": 0, "amt": 0.0, "hist": [0] * 8, "facs": {}, "fac_hist": {},
+                                             "split": {}})
+        if r.wk == -1:   # this week's lines, split by stage per facility (shown on the card)
+            sp = a["split"].setdefault(r.facility_id, _blank_split())
+            _add_split(sp, r.redenied, r.n, r.amt, r.first_ra)
+        if r.redenied:
+            continue     # re-denials after a resubmission don't count towards the spike
         if r.wk == -1:
             a["cur"] += r.n; a["amt"] += float(r.amt or 0)
             a["facs"][r.facility_id] = a["facs"].get(r.facility_id, 0) + r.n
@@ -166,7 +207,8 @@ def _compute(db: Session, today: date) -> dict:  # today can be set in the past 
                       + (f"{fn / fm:.1f}x usual" if fm >= 2 else "new this week") + ")")
             alerts.append({"facility_id": fid,
                            "facility_name": facs[fid] if fid else f"All facilities ({len(hit)})",
-                           "facilities": hit, "type": "denial_code_spike",
+                           "facilities": hit, "type": "denial_code_spike", "code": code, "payer": rec,
+                           "split": _finish_split(a["split"], [fid] if fid else hit),
                            "severity": "high" if (wide or cur >= 3 * max(mean, 1)) else "medium",
                            "title": t_, "detail": detail,
                            "link": f"/denial-trends?payer={rec}", "value": cur, "threshold": round(2 * mean)})
@@ -177,7 +219,11 @@ def _compute(db: Session, today: date) -> dict:  # today can be set in the past 
     if today.day >= 5:
         rows = db.execute(text("""
             WITH r AS (
-              SELECT id, facility_id, claim_id, remittance_date FROM remittances
+              SELECT id, facility_id, claim_id, remittance_date, EXISTS (SELECT 1 FROM claims x WHERE x.facility_id = remittances.facility_id
+                         AND x.claim_id = remittances.claim_id
+                         AND x.resubmission_key IN ('internal complaint', 'correction', 'reconciliation')
+                         AND x.submission_date::date < remittances.remittance_date::date) AS redenied
+              FROM remittances
               WHERE remittance_date >= :s AND remittance_date < :t AND facility_id = ANY(:ids)),
             c AS (
               SELECT DISTINCT ON (c.facility_id, c.claim_id) c.facility_id, c.claim_id,
@@ -185,19 +231,24 @@ def _compute(db: Session, today: date) -> dict:  # today can be set in the past 
               FROM claims c JOIN (SELECT DISTINCT facility_id, claim_id FROM r) k
                 ON k.facility_id = c.facility_id AND k.claim_id = c.claim_id
               ORDER BY c.facility_id, c.claim_id, c.submission_date)
-            SELECT r.facility_id, c.rec, d.denial_code code, (r.remittance_date >= :m0) cur,
+            SELECT r.facility_id, c.rec, d.denial_code code, (r.remittance_date >= :m0) cur, r.redenied,
+                   min(r.remittance_date) first_ra,
                    count(*) n, sum(greatest(coalesce(d.net, 0) - coalesce(d.paid_amount, 0), 0)) amt
             FROM remittance_activity_details d
             JOIN r ON r.id = d.remittance_id_fk
             JOIN c ON c.facility_id = r.facility_id AND c.claim_id = r.claim_id
             WHERE coalesce(d.denial_code, '') <> ''
-            GROUP BY 1, 2, 3, 4
+            GROUP BY 1, 2, 3, 4, 5
         """), {"s": _month_start(today, 3), "t": today, "m0": m0, "ids": ids}).all()
         from ..services.payer_names import payer_name as _pn
         from ..services.denial_codes import denial_description as _dd
-        cur, base3 = {}, {}
+        cur, base3, msplit = {}, {}, {}
         for r in rows:
             k = (r.facility_id, r.rec, r.code)
+            if r.cur:
+                _add_split(msplit.setdefault(k, _blank_split()), r.redenied, r.n, r.amt, r.first_ra)
+            if r.redenied:
+                continue   # only new denials (first RA) are compared with the usual level
             if r.cur:
                 cur[k] = (r.n, float(r.amt or 0))
             else:
@@ -218,16 +269,20 @@ def _compute(db: Session, today: date) -> dict:  # today can be set in the past 
         for amt, fid, rec, code, n, usual in cands[:MAX_ABOVE]:
             pct = round(100 * (n - usual) / usual)
             add(fid, "denial_above_usual", "high" if n >= 2.5 * usual else "medium",
-                f"{_pn(rec) or rec}: {code} {n:,} lines this month (+{pct}% vs usual)",
+                f"{_pn(rec) or rec}: {code} {n:,} new denial lines this month (+{pct}% vs usual)",
                 f"{_dd(code) or ''}. Usual ≈ {usual:,.0f} lines by this date (3-month average); "
                 f"AED {amt:,.0f} denied so far. Open 'Why?' on Denial trends for the TPA reasons.",
                 f"/denial-trends?payer={rec}&month={today:%Y-%m}", n, round(2 * usual))
+            alerts[-1].update(code=code, payer=rec, split=_finish_split({fid: msplit.get((fid, rec, code), _blank_split())}, [fid]))
         if len(cands) > MAX_ABOVE:
             alerts.append({"facility_id": None, "facility_name": "All facilities", "facilities": [],
                            "type": "denial_above_usual", "severity": "medium",
                            "title": f"{len(cands) - MAX_ABOVE} more denial codes above usual this month",
                            "detail": "Smaller amounts, not listed. See 'Above-usual first' on Denial trends.",
                            "link": f"/denial-trends?month={today:%Y-%m}", "value": None, "threshold": None})
+
+    # (Reconciliation of re-denied claims is not a facility alert: it belongs to the resubmission /
+    #  reconciliation worklists. Spikes above count only NEW denials, so re-denials don't inflate them.)
 
     # ---- 2. Payment rate + overdue (SN 3.9.1: RA within 45 days) ------------------------
     rows = db.execute(text("""
@@ -299,29 +354,53 @@ def _compute(db: Session, today: date) -> dict:  # today can be set in the past 
                 "/turnaround", round(share, 1), round(od_thr, 1))
 
     # ---- 4. Submission cadence + SN 3.7.1 deadline ------------------------------------
+    # First submissions only (resubmissions excluded), counted per day. Pattern and gaps use "batch days":
+    # days carrying >= 5% of that month's first submissions, so a few late claims after a monthly batch
+    # don't make a monthly facility look like it submits every few days (e.g. Alnoor Qusais: ~9,500 claims
+    # on the 15th, then a handful on the 16th / 19th).
     rows = db.execute(text("""
-        SELECT DISTINCT facility_id, submission_date d FROM claims
-        WHERE submission_date BETWEEN :s AND :t AND resubmission_type IS NULL AND facility_id = ANY(:ids)
-        ORDER BY 1, 2
-    """), {"s": today - timedelta(days=150), "t": today, "ids": ids}).all()
+        SELECT facility_id, submission_date::date d, count(*) n FROM claims
+        WHERE submission_date >= :s AND submission_date < :t AND resubmission_type IS NULL AND facility_id = ANY(:ids)
+        GROUP BY 1, 2 ORDER BY 1, 2
+    """), {"s": today - timedelta(days=150), "t": today + timedelta(days=1), "ids": ids}).all()
     days = {}
     for r in rows:
-        days.setdefault(r.facility_id, []).append(r.d)
-    for fid, ds in days.items():
+        days.setdefault(r.facility_id, []).append((r.d, int(r.n)))
+    for fid, dn in days.items():
+        month_tot = {}
+        for d, n in dn:
+            month_tot[(d.year, d.month)] = month_tot.get((d.year, d.month), 0) + n
+        ds = [d for d, n in dn if n >= 0.05 * month_tot[(d.year, d.month)]]
         gaps = [(b - a).days for a, b in zip(ds, ds[1:]) if a >= today - timedelta(days=120)]
-        if len(gaps) < 3:
+        if len(gaps) < 2 or not ds:
             continue
-        allowed = max(gaps) + 3
+        med = statistics.median(gaps)
         since = (today - ds[-1]).days
-        pattern = "monthly batch" if statistics.median(gaps) >= 20 else (
-            "daily" if statistics.median(gaps) <= 1.5 else f"every ~{statistics.median(gaps):.0f} days")
+        if med >= 20:   # monthly batch: expect the next batch around the usual day of the month
+            dom = round(statistics.median(d.day for d in ds if d >= today - timedelta(days=120)))
+            pattern = f"monthly batch, usually around the {dom}{'th' if 10 <= dom % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(dom % 10, 'th')}"
+            last_dom = min(dom, 28)
+            nxt = ds[-1] + timedelta(days=15)          # next usual batch day after the last batch
+            expected = nxt.replace(day=last_dom)
+            if expected < nxt:
+                y, m = (expected.year + (expected.month == 12), expected.month % 12 + 1)
+                expected = date(y, m, last_dom)
+            overdue = today > expected + timedelta(days=3)
+            allowed = (expected + timedelta(days=3) - ds[-1]).days
+            base[fid].update(next_batch=expected.isoformat(), alert_after=(expected + timedelta(days=3)).isoformat())
+            reason = (f"Usual pattern: {pattern}. The batch due around {expected:%d %b} has not arrived "
+                      f"(last batch {ds[-1]:%d %b}).")
+        else:
+            allowed = max(int(max(gaps)) + 3, 7)
+            pattern = "daily" if med <= 1.5 else f"every ~{med:.0f} days"
+            overdue = since > allowed
+            reason = f"Usual pattern: {pattern}; longest normal gap {max(gaps)} days (alert after {allowed})."
         base[fid].update(submission_pattern=pattern, submission_gap_allowed=allowed,
                          last_submission=ds[-1].isoformat(), days_since_submission=since)
-        if since > allowed:
+        if overdue:
             add(fid, "submission_gap", "high",
-                f"No new claims submitted for {since} days",
-                f"Usual pattern: {pattern}; longest normal gap {max(gaps)} days (alert after {allowed}). "
-                f"Check the facility ERP / eClaimLink access.",
+                f"No new claim batch for {since} days",
+                reason + " Resubmissions are not counted. Check the facility ERP / eClaimLink access.",
                 "/jobs", since, allowed)
 
     svc = _month_start(today, 1)  # service month due by the 15th of this month
@@ -384,7 +463,7 @@ def _compute(db: Session, today: date) -> dict:  # today can be set in the past 
         a["link"] = f'{a["link"]}{sep}facility_id={a["facility_id"] or ""}'
         if a["type"] == "denial_code_spike":   # the spike is this week: open on the current month
             a["link"] += f"&month={today:%Y-%m}"
-    order = {"high": 0, "medium": 1}
+    order = {"high": 0, "medium": 1, "info": 3}
     alerts.sort(key=lambda a: (order.get(a["severity"], 2), a["type"] != "denial_code_spike", a["facility_name"]))
     return {"items": alerts, "baselines": sorted(base.values(), key=lambda b: b["facility_name"])}
 
@@ -438,3 +517,74 @@ def list_alerts(
             "high": sum(1 for a in items if a["severity"] == "high"),
             "items": items, "baselines": baselines,
             "source": "Defaults learned per facility; timelines per DHA SN 03/2019"}
+
+
+@router.get("/lines.xlsx")
+def alert_lines_xlsx(
+    code: str, payer: Optional[str] = None, facility_id: Optional[int] = None, days: int = Query(31, ge=1, le=120),
+    db: Session = Depends(get_db), user: User = Depends(get_current_user),
+):
+    """Denied lines behind an alert, with stage (new / re-denied / reconciliation filed) and the deadline."""
+    import io
+    from fastapi.responses import StreamingResponse
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    if user.role != "admin" and user.facility_id is not None:
+        facility_id = user.facility_id
+    today = date.today()
+    if days < 30:
+        days = 30
+    rows = db.execute(text("""
+        WITH r AS (
+          SELECT r.id, r.facility_id, r.claim_id, r.remittance_date::date ra, r.tpa_comments,
+                 EXISTS (SELECT 1 FROM claims x WHERE x.facility_id = r.facility_id AND x.claim_id = r.claim_id
+                           AND x.resubmission_key IN ('internal complaint', 'correction', 'reconciliation')
+                           AND x.submission_date::date < r.remittance_date::date) redenied,
+                 EXISTS (SELECT 1 FROM claims x WHERE x.facility_id = r.facility_id AND x.claim_id = r.claim_id
+                           AND x.resubmission_key = 'reconciliation') recon
+          FROM remittances r
+          WHERE r.remittance_date >= :s AND (CAST(:fid AS int) IS NULL OR r.facility_id = :fid)),
+        c AS (
+          SELECT DISTINCT ON (c.facility_id, c.claim_id) c.facility_id, c.claim_id, c.member_id, c.patient_id,
+                 c.submission_date::date first_sub,
+                 c.encounter_start::date enc, coalesce(nullif(c.receiver_id, ''), c.payer_id) rec,
+                 coalesce(nullif(trim(c.clinician_id), ''), c.clinician_name) cn
+          FROM claims c JOIN (SELECT DISTINCT facility_id, claim_id FROM r) k
+            ON k.facility_id = c.facility_id AND k.claim_id = c.claim_id
+          ORDER BY c.facility_id, c.claim_id, c.submission_date)
+        SELECT f.facility_name, r.claim_id, c.patient_id, c.member_id, c.enc, c.cn, d.activity_code, c.first_sub,
+               greatest(coalesce(d.net, 0) - coalesce(d.paid_amount, 0), 0) denied, r.ra, r.redenied, r.recon,
+               r.tpa_comments
+        FROM remittance_activity_details d
+        JOIN r ON r.id = d.remittance_id_fk
+        JOIN c ON c.facility_id = r.facility_id AND c.claim_id = r.claim_id
+        JOIN facilities f ON f.id = r.facility_id
+        WHERE upper(d.denial_code) = upper(:code) AND (CAST(:payer AS text) IS NULL OR upper(c.rec) = upper(:payer))
+        ORDER BY r.ra, r.claim_id
+    """), {"s": today - timedelta(days=days), "fid": facility_id, "code": code, "payer": payer}).all()
+    wb = Workbook(); ws = wb.active; ws.title = "Denied lines"
+    head = ["Facility", "Claim ID", "MRN", "Member ID", "Encounter", "Clinician", "Service", "Denied AED",
+            "RA date", "Stage", "Next action", "Deadline", "Days left", "TPA comment"]
+    ws.append(head)
+    for c_ in ws[1]:
+        c_.font = Font(bold=True, color="FFFFFF"); c_.fill = PatternFill("solid", fgColor="1E6B75")
+    for x in rows:
+        if x.recon:
+            stage, act, due, left = "Reconciliation filed", "Await reconciliation RA", "", ""
+        elif x.redenied:
+            valid = (x.first_sub.replace(year=x.first_sub.year + 2) if x.first_sub else None)
+            stage, act = "Re-denied after resubmission", "Notify facility – reconcile with insurer"
+            due = f"No 21-day limit (SN 3.10.4); claim valid to {valid:%d/%m/%Y}" if valid else "No 21-day limit (SN 3.10.4)"
+            left = ""
+        else:
+            d = x.ra + timedelta(days=21); left = (d - today).days
+            stage, act, due = "New denial (first RA)", ("Resubmit" if left >= 0 else "Window closed"), d
+        ws.append([x.facility_name, x.claim_id, x.patient_id, x.member_id, x.enc, x.cn, x.activity_code,
+                   float(x.denied), x.ra, stage, act, due, left, (x.tpa_comments or "")[:300]])
+    for col, w in zip("ABCDEFGHIJKLMN", (24, 34, 12, 22, 11, 16, 14, 11, 11, 26, 34, 34, 9, 60)):
+        ws.column_dimensions[col].width = w
+    ws.freeze_panes = "C2"; ws.auto_filter.ref = ws.dimensions
+    buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+    name = f"alert_{code}_{payer or 'all'}_{today:%Y%m%d}.xlsx"
+    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                             headers={"Content-Disposition": f'attachment; filename="{name}"'})

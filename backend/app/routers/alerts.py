@@ -359,7 +359,16 @@ def _compute(db: Session, today: date) -> dict:  # today can be set in the past 
           JOIN c ON c.id = d.claim_id_fk
           ORDER BY d.claim_id_fk, (d.diagnosis_type ILIKE 'principal') DESC, d.sequence_no NULLS LAST)
     """
-    _MN = "ad.denial_code ILIKE 'MNEC%' AND coalesce(ad.net, 0) - coalesce(ad.paid_amount, 0) > 0.01"
+    # build the clinician base (90-day first-submission RAs, claims, principal Dx) once instead of in each query
+    _P0 = {"s": today - timedelta(days=90), "ids": ids}
+    db.execute(text("DROP TABLE IF EXISTS _cl_r, _cl_c, _cl_dx"))
+    for _t in ("r", "c", "dx"):
+        db.execute(text(f"CREATE TEMP TABLE _cl_{_t} AS " + _CL_CTE + f" SELECT * FROM {_t}"), _P0)
+    db.execute(text("CREATE INDEX ON _cl_r (facility_id, claim_id); CREATE INDEX ON _cl_r (id);"
+                    " CREATE INDEX ON _cl_c (facility_id, claim_id); CREATE INDEX ON _cl_c (id);"
+                    " CREATE INDEX ON _cl_dx (claim_id_fk); ANALYZE _cl_r; ANALYZE _cl_c; ANALYZE _cl_dx"))
+    _CL_CTE = "WITH r AS (SELECT * FROM _cl_r), c AS (SELECT * FROM _cl_c), dx AS (SELECT * FROM _cl_dx) "
+    _MN ="ad.denial_code ILIKE 'MNEC%' AND coalesce(ad.net, 0) - coalesce(ad.paid_amount, 0) > 0.01"
     _DEN = "coalesce(ad.denial_code, '') <> '' AND coalesce(ad.net, 0) - coalesce(ad.paid_amount, 0) > 0.01"
     _AMT = "greatest(coalesce(ad.net, 0) - coalesce(ad.paid_amount, 0), 0)"
     _P = {"s": today - timedelta(days=90), "ids": ids}
@@ -1033,8 +1042,13 @@ def _compute(db: Session, today: date) -> dict:  # today can be set in the past 
 def _get(db: Session, refresh: bool = False):
     """One computation at a time; concurrent callers wait for it instead of repeating it."""
     today = date.today()
-    hit = _CACHE.get(today)
-    if not refresh and hit and time.time() - hit[0] <= _TTL:
+    hit = _CACHE.get(today) or next(iter(_CACHE.values()), None)   # after midnight, yesterday's until rebuilt
+    if not refresh and hit and today in _CACHE and time.time() - hit[0] <= _TTL:
+        return hit
+    if not refresh and hit:
+        # stale: show the last result now and recompute in the background (nobody waits ~1.5 min)
+        if not _LOCK.locked():
+            warm()
         return hit
     with _LOCK:
         hit = _CACHE.get(today)
@@ -1050,9 +1064,11 @@ def warm():
     from ..database import SessionLocal
 
     def run():
+        if _LOCK.locked():
+            return
         db = SessionLocal()
         try:
-            _get(db)
+            _get(db, refresh=True)
         except Exception:
             pass
         finally:

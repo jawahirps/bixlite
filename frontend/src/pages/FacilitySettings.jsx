@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import apiClient from "../api/client";
 import { confirmDialog } from "../utils/notify";
 
@@ -406,6 +407,9 @@ function Input({ label, name, value, onChange, type = "text", showToggle }) {
 }
 
 export default function FacilitySettings() {
+  // a link (e.g. a credentials alert) can point at one facility: ?facility_id=9 scrolls to and highlights it
+  const [params] = useSearchParams();
+  const focusId = params.get("facility_id");
   const [facilities, setFacilities] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -417,6 +421,10 @@ export default function FacilitySettings() {
       .catch((err) => setError(err.response?.data?.detail || "Failed to load facilities."))
       .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    if (focusId && facilities.length) document.getElementById(`fac-${focusId}`)?.scrollIntoView({ block: "center" });
+  }, [focusId, facilities.length]);
 
   const handleSaved = (updated) =>
     setFacilities((prev) => prev.map((f) => (f.id === updated.id ? updated : f)));
@@ -453,7 +461,9 @@ export default function FacilitySettings() {
 
       <div className="space-y-4">
         {facilities.filter((f) => f.is_active).map((f) => (
-          <FacilityRow key={f.id} facility={f} onSaved={handleSaved} />
+          <div key={f.id} id={`fac-${f.id}`} className={String(f.id) === focusId ? "rounded-xl ring-2 ring-ghaf-400" : ""}>
+            <FacilityRow facility={f} onSaved={handleSaved} />
+          </div>
         ))}
       </div>
 

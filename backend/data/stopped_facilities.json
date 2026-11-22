@@ -1,0 +1,4 @@
+{
+  "_note": "Facilities whose service with Ghaf has stopped. Their data stays in BIX Lite (reports, dashboard, history) but they get no Facility alerts.",
+  "21": {"name": "Marina Medical Center LLC", "stopped_on": "2026-11-22"}
+}

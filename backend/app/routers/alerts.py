@@ -118,9 +118,21 @@ def _month_start(d: date, back: int = 0) -> date:
     return date(y, m, 1)
 
 
+def _stopped_facilities() -> set:
+    """Facility ids in data/stopped_facilities.json (service with Ghaf stopped; data kept, no alerts)."""
+    import json
+    from pathlib import Path
+    f = Path(__file__).resolve().parents[2] / "data" / "stopped_facilities.json"
+    try:
+        return {int(k) for k in json.loads(f.read_text()) if k.isdigit()}
+    except Exception:
+        return set()
+
+
 def _compute(db: Session, today: date) -> dict:  # today can be set in the past to back-test
     facs = {r.id: r.facility_name for r in db.execute(text(
-        "SELECT id, facility_name FROM facilities WHERE is_active AND facility_code <> 'GHAF-001'"))}
+        "SELECT id, facility_name FROM facilities WHERE is_active AND facility_code <> 'GHAF-001'"))
+        if r.id not in _stopped_facilities()}   # service stopped: data kept, no alerts
     if not facs:
         return {"items": [], "baselines": []}
     ids = list(facs)
@@ -133,7 +145,7 @@ def _compute(db: Session, today: date) -> dict:  # today can be set in the past 
 
     # ---- 1. Denial spike (by RA date, first RA per claim) -----------------------------
     m0 = _month_start(today)           # current month start
-    start = _month_start(today, 3)
+    start = _month_start(today, 6)     # 6 months of history for the usual rate
     rows = db.execute(text("""
         WITH r AS (
           SELECT DISTINCT ON (facility_id, claim_id) facility_id, remittance_date d, net_amount net,
@@ -155,7 +167,9 @@ def _compute(db: Session, today: date) -> dict:  # today can be set in the past 
         if len(hist) < 2 or "recent" not in b or b["recent"][1] < 30:
             continue
         mean = statistics.mean(hist)
-        thr = mean + max(5.0, 2 * _sd(hist))
+        # usual + 5 points or usual x 1.25, whichever is larger (a 2-SD band on a few jumpy months
+        # pushed some thresholds to 70-80% and the alert never fired)
+        thr = max(mean + 5.0, mean * 1.25)
         cur = b["recent"][0]
         base[fid].update(denial_rate_baseline=round(mean, 1), denial_rate_threshold=round(thr, 1),
                          denial_rate_last30=round(cur, 1))
@@ -721,11 +735,11 @@ def _compute(db: Session, today: date) -> dict:  # today can be set in the past 
 
     # ---- 1g. Final denial rate above 10% (the Dashboard's measure) ----------------------------------
     # per claim (latest submission): denied = net not paid after ALL RAs, resubmission recoveries included,
-    # / net of remitted claims, by encounter month. A month is judged once settled: 3 months after the
-    # encounter month (RA <= 45 days, resubmission <= 21 days, resubmission RA <= 30 days - SN 03/2019).
-    m_set = _month_start(today, 3)
-    months_set = [_month_start(today, k) for k in (5, 4, 3)]
-    m_open = _month_start(today, 2)
+    # / net of remitted claims, by encounter month. Judged per facility on its latest SETTLED encounter month:
+    # >= 95% of claims remitted and <= 20% of the unpaid amount still in progress (a resubmission awaiting its
+    # RA, or no resubmission yet but still inside the 21-day window, SN 3.8.1). ~11-17% stays "awaiting a
+    # resubmission RA" even 6+ months on (payer never answers), so 0% is never reached.
+    d0g, d1g = _month_start(today, 11), _month_start(today, 1)
     fr = db.execute(text("""
         WITH c AS (
           SELECT DISTINCT ON (facility_id, claim_id) facility_id, claim_id, encounter_start, coalesce(net_amount, 0) net,
@@ -734,45 +748,74 @@ def _compute(db: Session, today: date) -> dict:  # today can be set in the past 
           ORDER BY facility_id, claim_id, submission_date DESC NULLS LAST, id DESC),
         ra AS (
           SELECT DISTINCT ON (r.facility_id, r.claim_id, r.ra_file_id, r.net_amount, r.paid_amount, r.denial_amount)
-                 r.facility_id, r.claim_id, coalesce(r.paid_amount, 0) paid
+                 r.facility_id, r.claim_id, coalesce(r.paid_amount, 0) paid, r.remittance_date::date d
           FROM remittances r JOIN c USING (facility_id, claim_id)),
-        p AS (SELECT facility_id, claim_id, sum(paid) paid FROM ra GROUP BY 1, 2)
-        SELECT c.facility_id, to_char(c.encounter_start, 'YYYY-MM') m, c.rec, count(*) n, count(p.claim_id) rn,
-               coalesce(sum(c.net) FILTER (WHERE p.claim_id IS NOT NULL), 0) rnet,
-               coalesce(sum(c.net - least(greatest(p.paid, 0), c.net)) FILTER (WHERE p.claim_id IS NOT NULL), 0) den,
-               count(*) FILTER (WHERE p.claim_id IS NOT NULL AND c.net - least(greatest(p.paid, 0), c.net) > 0.5) dn
-        FROM c LEFT JOIN p USING (facility_id, claim_id) GROUP BY 1, 2, 3
-    """), {"d0": months_set[0], "d1": _month_start(today, 1), "ids": ids}).all()
+        p AS (SELECT facility_id, claim_id, sum(paid) paid, min(d) first_ra, max(d) last_ra FROM ra GROUP BY 1, 2),
+        rs AS (SELECT x.facility_id, x.claim_id, max(x.submission_date::date) last_resub
+               FROM claims x JOIN c USING (facility_id, claim_id) WHERE x.resubmission_key <> '' GROUP BY 1, 2),
+        x AS (SELECT c.*, p.first_ra, p.last_ra, rs.last_resub,
+                     c.net - least(greatest(coalesce(p.paid, 0), 0), c.net) unpaid
+              FROM c LEFT JOIN p USING (facility_id, claim_id) LEFT JOIN rs USING (facility_id, claim_id))
+        SELECT facility_id, to_char(encounter_start, 'YYYY-MM') m, rec, count(*) n, count(first_ra) rn,
+               coalesce(sum(net) FILTER (WHERE first_ra IS NOT NULL), 0) rnet,
+               coalesce(sum(unpaid) FILTER (WHERE first_ra IS NOT NULL), 0) den,
+               count(*) FILTER (WHERE first_ra IS NOT NULL AND unpaid > 0.5) dn,
+               coalesce(sum(unpaid) FILTER (WHERE first_ra IS NOT NULL AND (
+                   (last_resub IS NOT NULL AND (last_ra IS NULL OR last_ra < last_resub))
+                   OR (last_resub IS NULL AND current_date - first_ra <= 21))), 0) pend
+        FROM x GROUP BY 1, 2, 3
+    """), {"d0": d0g, "d1": d1g, "ids": ids}).all()
     from collections import defaultdict as _dd4
-    fm = _dd4(lambda: {"n": 0, "rn": 0, "rnet": 0.0, "den": 0.0, "dn": 0, "pay": _dd4(float)})
+    fm = _dd4(lambda: {"n": 0, "rn": 0, "rnet": 0.0, "den": 0.0, "dn": 0, "pend": 0.0, "pay": _dd4(float)})
     for r in fr:
         x = fm[(r.facility_id, r.m)]
         x["n"] += r.n; x["rn"] += r.rn; x["rnet"] += float(r.rnet); x["den"] += float(r.den); x["dn"] += r.dn
-        x["pay"][r.rec] += float(r.den)
+        x["pend"] += float(r.pend); x["pay"][r.rec] += float(r.den)
     rate_of = lambda x: 100 * x["den"] / x["rnet"] if x and x["rnet"] else None
-    ks = m_set.strftime("%Y-%m"); ko = m_open.strftime("%Y-%m")
-    # main denial codes on the settled month's still-unpaid lines (latest RA per activity)
+    settled = lambda x: x and x["n"] and x["rn"] / x["n"] >= 0.95 and (x["den"] <= 0 or x["pend"] / x["den"] <= 0.20)
+    all_m = []
+    mm = d0g
+    while mm < d1g:
+        all_m.append(mm.strftime("%Y-%m")); mm = date(mm.year + (mm.month == 12), mm.month % 12 + 1, 1)
+    pick, early = {}, {}
+    for fid in ids:
+        sm = [m for m in all_m if settled(fm.get((fid, m)))]
+        if sm:
+            pick[fid] = sm
+        # early warning: most recent month with at least half the claims remitted, after the settled one
+        for m in reversed(all_m):
+            x = fm.get((fid, m))
+            if x and x["n"] and x["rn"] / x["n"] >= 0.5:
+                if not sm or m > sm[-1]:
+                    early[fid] = m
+                break
+    # main unpaid denial codes per facility and encounter month (latest RA per activity)
     dc = _dd4(lambda: _dd4(float))
     for r in db.execute(text("""
-        WITH c AS (SELECT DISTINCT facility_id, claim_id FROM claims
+        WITH c AS (SELECT DISTINCT facility_id, claim_id, to_char(encounter_start, 'YYYY-MM') m FROM claims
                    WHERE encounter_start >= :d0 AND encounter_start < :d1 AND facility_id = ANY(:ids)),
-        l AS (SELECT DISTINCT ON (r.facility_id, r.claim_id, ad.activity_id) r.facility_id, ad.denial_code,
+        l AS (SELECT DISTINCT ON (r.facility_id, r.claim_id, ad.activity_id) r.facility_id, c.m, ad.denial_code,
                      greatest(coalesce(ad.net, 0) - coalesce(ad.paid_amount, 0), 0) amt
               FROM remittances r JOIN c USING (facility_id, claim_id)
               JOIN remittance_activity_details ad ON ad.remittance_id_fk = r.id
               ORDER BY r.facility_id, r.claim_id, ad.activity_id, r.remittance_date DESC, r.id DESC)
-        SELECT facility_id, denial_code, sum(amt) amt FROM l WHERE coalesce(denial_code, '') <> '' AND amt > 0.01 GROUP BY 1, 2
-    """), {"d0": m_set, "d1": _month_start(today, 2), "ids": ids}):
-        dc[r.facility_id][r.denial_code] += float(r.amt)
-    for fid in ids:
-        x = fm.get((fid, ks))
-        rate = rate_of(x)
+        SELECT facility_id, m, denial_code, sum(amt) amt FROM l WHERE coalesce(denial_code, '') <> '' AND amt > 0.01
+        GROUP BY 1, 2, 3
+    """), {"d0": d0g, "d1": d1g, "ids": ids}):
+        dc[(r.facility_id, r.m)][r.denial_code] += float(r.amt)
+    mlab = lambda m: date(int(m[:4]), int(m[5:]), 1).strftime("%b %Y")
+    for fid, sm in pick.items():          # settled final rate for the baselines table, every facility
+        r_ = rate_of(fm[(fid, sm[-1])])
+        if r_ is not None:
+            base[fid].update(final_denial_pct=round(r_, 1), final_denial_month=sm[-1])
+    for fid, sm in pick.items():
+        ks = sm[-1]; x = fm[(fid, ks)]; rate = rate_of(x)
         if rate is None or x["rnet"] < 20000 or rate < 10:
             continue
-        trend = [(m, rate_of(fm.get((fid, m.strftime("%Y-%m"))))) for m in months_set]
-        xo = fm.get((fid, ko)); open_rate = rate_of(xo)
-        codes = sorted(dc[fid].items(), key=lambda kv: -kv[1])[:2]
-        ctot = sum(dc[fid].values()) or 1
+        trend = [(m, rate_of(fm.get((fid, m)))) for m in sm[-3:]]
+        eo = early.get(fid); xo = fm.get((fid, eo)) if eo else None; open_rate = rate_of(xo)
+        open_pend = round(100 * xo["pend"] / xo["den"]) if xo and xo["den"] else None
+        cd = dc[(fid, ks)]; codes = sorted(cd.items(), key=lambda kv: -kv[1])[:2]; ctot = sum(cd.values()) or 1
         tp = max(x["pay"], key=x["pay"].get) if x["pay"] else None
         tp_share = x["pay"][tp] / x["den"] if tp and x["den"] else 0
         fam = (codes[0][0] or "")[:4].upper() if codes else ""
@@ -781,25 +824,26 @@ def _compute(db: Session, today: date) -> dict:  # today can be set in the past 
                "Clinic admin / billing" if fam in ("CLAI", "PRCE", "DUPL", "TIME") else "Review the denial codes")
         if tp_share >= 0.6:
             act += f"; mostly one payer ({_pn3(tp) or tp})"
-        ml = m_set.strftime("%b %Y")
-        tr = " · ".join(f"{m:%b} {v:.1f}%" for m, v in trend if v is not None)
+        ml = mlab(ks)
+        tr = " · ".join(f"{mlab(m)[:3]} {v:.1f}%" for m, v in trend if v is not None)
         add(fid, "denial_rate_10", "high" if rate > 15 else "medium",
-            f"Final denial rate {rate:.1f}% for {ml} encounters — above the 10% limit",
-            f"AED {x['den']:,.0f} still unpaid of AED {x['rnet']:,.0f} remitted after resubmissions "
-            f"({x['dn']:,} claims; {round(100 * x['rn'] / x['n']) if x['n'] else 0}% of the month's claims remitted). "
-            f"Trend by encounter month: {tr}."
-            + (f" {m_open:%b} so far {open_rate:.1f}% (still open: resubmissions pending)." if open_rate is not None else ""),
+            f"Denial rate {rate:.1f}% for {ml} encounters (settled) — above the 10% limit",
+            f"AED {x['den']:,.0f} unpaid of AED {x['rnet']:,.0f} remitted, after resubmissions ({x['dn']:,} claims; "
+            f"{round(100 * x['rn'] / x['n'])}% of claims remitted, {round(100 * x['pend'] / x['den']) if x['den'] else 0}% "
+            f"of the unpaid amount still in progress). Settled months: {tr}."
+            + (f" Early warning: {mlab(eo)[:3]} so far {open_rate:.1f}% ({open_pend}% still in progress)."
+               if open_rate is not None else ""),
             "/denial-trends", round(rate, 1), 10)
         alerts[-1].update(
             code=codes[0][0] if codes else None, month=ks, rate_pct=round(rate, 1),
-            trend=[{"month": m.strftime("%Y-%m"), "pct": round(v, 1) if v is not None else None} for m, v in trend],
-            open_month=ko, open_pct=round(open_rate, 1) if open_rate is not None else None,
+            trend=[{"month": m, "pct": round(v, 1) if v is not None else None} for m, v in trend],
+            open_month=eo, open_pct=round(open_rate, 1) if open_rate is not None else None, open_pending_pct=open_pend,
             top_codes=[{"code": k, "share_pct": round(100 * v / ctot)} for k, v in codes],
             top_payer=tp, top_payer_share_pct=round(100 * tp_share),
             insight={"cause": "habit" if fam in ("MNEC", "CODE") else "payer" if tp_share >= 0.6 else "unclear",
                      "label": " · ".join(f"{k} {round(100 * v / ctot)}%" for k, v in codes) or "Denials",
-                     "evidence": [{"v": f"{rate:.1f}%", "l": f"final denial, {ml} encounters"}]
-                     + [{"v": tr, "l": "trend"}] + ([{"v": f"{round(100 * tp_share)}%", "l": f"from {tp}"}] if tp else []),
+                     "evidence": [{"v": f"{rate:.1f}%", "l": f"{ml} encounters, settled"}, {"v": tr, "l": "settled months"}]
+                     + ([{"v": f"{open_rate:.1f}%", "l": f"{mlab(eo)[:3]} so far ({open_pend}% in progress)"}] if open_rate is not None else []),
                      "act": act})
 
     # ---- 2. Payment rate + overdue (SN 3.9.1: RA within 45 days) ------------------------
@@ -1215,3 +1259,120 @@ def clinician_lines_xlsx(facility_id: int, clinician: str, kind: str,
     name = f"clinician_{clinician}_{kind.replace('clinician_', '')}_{date.today():%Y%m%d}.xlsx"
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                              headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+# ---- facility denial panel: where the unpaid amount of one encounter month sits ----------------------
+def _facility_denial_lines(db, facility_id: int, month: str):
+    y, m = map(int, month.split("-"))
+    d0, d1 = date(y, m, 1), date(y + (m == 12), m % 12 + 1, 1)
+    return db.execute(text("""
+        WITH c AS (
+          SELECT DISTINCT ON (facility_id, claim_id) id, facility_id, claim_id, encounter_start::date enc, clinician_id,
+                 upper(coalesce(nullif(receiver_id, ''), payer_id)) payer
+          FROM claims WHERE facility_id = :f AND encounter_start >= :d0 AND encounter_start < :d1
+          ORDER BY facility_id, claim_id, submission_date DESC NULLS LAST, id DESC),
+        ras AS (SELECT r.claim_id, min(r.remittance_date::date) first_ra, max(r.remittance_date::date) last_ra
+                FROM remittances r JOIN c USING (facility_id, claim_id) GROUP BY 1),
+        rs AS (SELECT x.claim_id, max(x.submission_date::date) last_resub FROM claims x JOIN c USING (facility_id, claim_id)
+               WHERE x.resubmission_key <> '' GROUP BY 1),
+        l AS (SELECT DISTINCT ON (r.claim_id, ad.activity_id) r.claim_id, ad.activity_id, ad.activity_code, ad.denial_code,
+                     greatest(coalesce(ad.net, 0) - coalesce(ad.paid_amount, 0), 0) amt, r.tpa_comments
+              FROM remittances r JOIN c USING (facility_id, claim_id)
+              JOIN remittance_activity_details ad ON ad.remittance_id_fk = r.id
+              ORDER BY r.claim_id, ad.activity_id, r.remittance_date DESC, r.id DESC)
+        SELECT c.claim_id, c.enc, l.activity_code act, coalesce(nullif(a.clinician_id, ''), c.clinician_id) clin,
+               (SELECT d.diagnosis_code FROM claim_diagnoses d WHERE d.claim_id_fk = c.id
+                ORDER BY (d.diagnosis_type ILIKE 'principal') DESC, d.sequence_no NULLS LAST LIMIT 1) dx,
+               c.payer, l.denial_code code, l.amt, l.tpa_comments remark, ras.first_ra, ras.last_ra, rs.last_resub
+        FROM l JOIN c USING (claim_id) JOIN ras USING (claim_id) LEFT JOIN rs USING (claim_id)
+        LEFT JOIN claim_activities a ON a.claim_id_fk = c.id AND a.activity_id = l.activity_id
+        WHERE l.amt > 0.01 AND coalesce(l.denial_code, '') <> ''
+        ORDER BY l.amt DESC
+    """), {"f": facility_id, "d0": d0, "d1": d1}).all()
+
+
+def _stage(x, today):
+    if x.last_resub and (x.last_ra is None or x.last_ra < x.last_resub):
+        return "Resubmission awaiting RA", None
+    if not x.last_resub and x.first_ra and (today - x.first_ra).days <= 21:
+        return "Still in window", x.first_ra + timedelta(days=21)
+    return "Final", None
+
+
+def _who(code):
+    f = (code or "")[:4].upper()
+    return ("Clinician" if f in ("MNEC", "CODE") else "Clinic admin" if f in ("AUTH", "ELIG", "COPY", "BENX")
+            else "Billing" if f in ("CLAI", "PRCE", "DUPL", "TIME") else "Review")
+
+
+@router.get("/facility-denials")
+def facility_denials(facility_id: int, month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
+                     db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Where one encounter month's unpaid amount sits: by code, payer, clinician, service; lines with stage."""
+    _clin_scope(user, facility_id)
+    from collections import defaultdict
+    from ..services.payer_names import payer_name as _pnx
+    rows = _facility_denial_lines(db, facility_id, month)
+    today = date.today()
+    tot = sum(float(x.amt) for x in rows) or 1
+
+    def top(keyf, n=6):
+        g = defaultdict(lambda: [0.0, 0])
+        for x in rows:
+            k = keyf(x)
+            g[k][0] += float(x.amt); g[k][1] += 1
+        return sorted(({"key": k, "amount": round(v[0], 2), "lines": v[1], "share_pct": round(100 * v[0] / tot)}
+                       for k, v in g.items()), key=lambda r: -r["amount"])[:n]
+    codes = top(lambda x: x.code)
+    for c in codes:
+        c["description"] = _dd_desc(c["key"]); c["who"] = _who(c["key"])
+    payers = top(lambda x: x.payer)
+    for p in payers:
+        p["name"] = _pnx(p["key"]) or ""
+    clins = top(lambda x: x.clin)
+    try:
+        from .reports import _clinician_name
+        for c in clins:
+            n_ = _clinician_name(c["key"]) if c["key"] else ""
+            c["name"] = n_ if n_ and n_ != c["key"] else ""
+    except Exception:
+        pass
+    stages = defaultdict(float)
+    out = []
+    for x in rows:
+        st, due = _stage(x, today)
+        stages[st] += float(x.amt)
+        if len(out) < 300:
+            out.append({"claim_id": x.claim_id, "enc": x.enc, "activity_code": x.act, "dx": x.dx, "payer": x.payer,
+                        "code": x.code, "amount": float(x.amt), "stage": st, "due": due, "remark": (x.remark or "")[:200]})
+    return {"month": month, "total": len(rows), "codes": codes, "payers": payers, "clinicians": clins,
+            "services": top(lambda x: x.act),
+            "stages": [{"stage": k, "share_pct": round(100 * v / tot)} for k, v in sorted(stages.items(), key=lambda kv: -kv[1])],
+            "rows": out}
+
+
+@router.get("/facility-denials.xlsx")
+def facility_denials_xlsx(facility_id: int, month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
+                          db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    import io
+    from fastapi.responses import StreamingResponse
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    _clin_scope(user, facility_id)
+    rows = _facility_denial_lines(db, facility_id, month)
+    today = date.today()
+    wb = Workbook(); ws = wb.active; ws.title = f"Unpaid {month}"
+    ws.append(["Claim ID", "Encounter", "Service", "Principal Dx", "Clinician", "Payer", "Denial code", "Unpaid AED",
+               "Stage", "Resubmit by", "Who acts", "TPA remark"])
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF"); c.fill = PatternFill("solid", fgColor="006884")
+    for x in rows:
+        st, due = _stage(x, today)
+        ws.append([x.claim_id, x.enc, x.act, x.dx, x.clin, x.payer, x.code, float(x.amt), st, due, _who(x.code),
+                   (x.remark or "")[:300]])
+    for col, w in zip("ABCDEFGHIJKL", (30, 11, 12, 12, 16, 10, 12, 11, 24, 12, 13, 60)):
+        ws.column_dimensions[col].width = w
+    ws.freeze_panes = "B2"; ws.auto_filter.ref = ws.dimensions
+    buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                             headers={"Content-Disposition": f'attachment; filename="facility_{facility_id}_unpaid_{month}.xlsx"'})

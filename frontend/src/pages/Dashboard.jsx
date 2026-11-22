@@ -117,18 +117,19 @@ function DenialFlagStrip({ facilityId }) {
   const list = (flags || []).filter((a) => !facilityId || String(a.facility_id) === String(facilityId))
     .sort((a, b) => b.rate_pct - a.rate_pct);
   if (!list.length) return null;
-  const month = list[0].month ? new Date(list[0].month + "-01T00:00:00").toLocaleDateString("en-GB", { month: "short", year: "numeric" }) : "";
+  const mon = (m) => (m ? new Date(m + "-01T00:00:00").toLocaleDateString("en-GB", { month: "short" }) : "");
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-md border border-hairline bg-sage/60 px-3 py-2 text-xs">
       <span className="flex items-center gap-1.5">
         <span className="h-1.5 w-1.5 rounded-full bg-denied" />
         <span className="font-semibold text-ink">{list.length} facilit{list.length === 1 ? "y" : "ies"} above 10% denial</span>
-        <span className="text-slate-500">{month} encounters</span>
+        <span className="text-slate-500">latest settled encounter month</span>
       </span>
       {list.map((a) => (
         <Link key={a.facility_id} to={`/alerts`} title={a.detail}
           className="border-l border-hairline pl-4 text-slate-600 hover:text-ghaf-700">
           {a.facility_name} <b className={`tabular-nums ${a.rate_pct > 15 ? "text-denied" : "text-pending"}`}>{a.rate_pct}%</b>
+          <span className="text-slate-400"> {mon(a.month)}</span>
         </Link>
       ))}
       <Link to="/alerts" className="ml-auto text-ghaf-600 hover:underline">Facility alerts →</Link>

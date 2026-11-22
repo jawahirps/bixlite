@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import apiClient from "../api/client";
 import { localISODate } from "../utils/format";
 import { useAuth } from "../context/AuthContext";
@@ -149,7 +150,9 @@ export default function Jobs() {
 
   const [facilities, setFacilities]   = useState([]);
   const [facMap, setFacMap]           = useState({});   // { id: name }
+  const [params] = useSearchParams();   // ?facility_id= from a Facility alerts link
   const [selectedFac, setSelectedFac] = useState(() => {
+    if (params.get("facility_id")) return Number(params.get("facility_id"));
     const s = readFacility();
     return s ? Number(s) : (user?.facility_id || "");
   });

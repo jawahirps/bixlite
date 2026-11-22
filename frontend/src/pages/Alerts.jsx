@@ -79,7 +79,94 @@ function InsightStrip({ i }) {
   );
 }
 
-function AlertRow({ a, onWhy }) {
+function ClinicianPanel({ a, onClose }) {
+  const [d, setD] = useState(null);
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const q = new URLSearchParams({ facility_id: a.facility_id, clinician: a.clinician, kind: a.type });
+  useEffect(() => {
+    apiClient.get(`/alerts/clinician-lines?${q}`, { timeout: 120000 }).then(r => setD(r.data))
+      .catch(e => setErr(e.response?.data?.detail || "Could not load the lines"));
+  }, []);
+  const excel = async () => {
+    setBusy(true);
+    try {
+      const r = await apiClient.get(`/alerts/clinician-lines.xlsx?${q}`, { responseType: "blob", timeout: 300000 });
+      const name = ((r.headers["content-disposition"] || "").match(/filename="([^"]+)"/) || [])[1] || "clinician_lines.xlsx";
+      const url = URL.createObjectURL(r.data);
+      const el = document.createElement("a"); el.href = url; el.download = name; el.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } finally { setBusy(false); }
+  };
+  const gapH = { clinician_tests: "Days since same test", clinician_consult: "Days since last visit" }[a.type];
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end bg-ink/30" onClick={onClose}>
+      <div className="h-full w-full max-w-4xl overflow-y-auto bg-white p-5 shadow-xl" onClick={e => e.stopPropagation()}>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="gh-eyebrow">{TYPES[a.type]} · {a.facility_name}</p>
+            <h2 className="font-display text-lg font-semibold text-ink">{a.clinician_name || a.clinician} <span className="text-sm font-normal text-slate-500">{a.clinician}</span></h2>
+            <p className="text-xs text-slate-500">Denied lines behind this alert · new denials, last 90 days</p>
+          </div>
+          <div className="flex gap-1.5">
+            <button className="gh-btn-secondary gh-btn-sm" disabled={busy || !d} onClick={excel}>{busy ? "Preparing…" : "Excel"}</button>
+            <button className="gh-btn-secondary gh-btn-sm" onClick={onClose}>Close</button>
+          </div>
+        </div>
+        {a.insight && <InsightStrip i={a.insight} />}
+        {err && <p className="mt-3 text-sm text-denied">{err}</p>}
+        {!d && !err && <p className="mt-4 text-sm text-slate-500">Loading…</p>}
+        {d && (
+          <>
+            <div className="mt-3 flex flex-wrap gap-x-6 gap-y-1 text-sm">
+              <span><b className="tabular-nums text-ink">{fmt(d.total)}</b> <span className="text-slate-500">lines</span></span>
+              <span><b className="tabular-nums text-ink">AED {fmt(d.amount)}</b> <span className="text-slate-500">denied</span></span>
+              {d.gap_bands && Object.entries(d.gap_bands).map(([k, v]) => (
+                <span key={k}><b className="tabular-nums text-ink">{fmt(v)}</b> <span className="text-slate-500">{k}</span></span>
+              ))}
+            </div>
+            <table className="mt-3 min-w-full text-xs">
+              <thead className="text-left uppercase tracking-wide text-slate-500">
+                <tr><th className="py-1 pr-2">Service</th>{a.type !== "clinician_tests" && <th className="py-1 pr-2">Principal Dx</th>}
+                  <th className="py-1 pr-2 text-right">Lines</th><th className="py-1 pr-2 text-right">AED</th><th className="py-1">Main code</th></tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {d.groups.map((g, i) => (
+                  <tr key={i}><td className="py-1 pr-2 font-mono">{g.activity_code}{g.activity && <span className="ml-1 font-sans text-slate-500">{g.activity}</span>}</td>
+                    {a.type !== "clinician_tests" && <td className="py-1 pr-2 font-mono">{g.diagnosis_code}</td>}
+                    <td className="py-1 pr-2 text-right tabular-nums">{g.lines}</td><td className="py-1 pr-2 text-right tabular-nums">{fmt(g.amount)}</td>
+                    <td className="py-1">{g.top_code}</td></tr>
+                ))}
+              </tbody>
+            </table>
+            <h3 className="mt-5 text-xs font-semibold uppercase tracking-wide text-slate-500">Lines {d.total > d.rows.length ? `(largest ${d.rows.length} of ${d.total}; all in Excel)` : ""}</h3>
+            <div className="mt-1 overflow-x-auto">
+              <table className="min-w-full text-xs">
+                <thead className="text-left text-slate-500">
+                  <tr><th className="py-1 pr-2">Claim</th><th className="py-1 pr-2">Enc.</th><th className="py-1 pr-2">Service</th>
+                    <th className="py-1 pr-2">Dx</th><th className="py-1 pr-2">Payer</th><th className="py-1 pr-2">Code</th>
+                    <th className="py-1 pr-2 text-right">AED</th>{gapH && <th className="py-1 pr-2 text-right">{gapH}</th>}<th className="py-1">TPA remark</th></tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {d.rows.map((x, i) => (
+                    <tr key={i}><td className="py-1 pr-2 font-mono">{x.claim_id}</td><td className="py-1 pr-2">{day(x.enc)}</td>
+                      <td className="py-1 pr-2 font-mono">{x.activity_code}</td><td className="py-1 pr-2 font-mono">{x.dx}</td>
+                      <td className="py-1 pr-2">{x.payer}</td><td className="py-1 pr-2">{x.code}</td>
+                      <td className="py-1 pr-2 text-right tabular-nums">{fmt(x.amount)}</td>
+                      {gapH && <td className="py-1 pr-2 text-right tabular-nums">{x.gap ?? "—"}</td>}
+                      <td className="max-w-[260px] truncate py-1" title={x.remark}>{x.remark}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AlertRow({ a, onWhy, onClin }) {
   const [busy, setBusy] = useState(false);
   const s = a.split;
   return (
@@ -143,7 +230,16 @@ function AlertRow({ a, onWhy }) {
         {a.code && <button className="gh-btn-secondary gh-btn-sm" onClick={() => onWhy(a)}>Why?</button>}
         {a.code && <button className="gh-btn-secondary gh-btn-sm" disabled={busy} onClick={() => downloadLines(a, setBusy)}>
           {busy ? "Preparing…" : "Excel"}</button>}
-        <Link to={a.link} className="gh-btn-secondary gh-btn-sm">Open →</Link>
+        {a.clinician ? (
+          a.insight?.cause === "doc" && a.insight?.doc_month ? (
+            <>
+              <button className="gh-btn-secondary gh-btn-sm" onClick={() => onClin(a)}>Denied lines</button>
+              <Link className="gh-btn-secondary gh-btn-sm"
+                to={`/doc-review?facility_id=${a.facility_id}&month=${a.insight.doc_month}&clinician=${encodeURIComponent(a.clinician)}`}>
+                Documentation review →</Link>
+            </>
+          ) : <button className="gh-btn-secondary gh-btn-sm" onClick={() => onClin(a)}>Open →</button>
+        ) : <Link to={a.link} className="gh-btn-secondary gh-btn-sm">Open →</Link>}
       </div>
     </li>
   );
@@ -157,6 +253,7 @@ export default function Alerts() {
   const [fac, setFac] = useState("");
   const [week, setWeek] = useState(false);
   const [drill, setDrill] = useState(null);
+  const [clin, setClin] = useState(null);
   const [showBase, setShowBase] = useState(false);
 
   const load = (refresh = false) => {
@@ -267,7 +364,7 @@ export default function Alerts() {
                       <span className="text-xs text-slate-500">{arr.length} alert{arr.length > 1 ? "s" : ""}</span>
                     </div>
                     <ul className="divide-y divide-slate-100">
-                      {arr.map((a, i) => <AlertRow key={i} a={a} onWhy={x => setDrill(x)} />)}
+                      {arr.map((a, i) => <AlertRow key={i} a={a} onWhy={x => setDrill(x)} onClin={x => setClin(x)} />)}
                     </ul>
                   </section>
                 );
@@ -322,6 +419,7 @@ export default function Alerts() {
           </section>
         </>
       )}
+      {clin && <ClinicianPanel a={clin} onClose={() => setClin(null)} />}
       {drill && <DenialDrill code={drill.code} payer={drill.payer} facilityId={drill.facility_id || ""}
         month={new Date().toISOString().slice(0, 7)} onClose={() => setDrill(null)} />}
     </div>

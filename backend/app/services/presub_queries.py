@@ -275,7 +275,9 @@ class History:
         return (d, n) if n >= NCOV_MIN_CLAIMS and d / n >= NCOV_MIN_RATE else None
 
 
-REPEAT_TESTS = {"80061": ("LIPID PANEL", 180)}   # code -> (name, days); verified from remittance history
+# code -> (name, days); verified from remittance history (MNEC denials, Aug-Nov 2026):
+#   80061 repeat <=180d 45% vs first 28%; 83036 repeat <=90d 43% vs 19-22% after 90d / first
+REPEAT_TESTS = {"80061": ("LIPID PANEL", 180), "83036": ("HBA1C", 90)}
 
 
 _SESSION_SQL = text("""

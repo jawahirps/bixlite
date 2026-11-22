@@ -1,0 +1,9 @@
+[Unit]
+Description=BIX Lite Documentation review on the 16th at 06:00 Dubai (submissions close on the 15th)
+
+[Timer]
+OnCalendar=*-*-16 06:00:00 Asia/Dubai
+Persistent=true
+
+[Install]
+WantedBy=timers.target

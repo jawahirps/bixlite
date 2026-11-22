@@ -10,6 +10,7 @@
  * Tabs: Dashboard · Findings · Payer patterns · Downloads
  */
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import apiClient from "../api/client";
 import { readFacility, saveFacility } from "../utils/facility";
 
@@ -279,14 +280,16 @@ function Downloads({ facilityId, month, fac, dash }) {
 }
 
 export default function DocReview() {
+  // a link (e.g. from Facility alerts) can open a clinician's findings: ?facility_id=9&month=2026-09&clinician=X
+  const [params] = useSearchParams();
   const [facilities, setFacilities] = useState([]);
-  const [facilityId, setFacilityIdState] = useState(() => readFacility());
+  const [facilityId, setFacilityIdState] = useState(() => params.get("facility_id") || readFacility());
   const setFacilityId = (id) => { setFacilityIdState(id); saveFacility(id); };
-  const [month, setMonth] = useState(lastMonth);
+  const [month, setMonth] = useState(() => params.get("month") || lastMonth);
   const [runs, setRuns] = useState([]);
   const [dash, setDash] = useState(null);
-  const [tab, setTab] = useState("dashboard");
-  const [filters, setFilters] = useState({ tier: "", category: "", clinician: "", review: "" });
+  const [tab, setTab] = useState(() => (params.get("clinician") ? "findings" : "dashboard"));
+  const [filters, setFilters] = useState({ tier: "", category: "", clinician: params.get("clinician") || "", review: "" });
   const [msg, setMsg] = useState("");
 
   useEffect(() => {

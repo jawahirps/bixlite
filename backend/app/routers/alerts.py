@@ -481,6 +481,13 @@ def _compute(db: Session, today: date) -> dict:  # today can be set in the past 
         return top, pay[top] / tot
 
     def insight_for(kind, fid, clin, d, pay, cons=None):
+        i = _insight(kind, fid, clin, d, pay, cons)
+        doc = docs.get((fid, clin.upper()))
+        if doc:
+            i["doc_month"] = doc.last_month
+        return i
+
+    def _insight(kind, fid, clin, d, pay, cons=None):
         ev = []
         doc = docs.get((fid, clin.upper()))
         if kind == "clinician_consult":
@@ -1014,5 +1021,114 @@ def alert_lines_xlsx(
     ws.freeze_panes = "C2"; ws.auto_filter.ref = ws.dimensions
     buf = io.BytesIO(); wb.save(buf); buf.seek(0)
     name = f"alert_{code}_{payer or 'all'}_{today:%Y%m%d}.xlsx"
+    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                             headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+# ---- clinician panel: the lines behind one clinician alert -----------------------------------------
+_KIND_FILTER = {
+    "clinician_pattern": "ad.denial_code ILIKE 'MNEC%'",
+    "clinician_rate": "ad.denial_code ILIKE 'MNEC%'",
+    "clinician_tests": "ad.denial_code ILIKE 'MNEC%' AND ad.activity_code ~ '^8[0-9]{4}$'",
+    "clinician_consult": "ad.denial_code ~* '^(PRCE|CLAI|MNEC)' AND ad.activity_code = ANY(:cc)",
+    "clinician_unspec": "(ad.denial_code ILIKE 'MNEC%' OR ad.denial_code ILIKE 'CODE%') "
+                        "AND (dx.diagnosis_code ~ '^R' OR dx.diagnosis_code ~ '\\.9$' OR dx.diagnosis_code ~ '^[A-Z][0-9]{2}\\.?9$')",
+}
+_CONS = ["9", "10", "11", "12", "13", "14", "9.01", "9.02", "10.01", "10.02", "11.01", "11.02", "22", "23", "24", "25"]
+
+
+def _clinician_lines(db, facility_id: int, clinician: str, kind: str):
+    if kind not in _KIND_FILTER:
+        raise HTTPException(400, "Unknown alert type")
+    # gap: tests -> days since the same test for the member; consultations -> days since the member's last visit
+    gap = ("""(SELECT cl.encounter_start::date - max(p.encounter_start::date) FROM claims p JOIN claim_activities pa
+                 ON pa.claim_id_fk = p.id WHERE p.facility_id = cl.facility_id AND p.member_id = cl.member_id
+                 AND p.resubmission_key = '' AND pa.activity_code = ad.activity_code
+                 AND p.encounter_start::date < cl.encounter_start::date AND p.encounter_start::date >= cl.encounter_start::date - 365)"""
+           if kind == "clinician_tests" else
+           """(SELECT cl.encounter_start::date - max(p.encounter_start::date) FROM claims p WHERE p.facility_id = cl.facility_id
+                 AND p.member_id = cl.member_id AND p.resubmission_key = ''
+                 AND p.encounter_start::date < cl.encounter_start::date AND p.encounter_start::date >= cl.encounter_start::date - 365)"""
+           if kind == "clinician_consult" else "NULL::int")
+    return db.execute(text(f"""
+        WITH r AS (
+          SELECT r.id, r.facility_id, r.claim_id, r.remittance_date, r.tpa_comments FROM remittances r
+          WHERE r.remittance_date >= current_date - 90 AND r.facility_id = :f
+            AND NOT EXISTS (SELECT 1 FROM claims x WHERE x.facility_id = r.facility_id AND x.claim_id = r.claim_id
+                            AND x.resubmission_key <> '' AND x.submission_date::date < r.remittance_date::date))
+        SELECT cl.claim_id, cl.encounter_start::date enc, r.remittance_date::date ra, ad.activity_code act,
+               a.activity_description act_desc, dx.diagnosis_code dx,
+               upper(coalesce(nullif(cl.receiver_id, ''), cl.payer_id)) payer, ad.denial_code code,
+               greatest(coalesce(ad.net, 0) - coalesce(ad.paid_amount, 0), 0) amt, r.tpa_comments remark, {gap} gap
+        FROM r JOIN remittance_activity_details ad ON ad.remittance_id_fk = r.id
+        JOIN LATERAL (SELECT * FROM claims x WHERE x.facility_id = r.facility_id AND x.claim_id = r.claim_id
+                      AND x.resubmission_key = '' ORDER BY x.id LIMIT 1) cl ON true
+        LEFT JOIN claim_activities a ON a.claim_id_fk = cl.id AND a.activity_id = ad.activity_id
+        LEFT JOIN LATERAL (SELECT d.diagnosis_code FROM claim_diagnoses d WHERE d.claim_id_fk = cl.id
+                           ORDER BY (d.diagnosis_type ILIKE 'principal') DESC, d.sequence_no NULLS LAST LIMIT 1) dx ON true
+        WHERE coalesce(nullif(a.clinician_id, ''), cl.clinician_id) = :c
+          AND coalesce(ad.net, 0) - coalesce(ad.paid_amount, 0) > 0.01 AND {_KIND_FILTER[kind]}
+        ORDER BY amt DESC, r.remittance_date DESC
+    """), {"f": facility_id, "c": clinician, "cc": _CONS}).all()
+
+
+def _clin_scope(user, facility_id):
+    if user.role != "admin":
+        if user.facility_id is None or user.facility_id != facility_id:
+            raise HTTPException(403, "Not your facility")
+
+
+@router.get("/clinician-lines")
+def clinician_lines(facility_id: int, clinician: str, kind: str,
+                    db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Denied lines behind a clinician alert (new denials, last 90 days), grouped and listed."""
+    _clin_scope(user, facility_id)
+    rows = _clinician_lines(db, facility_id, clinician, kind)
+    from collections import defaultdict
+    grp = defaultdict(lambda: {"lines": 0, "amount": 0.0, "desc": None, "codes": defaultdict(int)})
+    for x in rows:
+        g = grp[(x.act, x.dx if kind != "clinician_tests" else None)]
+        g["lines"] += 1; g["amount"] += float(x.amt); g["desc"] = g["desc"] or x.act_desc; g["codes"][x.code] += 1
+    groups = sorted(({"activity_code": k[0], "diagnosis_code": k[1], "activity": v["desc"], "lines": v["lines"],
+                      "amount": round(v["amount"], 2), "top_code": max(v["codes"], key=v["codes"].get)}
+                     for k, v in grp.items()), key=lambda g: -g["amount"])[:12]
+    gaps = [x.gap for x in rows if x.gap is not None]
+    bands = None
+    if kind == "clinician_tests":
+        bands = {"≤90 days": sum(g <= 90 for g in gaps), "91–180 days": sum(90 < g <= 180 for g in gaps),
+                 "first in 12 months": len(rows) - sum(g <= 180 for g in gaps)}
+    elif kind == "clinician_consult":
+        bands = {"≤7 days": sum(g <= 7 for g in gaps), "8–28 days": sum(7 < g <= 28 for g in gaps),
+                 "over 28 days / first": len(rows) - sum(g <= 28 for g in gaps)}
+    return {"total": len(rows), "amount": round(sum(float(x.amt) for x in rows), 2), "groups": groups, "gap_bands": bands,
+            "rows": [{"claim_id": x.claim_id, "enc": x.enc, "ra": x.ra, "activity_code": x.act, "activity": x.act_desc,
+                      "dx": x.dx, "payer": x.payer, "code": x.code, "amount": float(x.amt), "gap": x.gap,
+                      "remark": (x.remark or "")[:200]} for x in rows[:300]]}
+
+
+@router.get("/clinician-lines.xlsx")
+def clinician_lines_xlsx(facility_id: int, clinician: str, kind: str,
+                         db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    import io
+    from fastapi.responses import StreamingResponse
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    _clin_scope(user, facility_id)
+    rows = _clinician_lines(db, facility_id, clinician, kind)
+    wb = Workbook(); ws = wb.active; ws.title = "Denied lines"
+    gap_h = {"clinician_tests": "Days since same test", "clinician_consult": "Days since last visit"}.get(kind, "")
+    hdr = ["Claim ID", "Encounter", "RA date", "Service", "Description", "Principal Dx", "Payer", "Denial code",
+           "Denied AED", "TPA remark"] + ([gap_h] if gap_h else [])
+    ws.append(hdr)
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF"); c.fill = PatternFill("solid", fgColor="006884")
+    for x in rows:
+        ws.append([x.claim_id, x.enc, x.ra, x.act, x.act_desc, x.dx, x.payer, x.code, float(x.amt), (x.remark or "")[:300]]
+                  + ([x.gap] if gap_h else []))
+    for col, w in zip("ABCDEFGHIJK", (30, 11, 11, 12, 30, 12, 10, 12, 11, 60, 12)):
+        ws.column_dimensions[col].width = w
+    ws.freeze_panes = "B2"; ws.auto_filter.ref = ws.dimensions
+    buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+    name = f"clinician_{clinician}_{kind.replace('clinician_', '')}_{date.today():%Y%m%d}.xlsx"
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                              headers={"Content-Disposition": f'attachment; filename="{name}"'})

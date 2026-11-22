@@ -10,6 +10,7 @@ const Analytics = lazy(() => import("./pages/Analytics"));
 const LoginActivity = lazy(() => import("./pages/LoginActivity"));
 const FacilitySettings = lazy(() => import("./pages/FacilitySettings"));
 const RemittancePortal = lazy(() => import("./pages/portal/RemittancePortal"));
+const DashboardPortal = lazy(() => import("./pages/portal/DashboardPortal"));
 const Jobs = lazy(() => import("./pages/Jobs"));
 const DocReview = lazy(() => import("./pages/DocReview"));
 const Scrubber = lazy(() => import("./pages/Scrubber"));
@@ -39,6 +40,7 @@ export default function App() {
 
       {/* Public portal — no auth required, token-gated by backend */}
       <Route path="/portal/remittance" element={<RemittancePortal />} />
+      <Route path="/portal/dashboard" element={<DashboardPortal />} />
 
       <Route element={<ProtectedRoute />}>
         <Route element={<Layout />}>

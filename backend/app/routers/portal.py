@@ -379,3 +379,54 @@ def remittance_payers(
         .all()
     )
     return [{"payer_id": r[0], "payer_name": _payer_name(r[0])} for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# GET /portal/dashboard — facility-facing summary dashboard (no patient data)
+# ---------------------------------------------------------------------------
+@router.get("/dashboard")
+def portal_dashboard(months: int = Query(12, ge=3, le=24), facility_id: Optional[int] = None,
+                     pt: PortalToken = Depends(_get_portal_token), db: Session = Depends(get_db)):
+    """Totals by encounter month, denial reasons and payers for the token's facility. Summaries only:
+    no claim IDs, patient, member or Emirates IDs leave the server."""
+    from app.routers.dashboard import _SQL, COUNTS, AMOUNTS
+    from app.routers.alerts import _dd_desc
+    from app.services.payer_names import payer_name as _pn
+    fids = _facility_ids(pt)
+    fid = facility_id if facility_id in fids else fids[0]
+    fac = db.get(Facility, fid)
+    d1 = date.today()
+    d0 = (d1.replace(day=1) - timedelta(days=31 * (months - 1))).replace(day=1)
+    rows = db.execute(_text(_SQL), {"f": fid, "d0": d0, "d1": d1 + timedelta(days=1)}).mappings().all()
+    ms = [{"month": r["m"], **{k: int(r[k] or 0) for k in COUNTS}, **{k: round(float(r[k] or 0), 2) for k in AMOUNTS}}
+          for r in rows]
+    total = {k: sum(m[k] for m in ms) for k in COUNTS + AMOUNTS}
+    # unpaid amount by denial code and payer (latest RA per activity), same encounter period
+    agg = db.execute(_text("""
+        WITH c AS (SELECT DISTINCT ON (claim_id) claim_id, upper(coalesce(nullif(receiver_id, ''), payer_id)) payer
+                   FROM claims WHERE facility_id = :f AND encounter_start >= :d0 AND encounter_start < :d1
+                   ORDER BY claim_id, submission_date DESC NULLS LAST, id DESC),
+        l AS (SELECT DISTINCT ON (r.claim_id, ad.activity_id) r.claim_id, ad.denial_code, ad.activity_code,
+                     greatest(coalesce(ad.net, 0) - coalesce(ad.paid_amount, 0), 0) amt
+              FROM remittances r JOIN c USING (claim_id) JOIN remittance_activity_details ad ON ad.remittance_id_fk = r.id
+              WHERE r.facility_id = :f
+              ORDER BY r.claim_id, ad.activity_id, r.remittance_date DESC, r.id DESC)
+        SELECT l.denial_code code, c.payer, sum(l.amt) amt, count(*) n
+        FROM l JOIN c USING (claim_id) WHERE coalesce(l.denial_code, '') <> '' AND l.amt > 0.01 GROUP BY 1, 2
+    """), {"f": fid, "d0": d0, "d1": d1 + timedelta(days=1)}).all()
+    tot = sum(float(r.amt) for r in agg) or 1
+    by_code, by_payer = {}, {}
+    for r in agg:
+        by_code.setdefault(r.code, [0.0, 0]); by_code[r.code][0] += float(r.amt); by_code[r.code][1] += r.n
+        by_payer.setdefault(r.payer, [0.0, 0]); by_payer[r.payer][0] += float(r.amt); by_payer[r.payer][1] += r.n
+    top = lambda d: sorted(d.items(), key=lambda kv: -kv[1][0])[:8]
+    return {
+        "facility": fac.facility_name if fac else "", "facilities": [
+            {"id": f.id, "name": f.facility_name} for f in db.query(Facility).filter(Facility.id.in_(fids))],
+        "facility_id": fid, "date_from": d0.isoformat(), "date_to": d1.isoformat(), "total": total, "months": ms,
+        "denial_reasons": [{"code": k, "description": _dd_desc(k), "lines": v[1], "amount": round(v[0], 2),
+                            "share_pct": round(100 * v[0] / tot)} for k, v in top(by_code)],
+        "payers": [{"payer": _pn(k) or k, "lines": v[1], "amount": round(v[0], 2), "share_pct": round(100 * v[0] / tot)}
+                   for k, v in top(by_payer)],
+        "as_of": datetime.now().strftime("%d %b %Y %H:%M"),
+    }

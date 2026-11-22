@@ -5,6 +5,11 @@ import DenialDrill from "./DenialDrill";
 
 const TYPES = {
   denial_code_spike: "TPA denial spike (weekly)",
+  clinician_pattern: "Clinician: service × diagnosis",
+  clinician_rate: "Clinician: denial rate vs peers",
+  clinician_consult: "Clinician: consultation rules",
+  clinician_tests: "Clinician: tests per visit",
+  clinician_unspec: "Clinician: unspecified diagnosis",
   denial_above_usual: "Denial code above usual (month)",
   denial_spike: "Denial rate (monthly)",
   payment_rate: "Payment rate",
@@ -49,6 +54,31 @@ function Stat({ label, value, sub, tone }) {
   );
 }
 
+const CAUSE = {   // subtle accents in the app's own tones
+  repeat: "bg-pending", habit: "bg-pending", payer: "bg-ghaf-600", doc: "bg-ink", unclear: "bg-slate-400",
+};
+
+function InsightStrip({ i }) {
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-md border border-hairline bg-sage/60 px-3 py-1.5"
+      title="Likely cause: a rule-based reading of the facts below, not a fact itself">
+      <span className="flex items-center gap-1.5 text-xs">
+        <span className={`h-1.5 w-1.5 rounded-full ${CAUSE[i.cause] || CAUSE.unclear}`} />
+        <span className="text-slate-500">Likely</span>
+        <span className="font-semibold text-ink">{i.label}</span>
+      </span>
+      {i.evidence?.map((e, k) => (
+        <span key={k} className="border-l border-hairline pl-4 text-xs text-slate-500">
+          <b className="font-semibold tabular-nums text-ink">{e.v}</b> {e.l}
+        </span>
+      ))}
+      <span className="w-full text-xs text-slate-600 sm:ml-auto sm:w-auto">
+        <span className="text-ghaf-600">→</span> {i.act}
+      </span>
+    </div>
+  );
+}
+
 function AlertRow({ a, onWhy }) {
   const [busy, setBusy] = useState(false);
   const s = a.split;
@@ -61,6 +91,7 @@ function AlertRow({ a, onWhy }) {
         <span className="text-xs text-slate-500">{TYPES[a.type] || a.type}</span>
       </div>
       <p className="mt-1 text-sm font-medium text-ink">{a.title}</p>
+      {a.insight && <InsightStrip i={a.insight} />}
       {s && s.new_lines > 0 && (
         <div className="mt-2 grid gap-1.5 text-sm">
           {s.new_lines > 0 && (
@@ -72,7 +103,42 @@ function AlertRow({ a, onWhy }) {
           )}
         </div>
       )}
+      {a.patterns?.length > 0 && (
+        <div className="mt-2 overflow-x-auto">
+          <table className="min-w-full text-xs">
+            <thead className="text-left uppercase tracking-wide text-slate-500">
+              <tr><th className="py-1 pr-2">Service</th><th className="py-1 pr-2">Principal Dx</th>
+                <th className="py-1 pr-2 text-right">Denied</th><th className="py-1 pr-2 text-right">Rate</th>
+                <th className="py-1 pr-2 text-right">Others</th><th className="py-1 pr-2 text-right">AED</th>
+                <th className="py-1">Payer · code</th></tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {a.patterns.map((p, i) => (
+                <tr key={i}>
+                  <td className="py-1 pr-2 font-mono">{p.activity_code}{p.activity && <span className="block max-w-[160px] truncate font-sans text-slate-500">{p.activity}</span>}</td>
+                  <td className="py-1 pr-2 font-mono">{p.diagnosis_code}</td>
+                  <td className="py-1 pr-2 text-right tabular-nums">{p.denied} / {p.lines}</td>
+                  <td className="py-1 pr-2 text-right font-semibold tabular-nums text-denied">{p.rate_pct}%</td>
+                  <td className="py-1 pr-2 text-right tabular-nums text-slate-500" title={`${p.others_lines} lines by other clinicians`}>
+                    {p.others_rate_pct == null ? "rarely billed" : `${p.others_rate_pct}%`}</td>
+                  <td className="py-1 pr-2 text-right tabular-nums">{fmt(p.amount)}</td>
+                  <td className="py-1">{p.payer}{p.denial_code ? ` · ${p.denial_code}` : ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
       <p className="mt-1 text-xs text-slate-500">{a.detail}</p>
+      {a.stats?.top_cpt?.length > 0 && (
+        <p className="mt-1 text-xs text-slate-700"><b>Most denied tests:</b> {a.stats.top_cpt.map(t =>
+          `${t.code}${t.description ? " " + t.description : ""} (${t.denied} lines, AED ${fmt(t.amount)})`).join(" · ")}</p>
+      )}
+      {a.facts?.length > 0 && (
+        <ul className="mt-1 space-y-0.5 text-xs text-slate-600">
+          {a.facts.map((f, i) => <li key={i}>• {f}</li>)}
+        </ul>
+      )}
       <div className="mt-2 flex flex-wrap gap-1.5">
         {a.code && <button className="gh-btn-secondary gh-btn-sm" onClick={() => onWhy(a)}>Why?</button>}
         {a.code && <button className="gh-btn-secondary gh-btn-sm" disabled={busy} onClick={() => downloadLines(a, setBusy)}>

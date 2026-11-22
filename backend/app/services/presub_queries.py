@@ -275,6 +275,9 @@ class History:
         return (d, n) if n >= NCOV_MIN_CLAIMS and d / n >= NCOV_MIN_RATE else None
 
 
+REPEAT_TESTS = {"80061": ("LIPID PANEL", 180)}   # code -> (name, days); verified from remittance history
+
+
 _SESSION_SQL = text("""
 SELECT sc.id, sc.claim_id, sc.patient_id, coalesce(sc.member_id,'') AS member_id, sc.encounter_start AS d,
        sc.case_sheet, sc.obs_codes,
@@ -402,6 +405,24 @@ def generate(db: Session, session_id: int) -> int:
                 if k not in ("P:", "M:"):
                     visits[k].setdefault(v.claim_id, v)
 
+    # tests repeated within the payer's interval (80061: repeat inside 6 months denied 56-64% vs 35-45% first-time
+    # at Sabah Al Noor; 45% vs 28% network-wide, new denials Aug-Nov 2026)
+    rep_hist: Dict[tuple, list] = defaultdict(list)    # (member, code) -> [date, ...] submitted + this session
+    if d0:
+        for r in db.execute(text("""
+            SELECT DISTINCT c.member_id, upper(a.activity_code) code, c.encounter_start::date d
+            FROM claims c JOIN claim_activities a ON a.claim_id_fk = c.id
+            WHERE c.facility_id = :f AND c.resubmission_key = '' AND coalesce(c.member_id, '') <> ''
+              AND upper(a.activity_code) = ANY(:codes) AND c.encounter_start >= :d0 AND c.encounter_start <= :d1"""),
+                {"f": fid, "codes": list(REPEAT_TESTS), "d0": d0 - timedelta(days=max(v[1] for v in REPEAT_TESTS.values())),
+                 "d1": d1}):
+            rep_hist[(r.member_id, r.code)].append(r.d)
+        for c in claims:
+            if c["member_id"] and c["d"]:
+                for a in acts[c["id"]]:
+                    if a.activity_code in REPEAT_TESTS:
+                        rep_hist[(c["member_id"], a.activity_code)].append(c["d"].date() if hasattr(c["d"], "date") else c["d"])
+
     # NAS members already denied for a missing GP referral (any facility, last 12 months)
     gp_ref_members = {r.member_id: (r.last, r.n) for r in db.execute(text("""
         SELECT c.member_id, max(r.remittance_date) last, count(*) n
@@ -508,6 +529,22 @@ def generate(db: Session, session_id: int) -> int:
                               f"{na} ({ca}) and {nb} ({cb}) are billed together — {PAIR_REASON[(ca, cb)]}. Without "
                               f"documented necessity for both there is a high chance of denial.", incharge="DOCTOR",
                               evidence=ev))
+
+        # ---- repeat tests within the payer interval -----------------------------------------
+        cd = c["d"].date() if hasattr(c["d"], "date") else c["d"]
+        for code in sorted(codes & set(REPEAT_TESTS)):
+            if not (c["member_id"] and cd):
+                continue
+            name, days = REPEAT_TESTS[code]
+            prior = sorted(x for x in rep_hist.get((c["member_id"], code), []) if 0 < (cd - x).days <= days)
+            if prior:
+                last = prior[-1]
+                out.append(_q("REPEAT_TEST", "Repeat test within interval — necessity", "IMPENDING REJECTION", code,
+                              f"{name} ({code}) was already billed for this member on {last:%d/%m/%Y} "
+                              f"({(cd - last).days} days ago). Repeats within {days // 30} months are frequently denied "
+                              f"as not medically necessary — kindly document the reason for the repeat (change in "
+                              f"treatment, abnormal previous result) or remove the test.", incharge="DOCTOR",
+                              evidence=f"Previous {code} on {last:%d/%m/%Y}."))
 
         # ---- approvals ------------------------------------------------------------------
         billable = [a for a in A if float(a.net or 0) > 0 and not CONSULT_BASE.match(a.activity_code.split(".")[0])]

@@ -14,6 +14,11 @@ Alert types
                  paid / net, both against the facility's own baseline
   overdue        claims with no RA more than 45 days after submission (payer breach of SN 3.9.1)
                  above the facility's normal share
+  clinician_rate / clinician_consult / clinician_tests / clinician_unspec  a clinician vs same-specialty peers
+                 at the facility: MNEC denial rate, consultation-rule denials, lab tests per visit (MNEC),
+                 unspecified principal diagnosis share (90 days, new denials)
+  clinician_pattern  a clinician's service x principal diagnosis combination denied far more often than the
+                 same combination from the facility's other clinicians (new denials, last 90 days)
   submission_gap no first-submission batch when expected: monthly-batch facilities 3 days after their usual
                  batch day; others after their longest normal gap + 3 days (batch days = >= 5% of the month)
   sn_deadline    service month not yet submitted at the usual volume near / after the 15th
@@ -46,6 +51,36 @@ _TTL = 3600
 
 def _sd(xs):
     return statistics.pstdev(xs) if len(xs) > 1 else 0.0
+
+
+from functools import lru_cache as _lru
+
+
+@_lru(maxsize=1)
+def _specialties() -> dict:
+    """License -> eClaimLink specialty, from data/clinicians.xlsx (DHA_HRD + MOH sheets)."""
+    import os
+    import openpyxl
+    p = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "clinicians.xlsx"))
+    out = {}
+    try:
+        wb = openpyxl.load_workbook(p, read_only=True, data_only=True)
+        for ws in wb.worksheets:
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if row and row[0] and len(row) > 2 and row[2]:
+                    out[str(row[0]).strip().upper()] = " ".join(str(row[2]).replace("\xa0", " ").split())
+        wb.close()
+    except Exception:
+        pass
+    return out
+
+
+def _dd_desc(code):
+    try:
+        from ..services.denial_codes import denial_description
+        return denial_description(code) or ""
+    except Exception:
+        return ""
 
 
 def _blank_split():
@@ -283,6 +318,399 @@ def _compute(db: Session, today: date) -> dict:  # today can be set in the past 
 
     # (Reconciliation of re-denied claims is not a facility alert: it belongs to the resubmission /
     #  reconciliation worklists. Spikes above count only NEW denials, so re-denials don't inflate them.)
+
+    # ---- 1e/1f. Clinician patterns (NEW denials, last 90 days, MNEC = medical-necessity denials) ---------
+    # Clinician-driven denials are medical-necessity (MNEC) denials, so the clinician checks count MNEC only,
+    # except the consultation-rule check, which looks at consultation-code denials (billing rules).
+    #   clinician_pattern  service x principal Dx denied (MNEC) far more than the facility's other clinicians
+    #   clinician_rate     MNEC denial rate vs same-specialty peers at the facility
+    #   clinician_consult  consultation lines denied under consultation rules (PRCE / CLAI / MNEC) vs peers
+    #   clinician_tests    lab tests per visit vs peers, with MNEC denials (+ the most denied CPT)
+    #   clinician_unspec   share of visits with an unspecified principal Dx vs peers, with MNEC/CODE denials
+    # Each clinician alert also carries: payer spread (one payer or all), MNEC rate by RA month, and the
+    # clinician's Documentation review findings.
+    _CL_CTE = """
+        WITH r AS (
+          SELECT r.id, r.facility_id, r.claim_id, r.remittance_date FROM remittances r
+          WHERE r.remittance_date >= :s AND r.facility_id = ANY(:ids)
+            AND NOT EXISTS (SELECT 1 FROM claims x WHERE x.facility_id = r.facility_id AND x.claim_id = r.claim_id
+                            AND x.resubmission_key <> '' AND x.submission_date::date < r.remittance_date::date)),
+        c AS (
+          SELECT DISTINCT ON (c.facility_id, c.claim_id) c.id, c.facility_id, c.claim_id, c.clinician_id,
+                 c.clinician_name, upper(coalesce(nullif(c.receiver_id, ''), c.payer_id)) rec
+          FROM claims c JOIN (SELECT DISTINCT facility_id, claim_id FROM r) k USING (facility_id, claim_id)
+          WHERE c.resubmission_key = '' ORDER BY c.facility_id, c.claim_id, c.id),
+        dx AS (
+          SELECT DISTINCT ON (d.claim_id_fk) d.claim_id_fk, d.diagnosis_code FROM claim_diagnoses d
+          JOIN c ON c.id = d.claim_id_fk
+          ORDER BY d.claim_id_fk, (d.diagnosis_type ILIKE 'principal') DESC, d.sequence_no NULLS LAST)
+    """
+    _MN = "ad.denial_code ILIKE 'MNEC%' AND coalesce(ad.net, 0) - coalesce(ad.paid_amount, 0) > 0.01"
+    _DEN = "coalesce(ad.denial_code, '') <> '' AND coalesce(ad.net, 0) - coalesce(ad.paid_amount, 0) > 0.01"
+    _AMT = "greatest(coalesce(ad.net, 0) - coalesce(ad.paid_amount, 0), 0)"
+    _P = {"s": today - timedelta(days=90), "ids": ids}
+    rows = db.execute(text(_CL_CTE + f"""
+        SELECT r.facility_id, coalesce(nullif(a.clinician_id, ''), c.clinician_id) clin, max(c.clinician_name) clin_name,
+               ad.activity_code act, max(a.activity_description) act_desc, dx.diagnosis_code dx, c.rec,
+               count(*) n,
+               count(*) FILTER (WHERE {_DEN}) den,
+               coalesce(sum({_AMT}) FILTER (WHERE {_DEN}), 0) amt,
+               count(*) FILTER (WHERE {_MN}) mden,
+               coalesce(sum({_AMT}) FILTER (WHERE {_MN}), 0) mamt,
+               coalesce(sum({_AMT}) FILTER (WHERE ad.denial_code ILIKE 'CODE%'), 0) codeamt,
+               mode() WITHIN GROUP (ORDER BY ad.denial_code) FILTER (WHERE {_MN}) mcode,
+               mode() WITHIN GROUP (ORDER BY ad.denial_code) FILTER (WHERE {_DEN}) code
+        FROM r JOIN remittance_activity_details ad ON ad.remittance_id_fk = r.id
+        JOIN c ON c.facility_id = r.facility_id AND c.claim_id = r.claim_id
+        LEFT JOIN claim_activities a ON a.claim_id_fk = c.id AND a.activity_id = ad.activity_id
+        LEFT JOIN dx ON dx.claim_id_fk = c.id
+        WHERE dx.diagnosis_code IS NOT NULL AND coalesce(ad.activity_code, '') <> ''
+        GROUP BY r.facility_id, 2, ad.activity_code, dx.diagnosis_code, c.rec
+    """), _P).all()
+    trend_rows = db.execute(text(_CL_CTE + f"""
+        SELECT r.facility_id, coalesce(nullif(a.clinician_id, ''), c.clinician_id) clin,
+               to_char(r.remittance_date, 'YYYY-MM') m, count(*) n, count(*) FILTER (WHERE {_MN}) mden
+        FROM r JOIN remittance_activity_details ad ON ad.remittance_id_fk = r.id
+        JOIN c ON c.facility_id = r.facility_id AND c.claim_id = r.claim_id
+        LEFT JOIN claim_activities a ON a.claim_id_fk = c.id AND a.activity_id = ad.activity_id
+        GROUP BY 1, 2, 3
+    """), _P).all()
+    visit_rows = db.execute(text(_CL_CTE + """
+        SELECT c.facility_id, c.clinician_id clin, count(DISTINCT c.id) claims,
+               count(DISTINCT c.id) FILTER (WHERE dx.diagnosis_code ~ '^R' OR dx.diagnosis_code ~ '\\.9$'
+                                            OR dx.diagnosis_code ~ '^[A-Z][0-9]{2}\\.?9$') unspec
+        FROM c LEFT JOIN dx ON dx.claim_id_fk = c.id GROUP BY 1, 2
+    """), _P).all()
+    doc_rows = db.execute(text("""
+        SELECT facility_id, upper(clinician_id) clin, count(*) n, mode() WITHIN GROUP (ORDER BY category) cat,
+               max(month) last_month, coalesce(sum(amount_at_risk), 0) risk
+        FROM doc_findings WHERE facility_id = ANY(:ids) AND month >= :m AND coalesce(clinician_id, '') <> ''
+        GROUP BY 1, 2
+    """), {"ids": ids, "m": _month_start(today, 4).strftime("%Y-%m")}).all()
+    _CONS_CODES = ["9", "10", "11", "12", "13", "14", "9.01", "9.02", "10.01", "10.02", "11.01", "11.02",
+                   "22", "23", "24", "25"]
+    # consultation-rule denials counted per line (PRCE / CLAI / MNEC), with the gap to the patient's previous visit
+    cons_rows = db.execute(text(_CL_CTE + f"""
+        SELECT r.facility_id, coalesce(nullif(a.clinician_id, ''), c.clinician_id) clin, ad.denial_code code, c.rec,
+               count(*) den, coalesce(sum({_AMT}), 0) amt,
+               count(*) FILTER (WHERE EXISTS (SELECT 1 FROM claims p WHERE p.facility_id = r.facility_id
+                   AND p.member_id = cl.member_id AND coalesce(cl.member_id, '') <> '' AND p.resubmission_key = ''
+                   AND p.encounter_start::date < cl.encounter_start::date
+                   AND p.encounter_start::date >= cl.encounter_start::date - 30)) prior30
+        FROM r JOIN remittance_activity_details ad ON ad.remittance_id_fk = r.id
+        JOIN c ON c.facility_id = r.facility_id AND c.claim_id = r.claim_id
+        JOIN claims cl ON cl.id = c.id
+        LEFT JOIN claim_activities a ON a.claim_id_fk = c.id AND a.activity_id = ad.activity_id
+        WHERE ad.activity_code = ANY(:cc) AND ad.denial_code ~* '^(PRCE|CLAI|MNEC)' AND {_DEN}
+        GROUP BY 1, 2, 3, 4
+    """), {**_P, "cc": _CONS_CODES}).all()
+    # lab lines: repeated for the same member within 180 days? (MNEC denial rate repeat vs first-time)
+    rep_rows = db.execute(text(_CL_CTE + f"""
+        SELECT r.facility_id, coalesce(nullif(a.clinician_id, ''), c.clinician_id) clin, ad.activity_code act,
+               count(*) n, count(*) FILTER (WHERE {_MN}) den,
+               count(*) FILTER (WHERE rp) rn, count(*) FILTER (WHERE rp AND {_MN}) rden
+        FROM r JOIN remittance_activity_details ad ON ad.remittance_id_fk = r.id
+        JOIN c ON c.facility_id = r.facility_id AND c.claim_id = r.claim_id
+        JOIN claims cl ON cl.id = c.id
+        LEFT JOIN claim_activities a ON a.claim_id_fk = c.id AND a.activity_id = ad.activity_id
+        CROSS JOIN LATERAL (SELECT EXISTS (SELECT 1 FROM claims p JOIN claim_activities pa ON pa.claim_id_fk = p.id
+                   WHERE p.facility_id = r.facility_id AND p.member_id = cl.member_id AND coalesce(cl.member_id, '') <> ''
+                   AND p.resubmission_key = '' AND pa.activity_code = ad.activity_code
+                   AND p.encounter_start::date < cl.encounter_start::date
+                   AND p.encounter_start::date >= cl.encounter_start::date - 180) rp) z
+        WHERE ad.activity_code ~ '^8[0-9]{{4}}$'
+        GROUP BY 1, 2, 3
+    """), _P).all()
+    rep = {(r.facility_id, r.clin, r.act): r for r in rep_rows}
+    from ..services.payer_names import payer_name as _pn3
+    from collections import defaultdict as _dd3
+    visits = {(r.facility_id, r.clin): r.claims for r in visit_rows}
+    unspec = {(r.facility_id, r.clin): r.unspec for r in visit_rows}
+    trend = _dd3(dict)
+    for r in trend_rows:
+        if r.clin:
+            trend[(r.facility_id, r.clin)][r.m] = (r.n, r.mden)
+    docs = {(r.facility_id, r.clin): r for r in doc_rows}
+
+    def is_unspec(dxc):
+        import re as _re
+        d = (dxc or "").upper()
+        return d.startswith("R") or d.endswith(".9") or bool(_re.fullmatch(r"[A-Z]\d{2}\.?9", d))
+
+    def cname(clin, nm):
+        if nm: return nm
+        try:
+            from .reports import _clinician_name
+            n_ = _clinician_name(clin)
+            return n_ if n_ and n_ != clin else ""
+        except Exception:
+            return ""
+
+    def payer_note(pay: dict):
+        tot = sum(pay.values())
+        if tot <= 0: return None
+        top = max(pay, key=pay.get); share = pay[top] / tot
+        nm = _pn3(top) or top
+        if share >= 0.8:
+            return f"Mainly one payer: {nm} ({top}) — {share:.0%} of the MNEC amount"
+        return f"Across {sum(1 for v in pay.values() if v > 0)} payers; largest {nm} ({top}) {share:.0%} of the MNEC amount"
+
+    def facts_for(fid, clin, pay):
+        out = []
+        pn_ = payer_note(pay)
+        if pn_: out.append(pn_)
+        t = trend.get((fid, clin), {})
+        ms = sorted(t)[-4:]
+        if len(ms) >= 2:
+            parts = [f"{date(int(m[:4]), int(m[5:]), 1):%b} {round(100 * t[m][1] / t[m][0]) if t[m][0] else 0}%" for m in ms]
+            first = t[ms[0]][1] / t[ms[0]][0] if t[ms[0]][0] else 0
+            last = t[ms[-1]][1] / t[ms[-1]][0] if t[ms[-1]][0] else 0
+            dirn = "falling" if last < first - 0.05 else "rising" if last > first + 0.05 else "steady"
+            out.append(f"MNEC rate by RA month: {' · '.join(parts)} ({dirn})")
+        d = docs.get((fid, clin.upper()))
+        if d:
+            out.append(f"Documentation review: {d.n:,} findings up to {d.last_month}, mostly '{(d.cat or '').split('. ', 1)[-1]}'"
+                       + (f" (AED {float(d.risk):,.0f} at risk)" if d.risk else ""))
+        return out
+
+    # -- "Likely cause" strip: rule-based reading of the facts above (shown separately from the facts) --
+    def _share(pay):
+        tot = sum(pay.values())
+        if tot <= 0: return None, 0
+        top = max(pay, key=pay.get)
+        return top, pay[top] / tot
+
+    def insight_for(kind, fid, clin, d, pay, cons=None):
+        ev = []
+        doc = docs.get((fid, clin.upper()))
+        if kind == "clinician_consult":
+            top, sh = _share(cons["cpay"])
+            pr = cons["cprior"] / cons["cden"] if cons["cden"] else 0
+            if sh >= 0.8:
+                ev = [{"v": f"{sh:.0%}", "l": f"one payer ({_pn3(top) or top})"}]
+                if pr >= 0.6:
+                    ev.append({"v": f"{pr:.0%}", "l": "within 30 days of the last visit"})
+                    return {"cause": "payer", "label": "Payer follow-up rule", "evidence": ev,
+                            "act": "Clinic admin / billing: check the payer's follow-up window (.01 / .02)"}
+                return {"cause": "payer", "label": "Payer rule", "evidence": ev, "act": "Clinic admin / billing"}
+            return {"cause": "unclear", "label": "Unclear", "evidence": [{"v": f"{d['rate_pct']}% vs {d['peers_rate_pct']}%", "l": "denied vs peers"}],
+                    "act": "Review a sample of claims"}
+        if kind == "clinician_tests":
+            tc = d["top_cpt"][0] if d["top_cpt"] else None
+            r = rep.get((fid, clin, tc["code"])) if tc else None
+            if r and r.rn >= 10 and r.den and r.n > r.rn:
+                rr, fr = r.rden / r.rn, (r.den - r.rden) / (r.n - r.rn)
+                if rr >= fr + 0.10 and r.rden / r.den >= 0.3:
+                    return {"cause": "repeat", "label": "Repeat test ≤ 6 months",
+                            "evidence": [{"v": f"{rr:.0%} vs {fr:.0%}", "l": f"{tc['code']} denied: repeat vs first test"},
+                                         {"v": f"{r.rden}/{r.den}", "l": f"denied {tc['code']} were repeats"}],
+                            "act": "Clinician + scrubber repeat-test check"}
+            return {"cause": "habit", "label": "Ordering habit",
+                    "evidence": [{"v": f"{d['tests_per_visit']} vs {d['peers_tests_per_visit']}", "l": "tests per visit vs peers"}]
+                    + ([{"v": f"AED {tc['amount']:,.0f}", "l": f"{tc['code']} most denied"}] if tc else []),
+                    "act": "Clinician (ordering practice)"}
+        if kind == "clinician_unspec":
+            ev = [{"v": f"{d['share_pct']}% vs {d['peers_share_pct']}%", "l": "unspecified dx vs peers"}]
+            if doc: ev.append({"v": f"{doc.n:,}", "l": "documentation findings"})
+            return {"cause": "doc", "label": "Documentation / coding", "evidence": ev, "act": "Coder + clinician feedback on specificity"}
+        top, sh = _share(pay)
+        if sh >= 0.8:
+            return {"cause": "payer", "label": "Payer rule", "evidence": [{"v": f"{sh:.0%}", "l": f"one payer ({_pn3(top) or top})"}],
+                    "act": "Clinic admin / payer"}
+        if doc:
+            return {"cause": "doc", "label": "Documentation", "evidence": [{"v": f"{doc.n:,}", "l": "documentation findings"},
+                    {"v": f"{sh:.0%}", "l": "largest payer share"}], "act": "Clinician (case-sheet documentation)"}
+        return {"cause": "unclear", "label": "Unclear", "evidence": [{"v": f"{sh:.0%}", "l": "largest payer share"}],
+                "act": "Review a sample of claims"}
+
+    # -- service x principal Dx patterns (MNEC) --
+    pair_tot = _dd3(lambda: [0, 0])
+    cl = {}
+    for r in rows:
+        pair_tot[(r.facility_id, r.act, r.dx)][0] += r.n
+        pair_tot[(r.facility_id, r.act, r.dx)][1] += r.mden
+        k = (r.facility_id, r.clin, r.act, r.dx)
+        x = cl.setdefault(k, {"n": 0, "den": 0, "amt": 0.0, "name": r.clin_name, "act_desc": r.act_desc,
+                              "payers": _dd3(float), "codes": _dd3(int)})
+        x["n"] += r.n; x["den"] += r.mden; x["amt"] += float(r.mamt or 0)
+        x["payers"][r.rec] += float(r.mamt or 0)
+        if r.mcode: x["codes"][r.mcode] += r.mden
+    by_clin = _dd3(list)
+    for (fid, clin, act, dx), x in cl.items():
+        if not clin or x["n"] < 15 or x["den"] < 10 or x["amt"] < 500:
+            continue
+        rate = x["den"] / x["n"]
+        tn, td = pair_tot[(fid, act, dx)]
+        on, od = tn - x["n"], td - x["den"]
+        orate = od / on if on else None
+        if on >= 10:
+            if not (rate >= 0.5 and rate - orate >= 0.25):
+                continue
+        elif rate < 0.7:
+            continue
+        payer = max(x["payers"], key=x["payers"].get) if x["payers"] else None
+        by_clin[(fid, clin)].append({
+            "activity_code": act, "activity": x["act_desc"], "diagnosis_code": dx, "lines": x["n"], "denied": x["den"],
+            "rate_pct": round(100 * rate), "others_rate_pct": round(100 * orate) if orate is not None else None,
+            "others_lines": on, "amount": round(x["amt"], 2), "payer": payer, "payer_name": _pn3(payer) if payer else None,
+            "denial_code": max(x["codes"], key=x["codes"].get) if x["codes"] else None, "name": x["name"],
+            "_payers": dict(x["payers"])})
+    per_fac = _dd3(int)
+    for (fid, clin), pats in sorted(by_clin.items(), key=lambda kv: -sum(p["amount"] for p in kv[1])):
+        if per_fac[fid] >= 3:
+            continue
+        per_fac[fid] += 1
+        pats.sort(key=lambda p: -p["amount"])
+        name = cname(clin, pats[0]["name"])
+        tot = sum(p["amount"] for p in pats)
+        top = pats[0]
+        pay = _dd3(float)
+        for p in pats:
+            for k_, v_ in p.pop("_payers").items(): pay[k_] += v_
+        add(fid, "clinician_pattern", "medium",
+            f"{name.title() + ' ' if name else ''}({clin}): {len(pats)} service × diagnosis pattern{'s' if len(pats) > 1 else ''} "
+            f"denied as not medically necessary far more than other clinicians",
+            f"Top: {top['activity_code']} with {top['diagnosis_code']} — {top['denied']} of {top['lines']} lines denied MNEC "
+            f"({top['rate_pct']}%" + (f" vs {top['others_rate_pct']}% for other clinicians" if top['others_rate_pct'] is not None else "")
+            + f"). AED {tot:,.0f} across these patterns in 90 days (new denials only).",
+            "/denial-trends", round(tot), None)
+        alerts[-1].update(clinician=clin, clinician_name=name, patterns=pats[:6], facts=facts_for(fid, clin, pay),
+                          insight=insight_for("clinician_pattern", fid, clin, None, pay))
+
+    # -- peer comparisons within the same specialty at the facility --
+    spec = _specialties()
+    CONSULT = {"9", "10", "11", "12", "13", "14", "9.01", "9.02", "10.01", "10.02", "11.01", "11.02",
+               "22", "23", "24", "25"}
+
+    def is_lab(a):
+        return bool(a) and len(a) == 5 and a.isdigit() and 80000 <= int(a) <= 89999
+    agg = _dd3(lambda: {"n": 0, "mden": 0, "mamt": 0.0, "cn": 0, "cden": 0, "camt": 0.0, "ccodes": _dd3(int),
+                        "lab": 0, "lmn": 0, "lmamt": 0.0, "labcodes": _dd3(lambda: [0, 0.0]), "name": None,
+                        "pay": _dd3(float), "uamt": 0.0, "udx": _dd3(int),
+                        "cpay": _dd3(float), "cprior": 0})
+    for r in rows:
+        if not r.clin:
+            continue
+        x = agg[(r.facility_id, r.clin)]
+        act = (r.act or "").strip()
+        x["n"] += r.n; x["mden"] += r.mden; x["mamt"] += float(r.mamt or 0); x["name"] = x["name"] or r.clin_name
+        x["pay"][r.rec] += float(r.mamt or 0)
+        if act in CONSULT:
+            x["cn"] += r.n
+            # consultation-rule denials only (price/visit rules, contract/referral, medical necessity) — not
+            # approval, co-pay, eligibility or coding denials
+        if is_lab(act):
+            x["lab"] += r.n; x["lmn"] += r.mden; x["lmamt"] += float(r.mamt or 0)
+            if r.mden:
+                x["labcodes"][(act, r.act_desc or "")][0] += r.mden
+                x["labcodes"][(act, r.act_desc or "")][1] += float(r.mamt or 0)
+        if is_unspec(r.dx):
+            x["uamt"] += float(r.mamt or 0) + float(r.codeamt or 0)
+            x["udx"][r.dx] += r.n
+
+    for r in cons_rows:
+        if not r.clin:
+            continue
+        x = agg[(r.facility_id, r.clin)]
+        x["cden"] += r.den; x["camt"] += float(r.amt or 0); x["ccodes"][r.code] += r.den
+        x["cpay"][r.rec] += float(r.amt or 0); x["cprior"] += r.prior30
+
+    def spec_of(clin):
+        k = clin.upper().strip()
+        for cand in (k, "MOH" + k, "SHA" + k, k[3:] if k.startswith("SHA") else None):
+            if cand and cand in spec:
+                return spec[cand]
+        return "Unknown specialty"
+    groups = _dd3(list)
+    for (fid, clin) in agg:
+        groups[(fid, spec_of(clin))].append(clin)
+
+    found = {"clinician_rate": [], "clinician_consult": [], "clinician_tests": [], "clinician_unspec": []}
+    for (fid, sp), clins in groups.items():
+        if len(clins) < 3 or sp == "Unknown specialty":
+            continue
+        for clin in clins:
+            x = agg[(fid, clin)]
+            peers = [agg[(fid, p)] for p in clins if p != clin]
+            # a) MNEC denial rate
+            pn, pd = sum(p["n"] for p in peers), sum(p["mden"] for p in peers)
+            if x["n"] >= 200 and pn >= 200 and x["mamt"] >= 1000:
+                rate, prate = x["mden"] / x["n"], pd / pn
+                if rate >= prate + 0.10 and rate >= 1.5 * prate:
+                    found["clinician_rate"].append((x["mamt"], fid, clin, sp, {
+                        "lines": x["n"], "denied": x["mden"], "rate_pct": round(100 * rate),
+                        "peers_rate_pct": round(100 * prate), "peers": len(peers), "amount": round(x["mamt"], 2)}))
+            # b) consultation rules (consultation-code denials, any code)
+            pcn, pcd = sum(p["cn"] for p in peers), sum(p["cden"] for p in peers)
+            if x["cn"] >= 30 and x["cden"] >= 10 and pcn >= 30 and x["camt"] >= 300:
+                rate, prate = x["cden"] / x["cn"], pcd / pcn
+                if rate >= prate + 0.15 and rate >= 2 * prate:
+                    codes = sorted(x["ccodes"].items(), key=lambda kv: -kv[1])[:3]
+                    found["clinician_consult"].append((x["camt"], fid, clin, sp, {
+                        "lines": x["cn"], "denied": x["cden"], "rate_pct": round(100 * rate), "peers_rate_pct": round(100 * prate),
+                        "peers": len(peers), "amount": round(x["camt"], 2),
+                        "codes": [{"code": k, "lines": v, "description": _dd_desc(k)} for k, v in codes]}))
+            # c) lab tests per visit
+            v = visits.get((fid, clin), 0)
+            pv = sum(visits.get((fid, p), 0) for p in clins if p != clin)
+            plab = sum(p["lab"] for p in peers)
+            if v >= 50 and pv >= 50 and x["lab"] >= 50:
+                tpv, ptpv = x["lab"] / v, plab / pv
+                mn_rate = x["lmn"] / x["lab"]
+                if tpv >= 1.5 * ptpv and tpv >= ptpv + 0.5 and mn_rate >= 0.15 and x["lmamt"] >= 500:
+                    top_cpt = sorted(x["labcodes"].items(), key=lambda kv: -kv[1][1])[:3]
+                    found["clinician_tests"].append((x["lmamt"], fid, clin, sp, {
+                        "visits": v, "tests": x["lab"], "tests_per_visit": round(tpv, 1), "peers_tests_per_visit": round(ptpv, 1),
+                        "peers": len(peers), "mnec_denied": x["lmn"], "mnec_rate_pct": round(100 * mn_rate),
+                        "amount": round(x["lmamt"], 2),
+                        "top_cpt": [{"code": k[0], "description": k[1], "denied": d_[0], "amount": round(d_[1], 2)}
+                                    for k, d_ in top_cpt]}))
+            # d) unspecified principal diagnosis
+            u, pu = unspec.get((fid, clin), 0), sum(unspec.get((fid, p), 0) for p in clins if p != clin)
+            if v >= 100 and pv >= 100 and x["uamt"] >= 500:
+                us, pus = u / v, pu / pv
+                if us >= pus + 0.20 and us >= 1.5 * pus:
+                    topdx = sorted(x["udx"].items(), key=lambda kv: -kv[1])[:3]
+                    found["clinician_unspec"].append((x["uamt"], fid, clin, sp, {
+                        "visits": v, "unspecified": u, "share_pct": round(100 * us), "peers_share_pct": round(100 * pus),
+                        "peers": len(peers), "amount": round(x["uamt"], 2), "top_dx": [k for k, _ in topdx]}))
+    for kind, lst in found.items():
+        per = _dd3(int)
+        for amt, fid, clin, sp, d in sorted(lst, key=lambda t: -t[0]):
+            if per[fid] >= 3:
+                continue
+            per[fid] += 1
+            nm = cname(clin, agg[(fid, clin)]["name"])
+            sp = sp.split(" - ")[-1].strip() or sp
+            who = f"{nm.title() + ' ' if nm else ''}({clin}, {sp})"
+            if kind == "clinician_rate":
+                title = f"{who}: {d['rate_pct']}% of lines denied as not medically necessary vs {d['peers_rate_pct']}% for other {sp} clinicians"
+                detail = (f"{d['denied']:,} of {d['lines']:,} lines denied with MNEC codes, AED {d['amount']:,.0f}, compared with "
+                          f"{d['peers']} other clinicians of the same specialty at this facility (new denials, 90 days).")
+            elif kind == "clinician_consult":
+                cs = ", ".join(f"{c['code']} ({c['lines']})" for c in d["codes"])
+                title = f"{who}: consultation lines denied {d['rate_pct']}% vs {d['peers_rate_pct']}% for other {sp} clinicians"
+                detail = (f"{d['denied']:,} of {d['lines']:,} consultation lines denied (AED {d['amount']:,.0f}); "
+                          f"main codes {cs}. Compared with {d['peers']} same-specialty clinicians (new denials, 90 days).")
+            elif kind == "clinician_tests":
+                tc = d["top_cpt"][0] if d["top_cpt"] else None
+                title = (f"{who}: {d['tests_per_visit']} lab tests per visit vs {d['peers_tests_per_visit']} for other {sp} clinicians, "
+                         f"{d['mnec_rate_pct']}% denied as not medically necessary")
+                detail = (f"{d['tests']:,} lab tests over {d['visits']:,} visits; {d['mnec_denied']:,} denied with MNEC codes "
+                          f"(AED {d['amount']:,.0f})."
+                          + (f" Most denied test: {tc['code']} {tc['description']} — {tc['denied']} lines, AED {tc['amount']:,.0f}."
+                             if tc else "")
+                          + f" Compared with {d['peers']} same-specialty clinicians (new denials, 90 days).")
+            else:
+                title = (f"{who}: {d['share_pct']}% of visits coded with an unspecified principal diagnosis vs "
+                         f"{d['peers_share_pct']}% for other {sp} clinicians")
+                detail = (f"{d['unspecified']:,} of {d['visits']:,} visits (R-codes or '.9' unspecified codes, e.g. "
+                          f"{', '.join(d['top_dx'])}); AED {d['amount']:,.0f} denied with MNEC / CODE codes on those visits "
+                          f"(new denials, 90 days).")
+            add(fid, kind, "medium", title, detail, "/denial-trends", round(amt), None)
+            alerts[-1].update(clinician=clin, clinician_name=nm, specialty=sp, stats=d,
+                              facts=facts_for(fid, clin, agg[(fid, clin)]["pay"]),
+                              insight=insight_for(kind, fid, clin, d, agg[(fid, clin)]["pay"], agg[(fid, clin)]))
 
     # ---- 2. Payment rate + overdue (SN 3.9.1: RA within 45 days) ------------------------
     rows = db.execute(text("""

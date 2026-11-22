@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import StackedBars from "../components/StackedBars";
+import { Link } from "react-router-dom";
 import apiClient from "../api/client";
 import DashboardTables, { TABLE_TABS } from "./DashboardTables";
 
@@ -105,6 +106,36 @@ function MoneyTooltip({ active, payload, label }) {
 }
 
 // ─── Main Dashboard ───────────────────────────────────────────────────────────
+// facilities whose final denial rate (after resubmissions, latest settled encounter month) is above 10%
+function DenialFlagStrip({ facilityId }) {
+  const [flags, setFlags] = useState(null);
+  useEffect(() => {
+    apiClient.get("/alerts", { timeout: 180000 })
+      .then((r) => setFlags(r.data.items.filter((a) => a.type === "denial_rate_10")))
+      .catch(() => setFlags([]));
+  }, []);
+  const list = (flags || []).filter((a) => !facilityId || String(a.facility_id) === String(facilityId))
+    .sort((a, b) => b.rate_pct - a.rate_pct);
+  if (!list.length) return null;
+  const month = list[0].month ? new Date(list[0].month + "-01T00:00:00").toLocaleDateString("en-GB", { month: "short", year: "numeric" }) : "";
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-md border border-hairline bg-sage/60 px-3 py-2 text-xs">
+      <span className="flex items-center gap-1.5">
+        <span className="h-1.5 w-1.5 rounded-full bg-denied" />
+        <span className="font-semibold text-ink">{list.length} facilit{list.length === 1 ? "y" : "ies"} above 10% denial</span>
+        <span className="text-slate-500">{month} encounters</span>
+      </span>
+      {list.map((a) => (
+        <Link key={a.facility_id} to={`/alerts`} title={a.detail}
+          className="border-l border-hairline pl-4 text-slate-600 hover:text-ghaf-700">
+          {a.facility_name} <b className={`tabular-nums ${a.rate_pct > 15 ? "text-denied" : "text-pending"}`}>{a.rate_pct}%</b>
+        </Link>
+      ))}
+      <Link to="/alerts" className="ml-auto text-ghaf-600 hover:underline">Facility alerts →</Link>
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const P = useMemo(presets, []);
   const [facilities, setFacilities] = useState([]);
@@ -154,6 +185,8 @@ export default function Dashboard() {
         </div>
         {data?.as_of && <p className="text-xs text-slate-500">Figures as of {data.as_of}</p>}
       </div>
+
+      <DenialFlagStrip facilityId={facilityId} />
 
       <div className="gh-card flex flex-wrap items-end gap-3 p-4">
         <label className="flex flex-col gap-1 text-xs text-slate-600">

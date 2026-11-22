@@ -4,6 +4,7 @@ import apiClient from "../api/client";
 import DenialDrill from "./DenialDrill";
 
 const TYPES = {
+  denial_rate_10: "Denial rate above 10%",
   denial_code_spike: "TPA denial spike (weekly)",
   clinician_pattern: "Clinician: service × diagnosis",
   clinician_rate: "Clinician: denial rate vs peers",

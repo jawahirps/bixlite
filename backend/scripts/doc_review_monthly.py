@@ -53,8 +53,9 @@ def main() -> int:
     failed = 0
     for month in months:
         for fid, name in facs:
-            done = db.query(dr.DocReviewRun).filter_by(facility_id=fid, month=month, status="Completed").first()
-            if done and done.claims_checked and not a.force:
+            done = (db.query(dr.DocReviewRun).filter_by(facility_id=fid, month=month, status="Completed")
+                    .filter(dr.DocReviewRun.claims_checked > 0).first())
+            if done and not a.force:
                 print(f"{month} {name}: already done ({done.progress}) - skipped")
                 continue
             r = dr.DocReviewRun(facility_id=fid, month=month, user_id=None, status="Queued")

@@ -719,6 +719,89 @@ def _compute(db: Session, today: date) -> dict:  # today can be set in the past 
                               facts=facts_for(fid, clin, agg[(fid, clin)]["pay"]),
                               insight=insight_for(kind, fid, clin, d, agg[(fid, clin)]["pay"], agg[(fid, clin)]))
 
+    # ---- 1g. Final denial rate above 10% (the Dashboard's measure) ----------------------------------
+    # per claim (latest submission): denied = net not paid after ALL RAs, resubmission recoveries included,
+    # / net of remitted claims, by encounter month. A month is judged once settled: 3 months after the
+    # encounter month (RA <= 45 days, resubmission <= 21 days, resubmission RA <= 30 days - SN 03/2019).
+    m_set = _month_start(today, 3)
+    months_set = [_month_start(today, k) for k in (5, 4, 3)]
+    m_open = _month_start(today, 2)
+    fr = db.execute(text("""
+        WITH c AS (
+          SELECT DISTINCT ON (facility_id, claim_id) facility_id, claim_id, encounter_start, coalesce(net_amount, 0) net,
+                 upper(coalesce(nullif(receiver_id, ''), payer_id)) rec
+          FROM claims WHERE encounter_start >= :d0 AND encounter_start < :d1 AND facility_id = ANY(:ids)
+          ORDER BY facility_id, claim_id, submission_date DESC NULLS LAST, id DESC),
+        ra AS (
+          SELECT DISTINCT ON (r.facility_id, r.claim_id, r.ra_file_id, r.net_amount, r.paid_amount, r.denial_amount)
+                 r.facility_id, r.claim_id, coalesce(r.paid_amount, 0) paid
+          FROM remittances r JOIN c USING (facility_id, claim_id)),
+        p AS (SELECT facility_id, claim_id, sum(paid) paid FROM ra GROUP BY 1, 2)
+        SELECT c.facility_id, to_char(c.encounter_start, 'YYYY-MM') m, c.rec, count(*) n, count(p.claim_id) rn,
+               coalesce(sum(c.net) FILTER (WHERE p.claim_id IS NOT NULL), 0) rnet,
+               coalesce(sum(c.net - least(greatest(p.paid, 0), c.net)) FILTER (WHERE p.claim_id IS NOT NULL), 0) den,
+               count(*) FILTER (WHERE p.claim_id IS NOT NULL AND c.net - least(greatest(p.paid, 0), c.net) > 0.5) dn
+        FROM c LEFT JOIN p USING (facility_id, claim_id) GROUP BY 1, 2, 3
+    """), {"d0": months_set[0], "d1": _month_start(today, 1), "ids": ids}).all()
+    from collections import defaultdict as _dd4
+    fm = _dd4(lambda: {"n": 0, "rn": 0, "rnet": 0.0, "den": 0.0, "dn": 0, "pay": _dd4(float)})
+    for r in fr:
+        x = fm[(r.facility_id, r.m)]
+        x["n"] += r.n; x["rn"] += r.rn; x["rnet"] += float(r.rnet); x["den"] += float(r.den); x["dn"] += r.dn
+        x["pay"][r.rec] += float(r.den)
+    rate_of = lambda x: 100 * x["den"] / x["rnet"] if x and x["rnet"] else None
+    ks = m_set.strftime("%Y-%m"); ko = m_open.strftime("%Y-%m")
+    # main denial codes on the settled month's still-unpaid lines (latest RA per activity)
+    dc = _dd4(lambda: _dd4(float))
+    for r in db.execute(text("""
+        WITH c AS (SELECT DISTINCT facility_id, claim_id FROM claims
+                   WHERE encounter_start >= :d0 AND encounter_start < :d1 AND facility_id = ANY(:ids)),
+        l AS (SELECT DISTINCT ON (r.facility_id, r.claim_id, ad.activity_id) r.facility_id, ad.denial_code,
+                     greatest(coalesce(ad.net, 0) - coalesce(ad.paid_amount, 0), 0) amt
+              FROM remittances r JOIN c USING (facility_id, claim_id)
+              JOIN remittance_activity_details ad ON ad.remittance_id_fk = r.id
+              ORDER BY r.facility_id, r.claim_id, ad.activity_id, r.remittance_date DESC, r.id DESC)
+        SELECT facility_id, denial_code, sum(amt) amt FROM l WHERE coalesce(denial_code, '') <> '' AND amt > 0.01 GROUP BY 1, 2
+    """), {"d0": m_set, "d1": _month_start(today, 2), "ids": ids}):
+        dc[r.facility_id][r.denial_code] += float(r.amt)
+    for fid in ids:
+        x = fm.get((fid, ks))
+        rate = rate_of(x)
+        if rate is None or x["rnet"] < 20000 or rate < 10:
+            continue
+        trend = [(m, rate_of(fm.get((fid, m.strftime("%Y-%m"))))) for m in months_set]
+        xo = fm.get((fid, ko)); open_rate = rate_of(xo)
+        codes = sorted(dc[fid].items(), key=lambda kv: -kv[1])[:2]
+        ctot = sum(dc[fid].values()) or 1
+        tp = max(x["pay"], key=x["pay"].get) if x["pay"] else None
+        tp_share = x["pay"][tp] / x["den"] if tp and x["den"] else 0
+        fam = (codes[0][0] or "")[:4].upper() if codes else ""
+        act = ("Clinicians / Documentation review" if fam in ("MNEC", "CODE") else
+               "Clinic admin (approvals, eligibility, co-pay)" if fam in ("AUTH", "ELIG", "COPY", "BENX") else
+               "Clinic admin / billing" if fam in ("CLAI", "PRCE", "DUPL", "TIME") else "Review the denial codes")
+        if tp_share >= 0.6:
+            act += f"; mostly one payer ({_pn3(tp) or tp})"
+        ml = m_set.strftime("%b %Y")
+        tr = " · ".join(f"{m:%b} {v:.1f}%" for m, v in trend if v is not None)
+        add(fid, "denial_rate_10", "high" if rate > 15 else "medium",
+            f"Final denial rate {rate:.1f}% for {ml} encounters — above the 10% limit",
+            f"AED {x['den']:,.0f} still unpaid of AED {x['rnet']:,.0f} remitted after resubmissions "
+            f"({x['dn']:,} claims; {round(100 * x['rn'] / x['n']) if x['n'] else 0}% of the month's claims remitted). "
+            f"Trend by encounter month: {tr}."
+            + (f" {m_open:%b} so far {open_rate:.1f}% (still open: resubmissions pending)." if open_rate is not None else ""),
+            "/denial-trends", round(rate, 1), 10)
+        alerts[-1].update(
+            code=codes[0][0] if codes else None, month=ks, rate_pct=round(rate, 1),
+            trend=[{"month": m.strftime("%Y-%m"), "pct": round(v, 1) if v is not None else None} for m, v in trend],
+            open_month=ko, open_pct=round(open_rate, 1) if open_rate is not None else None,
+            top_codes=[{"code": k, "share_pct": round(100 * v / ctot)} for k, v in codes],
+            top_payer=tp, top_payer_share_pct=round(100 * tp_share),
+            insight={"cause": "habit" if fam in ("MNEC", "CODE") else "payer" if tp_share >= 0.6 else "unclear",
+                     "label": " · ".join(f"{k} {round(100 * v / ctot)}%" for k, v in codes) or "Denials",
+                     "evidence": [{"v": f"{rate:.1f}%", "l": f"final denial, {ml} encounters"}]
+                     + [{"v": tr, "l": "trend"}] + ([{"v": f"{round(100 * tp_share)}%", "l": f"from {tp}"}] if tp else []),
+                     "act": act})
+
     # ---- 2. Payment rate + overdue (SN 3.9.1: RA within 45 days) ------------------------
     rows = db.execute(text("""
         WITH c AS (

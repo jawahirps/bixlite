@@ -57,10 +57,14 @@ def main() -> int:
                     .filter(dr.DocReviewRun.claims_checked > 0).first())
             if done and not a.force:
                 print(f"{month} {name}: already done ({done.progress}) - skipped")
+                db.rollback()                 # never leave a transaction open: it blocks the web app's startup
                 continue
             r = dr.DocReviewRun(facility_id=fid, month=month, user_id=None, status="Queued")
             db.add(r); db.commit(); db.refresh(r)
-            dr.run(r.id)                      # synchronous; uses its own session
+            rid = r.id
+            db.commit()                       # end this session's transaction before run() opens its own
+            dr.run(rid)                       # synchronous; uses its own session (may ALTER doc tables)
+            r = db.get(dr.DocReviewRun, rid)
             db.expire_all()
             r = db.get(dr.DocReviewRun, r.id)
             if r.status != "Completed":

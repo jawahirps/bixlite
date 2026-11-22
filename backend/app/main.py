@@ -196,6 +196,8 @@ app.include_router(alerts.router)                 # /api/alerts — JWT-protecte
 @app.on_event("startup")
 def _warm_alerts():
     alerts.warm()
+    from .routers import dashboard as _dash
+    _dash.warm()
 
 app.include_router(packs.router)                  # /api/packs/* — JWT-protected
 

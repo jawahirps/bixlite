@@ -9,6 +9,7 @@ denied + awaiting. Results are cached for an hour per (facility, dates) — the 
 """
 from __future__ import annotations
 
+import threading
 import time
 from datetime import date, timedelta
 from typing import Optional
@@ -73,6 +74,42 @@ def claim_cycle(facility_id: Optional[int] = None, date_from: Optional[date] = N
     hit = _cache.get(key)
     if hit and time.time() - hit[0] < TTL:
         return hit[1]
+    if hit:   # stale: answer now, recompute in the background (All facilities takes ~9 s)
+        if key not in _busy:
+            threading.Thread(target=_refresh, args=(facility_id, d0, d1), daemon=True).start()
+        return hit[1]
+    return _build(db, facility_id, d0, d1)
+
+
+_busy: set = set()
+
+
+def _refresh(facility_id, d0, d1):
+    from ..database import SessionLocal
+    key = (facility_id, d0, d1)
+    if key in _busy:
+        return
+    _busy.add(key)
+    db = SessionLocal()
+    try:
+        _build(db, facility_id, d0, d1)
+    except Exception:
+        pass
+    finally:
+        db.close()
+        _busy.discard(key)
+
+
+def warm():
+    """Pre-compute the default All-facilities view at startup so the first Dashboard open is instant."""
+    d1 = date.today()
+    y, m = divmod(d1.year * 12 + d1.month - 1 - 11, 12)   # same as the page's "Last 12 months" preset
+    d0 = date(y, m + 1, 1)
+    threading.Thread(target=_refresh, args=(None, d0, d1), daemon=True).start()
+
+
+def _build(db, facility_id, d0, d1):
+    key = (facility_id, d0, d1)
     rows = db.execute(text(_SQL), {"f": facility_id, "d0": d0, "d1": d1 + timedelta(days=1)}).mappings().all()
     months = [{"month": r["m"], **{k: int(r[k] or 0) for k in COUNTS}, **{k: round(float(r[k] or 0), 2) for k in AMOUNTS}}
               for r in rows]

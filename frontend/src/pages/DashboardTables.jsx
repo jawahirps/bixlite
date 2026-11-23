@@ -89,6 +89,18 @@ export default function DashboardTables({ tab, facilityId, range }) {
   }
 
   if (tab === "departments") {
+    const depts = data.by_department || [];
+    if (!depts.some((d) => d.department && !/^unknown$/i.test(d.department))) {
+      return (
+        <div className="space-y-4">
+          {note}
+          <div className="gh-card p-6 text-sm text-slate-600">
+            This facility's claim files don't record a department, so there is no department split to show.
+            See the Clinicians or Services tab instead.
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="space-y-4">
         {note}

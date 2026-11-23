@@ -24,6 +24,18 @@ const SERIES = [
 function Sparkline({ values, color }) {
   if (!values || values.length < 2) return <div className="h-10" />;
   const w = 120, h = 40, max = Math.max(...values, 1);
+  if (values.length < 6) {   // few months: bars read better than a 2–5 point line
+    const bw = w / values.length;
+    return (
+      <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" className="h-10 w-full" aria-hidden="true">
+        {values.map((v, i) => {
+          const bh = Math.max(2, (v / max) * (h - 3));
+          return <rect key={i} x={i * bw + bw * 0.18} y={h - bh} width={bw * 0.64} height={bh} rx="2"
+                       fill={color} opacity={i === values.length - 1 ? 0.9 : 0.35} />;
+        })}
+      </svg>
+    );
+  }
   const pts = values.map((v, i) => [(i / (values.length - 1)) * w, h - 3 - (v / max) * (h - 6)]);
   const line = pts.map((p) => p.join(",")).join(" ");
   const id = `sp${color.replace("#", "")}`;

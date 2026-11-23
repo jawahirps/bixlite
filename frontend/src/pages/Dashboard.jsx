@@ -35,6 +35,18 @@ function presets() {
 function Sparkline({ values, color }) {
   if (!values || values.length < 2) return <div className="h-8" />;
   const max = Math.max(...values, 1), w = 100, h = 28;
+  if (values.length < 6) {   // a line through 2–5 points reads as a meaningless slope: show month bars instead
+    const bw = w / values.length;
+    return (
+      <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" className="h-8 w-full" aria-hidden="true">
+        {values.map((v, i) => {
+          const bh = Math.max(1.5, (v / max) * (h - 2));
+          return <rect key={i} x={i * bw + bw * 0.18} y={h - bh} width={bw * 0.64} height={bh} rx="1.5"
+                       fill={color} opacity={i === values.length - 1 ? 0.9 : 0.35} />;
+        })}
+      </svg>
+    );
+  }
   const pts = values.map((v, i) => [(i / (values.length - 1)) * w, h - 2 - (v / max) * (h - 4)]);
   const line = pts.map((p, i) => `${i ? "L" : "M"}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
   return (
@@ -54,7 +66,7 @@ function KpiTile({ label, amount, count, share, color, spark }) {
         </span>
         <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500">{label}</p>
       </div>
-      <p className="mt-3 font-display text-3xl font-extrabold tracking-[-0.03em] tabular-nums text-ink">{compact(amount)}</p>
+      <p className="mt-3 font-display text-3xl font-extrabold tracking-[-0.03em] tabular-nums text-ink"><span className="mr-1 align-[0.35em] text-sm font-semibold tracking-normal text-slate-400">AED</span>{compact(amount)}</p>
       <p className="mt-1 text-[13px] text-slate-600 tabular-nums">{AED(amount)}{share ? ` · ${share}` : ""}</p>
       <p className="text-[12px] text-slate-500 tabular-nums">{count != null ? `${count.toLocaleString()} claims` : " "}</p>
       <div className="mt-3"><Sparkline values={spark} color={color} /></div>
@@ -294,9 +306,9 @@ export default function Dashboard() {
       <div className={`relative z-10 -mt-24 grid grid-cols-1 gap-4 px-3 transition-opacity sm:grid-cols-2 sm:px-5 xl:grid-cols-4 ${loading && t ? "opacity-60" : ""}`}>
         {t ? (<>
           <KpiTile label="Submitted (net)" amount={t.net} count={t.n} color={C.ink} spark={sp("net")} />
-          <KpiTile label="Paid" amount={t.paid} share={pct(t.paid, t.net)} color={C.paid} spark={sp("paid")} />
+          <KpiTile label="Paid" amount={t.paid} share={pct(t.paid, t.net) + " of submitted"} color={C.paid} spark={sp("paid")} />
           <KpiTile label="Denied" amount={t.denied} share={pct(t.denied, t.paid + t.denied) + " of remitted"} color={C.denied} spark={sp("denied")} />
-          <KpiTile label="Awaiting RA" amount={t.awaiting} count={t.await_n} share={pct(t.awaiting, t.net)} color={C.pending} spark={sp("awaiting")} />
+          <KpiTile label="Awaiting RA" amount={t.awaiting} count={t.await_n} share={pct(t.awaiting, t.net) + " of submitted"} color={C.pending} spark={sp("awaiting")} />
         </>) : [0, 1, 2, 3].map((i) => (
           <div key={i} className={`h-[178px] animate-pulse rounded-2xl bg-white ${SHADOW}`} />
         ))}

@@ -16,7 +16,7 @@ from decimal import Decimal
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import and_, func
+from sqlalchemy import and_, func, text
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -297,6 +297,124 @@ def analytics_filter_options(
 
 
 # ---------------------------------------------------------------------------
+# Claim-cycle money (same definition as the Dashboard's claim cycle, dashboard._SQL):
+# one row per claim = its latest submission; paid = all RA payments for the claim with identical RA loads counted
+# once, capped at the claim net; denied = net - paid only once the claim has an RA (otherwise it is awaiting).
+# Grouped paid/denied therefore add up to the Dashboard's Paid / Denied cards for the same filters.
+# ---------------------------------------------------------------------------
+_CYCLE_CACHE: dict = {}
+
+
+def _cycle_where(f: AnalyticsFilters):
+    conds, params = [], {}
+    ids = [int(x) for x in (f.facility_ids or "").split(",") if x.strip().isdigit()]
+    if ids:
+        conds.append("facility_id = ANY(:fids)"); params["fids"] = ids
+    elif f.facility_id:
+        conds.append("facility_id = :fid"); params["fid"] = f.facility_id
+    for col in ("receiver_id", "payer_id", "encounter_type", "department"):
+        if getattr(f, col):
+            conds.append(f"{col} = :{col}"); params[col] = getattr(f, col)
+    if f.date_from:
+        conds.append("encounter_start >= :d0"); params["d0"] = f.date_from
+    if f.date_to:
+        conds.append("encounter_start < :d1"); params["d1"] = f.date_to + timedelta(days=1)
+    conds.append("facility_id NOT IN (SELECT id FROM facilities WHERE facility_code = 'GHAF-001')")
+    return " AND ".join(conds), params
+
+
+_CYCLE_CTE = """
+WITH c AS (
+  SELECT DISTINCT ON (facility_id, claim_id) id, facility_id, claim_id, coalesce(net_amount, 0) net,
+         to_char(submission_date, 'YYYY-MM') sub_m, to_char(encounter_start, 'YYYY-MM') enc_m,
+         payer_name, receiver_name, clinician_name, department
+  FROM claims WHERE {where}
+  ORDER BY facility_id, claim_id, submission_date DESC NULLS LAST, id DESC),
+ra AS (
+  SELECT DISTINCT ON (r.facility_id, r.claim_id, r.ra_file_id, r.net_amount, r.paid_amount, r.denial_amount)
+         r.id, r.facility_id, r.claim_id, coalesce(r.paid_amount, 0) paid, r.remittance_date,
+         nullif(r.denial_code, '') dcode, r.denial_description ddesc
+  FROM remittances r JOIN c USING (facility_id, claim_id)
+  ORDER BY r.facility_id, r.claim_id, r.ra_file_id, r.net_amount, r.paid_amount, r.denial_amount, r.id DESC),
+p AS (
+  SELECT facility_id, claim_id, sum(paid) paid,
+         (array_agg(dcode ORDER BY remittance_date DESC, id DESC) FILTER (WHERE dcode IS NOT NULL))[1] dcode,
+         (array_agg(ddesc ORDER BY remittance_date DESC, id DESC) FILTER (WHERE dcode IS NOT NULL))[1] ddesc
+  FROM ra GROUP BY 1, 2),
+cc AS (
+  SELECT c.*, p.claim_id IS NOT NULL remitted, least(greatest(coalesce(p.paid, 0), 0), c.net) paid,
+         CASE WHEN p.claim_id IS NOT NULL THEN c.net - least(greatest(coalesce(p.paid, 0), 0), c.net) ELSE 0 END denied,
+         p.dcode, p.ddesc
+  FROM c LEFT JOIN p USING (facility_id, claim_id))
+"""
+
+_CLAIMS_SQL = _CYCLE_CTE + "SELECT * FROM cc"
+
+# Service lines of each claim's latest submission. Denied per line = line net minus that line's payments across the
+# de-duplicated RAs, coded with the line's latest denial code; then each claim's lines are scaled so they add up to
+# the claim's denied (as in portal.portal_dashboard). Paid is spread the same way over each line's payments. Claims
+# with no unpaid/paid line detail fall back to line net shares; claims without lines get one 'Unknown' line.
+_LINES_SQL = _CYCLE_CTE + """,
+ap AS (
+  SELECT ra.facility_id, ra.claim_id, ad.activity_id, sum(coalesce(ad.paid_amount, 0)) paid,
+         (array_agg(nullif(ad.denial_code, '') ORDER BY ra.remittance_date DESC, ra.id DESC)
+            FILTER (WHERE nullif(ad.denial_code, '') IS NOT NULL))[1] dcode,
+         (array_agg(ad.denial_description ORDER BY ra.remittance_date DESC, ra.id DESC)
+            FILTER (WHERE nullif(ad.denial_code, '') IS NOT NULL))[1] ddesc
+  FROM ra JOIN remittance_activity_details ad ON ad.remittance_id_fk = ra.id
+  GROUP BY 1, 2, 3),
+l AS (
+  SELECT cc.id cid, cc.paid cpaid, cc.denied cden, ca.activity_code code, ca.activity_description descr,
+         coalesce(ca.net, 0) net,
+         greatest(coalesce(ca.net, 0) - coalesce(ap.paid, 0), 0) un,
+         least(greatest(coalesce(ap.paid, 0), 0), greatest(coalesce(ca.net, 0), 0)) pr,
+         coalesce(ap.dcode, cc.dcode) dcode, CASE WHEN ap.dcode IS NOT NULL THEN ap.ddesc ELSE cc.ddesc END ddesc
+  FROM cc JOIN claim_activities ca ON ca.claim_id_fk = cc.id
+  LEFT JOIN ap ON ap.facility_id = cc.facility_id AND ap.claim_id = cc.claim_id AND ap.activity_id = ca.activity_id),
+w AS (
+  SELECT l.*, sum(un) OVER k su, sum(pr) OVER k sp, sum(greatest(net, 0)) OVER k sn, count(*) OVER k n
+  FROM l WINDOW k AS (PARTITION BY cid))
+SELECT code, descr, net, dcode, ddesc,
+       CASE WHEN cden = 0 THEN 0 WHEN su > 0.005 THEN un * cden / su
+            WHEN sn > 0.005 THEN greatest(net, 0) * cden / sn ELSE cden / n END denied,
+       CASE WHEN cpaid = 0 THEN 0 WHEN sp > 0.005 THEN pr * cpaid / sp
+            WHEN sn > 0.005 THEN greatest(net, 0) * cpaid / sn ELSE cpaid / n END paid
+FROM w
+UNION ALL
+SELECT 'Unknown', NULL, cc.net, cc.dcode, cc.ddesc, cc.denied, cc.paid
+FROM cc WHERE NOT EXISTS (SELECT 1 FROM claim_activities ca WHERE ca.claim_id_fk = cc.id)
+"""
+
+
+def _cycle_rows(db: Session, f: AnalyticsFilters, kind: str):
+    """Per-claim ('claims') or per-service-line ('lines') rows for the filters, cached for an hour."""
+    key = (kind, repr(f))
+    hit = _CYCLE_CACHE.get(key)
+    if hit and time.time() - hit[0] < 3600:
+        return hit[1]
+    where, params = _cycle_where(f)
+    sql = (_CLAIMS_SQL if kind == "claims" else _LINES_SQL).format(where=where)
+    rows = db.execute(text(sql), params).mappings().all()
+    _CYCLE_CACHE[key] = (time.time(), rows)
+    if len(_CYCLE_CACHE) > 60:
+        _CYCLE_CACHE.pop(min(_CYCLE_CACHE, key=lambda k: _CYCLE_CACHE[k][0]))
+    return rows
+
+
+def _group(rows, keyfn):
+    """Sum claimed/paid/denied and count claims per key."""
+    out: dict = {}
+    for r in rows:
+        g = out.setdefault(keyfn(r), {"claimed": 0.0, "paid": 0.0, "denied": 0.0, "n": 0})
+        g["claimed"] += float(r["net"]); g["paid"] += float(r["paid"]); g["denied"] += float(r["denied"]); g["n"] += 1
+    return out
+
+
+def _r2(x) -> float:
+    return round(float(x or 0), 2)
+
+
+# ---------------------------------------------------------------------------
 # Submissions
 # ---------------------------------------------------------------------------
 @router.get("/submissions")
@@ -306,105 +424,53 @@ def submissions_report(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    claims_q = _apply_claim_filters(db.query(Claim), f)
+    claims = _cycle_rows(db, f, "claims")
+    total_submitted_amount = sum(float(r["net"]) for r in claims)
+    total_paid_amount = sum(float(r["paid"]) for r in claims)
+    rejected_amount = sum(float(r["denied"]) for r in claims)
+    not_remitted_amount = sum(float(r["net"]) for r in claims if not r["remitted"])
 
-    total_submitted_amount = _money(claims_q.with_entities(func.coalesce(func.sum(Claim.net_amount), 0)).scalar())
-    total_submitted_claims = claims_q.count()
-
-    remits_q = _remits_with_claims(db, f)
-    total_paid_amount = _money(remits_q.with_entities(func.coalesce(func.sum(Remittance.paid_amount), 0)).scalar())
-    rejected_amount = _money(remits_q.with_entities(func.coalesce(func.sum(Remittance.denial_amount), 0)).scalar())
-    remitted_amount = total_paid_amount + rejected_amount
-    not_remitted_amount = max(total_submitted_amount - remitted_amount, 0)
-
-    claimed_rows = (
-        claims_q.with_entities(
-            func.to_char(Claim.submission_date, "YYYY-MM").label("month"),
-            func.coalesce(func.sum(Claim.net_amount), 0).label("claimed"),
-            func.count(Claim.id).label("claim_count"),
-        )
-        .group_by("month")
-        .order_by("month")
-        .all()
-    )
-    remit_rows = (
-        remits_q.with_entities(
-            func.to_char(Claim.submission_date, "YYYY-MM").label("month"),
-            func.coalesce(func.sum(Remittance.paid_amount), 0).label("paid"),
-            func.coalesce(func.sum(Remittance.denial_amount), 0).label("rejected"),
-        )
-        .group_by("month")
-        .order_by("month")
-        .all()
-    )
-    remit_by_month = {row.month: row for row in remit_rows}
-    monthly_trend = []
-    for row in claimed_rows:
-        remit_row = remit_by_month.get(row.month)
-        monthly_trend.append(
-            {
-                "month": row.month,
-                "claimed_amount": _money(row.claimed),
-                "claim_count": row.claim_count,
-                "paid_amount": _money(remit_row.paid) if remit_row else 0,
-                "rejected_amount": _money(remit_row.rejected) if remit_row else 0,
-            }
-        )
-
-    clinician_rows = (
-        claims_q.with_entities(
-            Claim.clinician_name,
-            Claim.department,
-            func.coalesce(func.sum(Claim.net_amount), 0).label("claimed"),
-        )
-        .group_by(Claim.clinician_name, Claim.department)
-        .order_by(func.sum(Claim.net_amount).desc())
-        .limit(10)
-        .all()
-    )
-    by_clinician = [
-        {
-            "clinician": row.clinician_name or "Unknown",
-            "department": row.department or "Unknown",
-            "claimed_amount": _money(row.claimed),
-            "pct_of_total": round(_money(row.claimed) / total_submitted_amount * 100, 2) if total_submitted_amount else 0,
-        }
-        for row in clinician_rows
+    monthly_trend = [
+        {"month": m, "claimed_amount": _r2(g["claimed"]), "claim_count": g["n"],
+         "paid_amount": _r2(g["paid"]), "rejected_amount": _r2(g["denied"])}
+        for m, g in sorted(_group(claims, lambda r: r["sub_m"] or "Unknown").items())
     ]
 
-    activity_q = _apply_claim_filters(
-        db.query(
-            ClaimActivity.activity_code,
-            ClaimActivity.activity_description,
-            func.coalesce(func.sum(ClaimActivity.net), 0).label("claimed"),
-        ).join(Claim, Claim.id == ClaimActivity.claim_id_fk),
-        f,
-    )
-    activity_rows = (
-        activity_q.group_by(ClaimActivity.activity_code, ClaimActivity.activity_description)
-        .order_by(func.sum(ClaimActivity.net).desc())
-        .limit(10)
-        .all()
-    )
+    clin = sorted(_group(claims, lambda r: (r["clinician_name"], r["department"])).items(),
+                  key=lambda kv: -kv[1]["claimed"])[:10]
+    by_clinician = [
+        {
+            "clinician": c or "Unknown",
+            "department": d or "Unknown",
+            "claimed_amount": _r2(g["claimed"]),
+            "pct_of_total": round(g["claimed"] / total_submitted_amount * 100, 2) if total_submitted_amount else 0,
+        }
+        for (c, d), g in clin
+    ]
+
+    svc: dict = {}
+    for r in _cycle_rows(db, f, "lines"):
+        g = svc.setdefault((r["code"], r["descr"]), [0.0, 0.0, 0.0])
+        g[0] += float(r["net"]); g[1] += float(r["paid"]); g[2] += float(r["denied"])
     by_service = [
-        {"code": row.activity_code, "description": row.activity_description, "claimed_amount": _money(row.claimed)}
-        for row in activity_rows
+        {"code": code, "description": descr, "claimed_amount": _r2(g[0]), "paid_amount": _r2(g[1]),
+         "denied_amount": _r2(g[2])}
+        for (code, descr), g in sorted(svc.items(), key=lambda kv: -kv[1][0])
     ]
 
     return {
         "kpis": {
-            "total_submitted_amount": total_submitted_amount,
-            "total_submitted_claims": total_submitted_claims,
-            "total_paid_amount": total_paid_amount,
-            "rejected_amount": rejected_amount,
-            "remitted_amount": remitted_amount,
-            "not_remitted_amount": not_remitted_amount,
+            "total_submitted_amount": _r2(total_submitted_amount),
+            "total_submitted_claims": len(claims),
+            "total_paid_amount": _r2(total_paid_amount),
+            "rejected_amount": _r2(rejected_amount),
+            "remitted_amount": _r2(total_paid_amount + rejected_amount),
+            "not_remitted_amount": _r2(not_remitted_amount),
         },
         "monthly_trend": monthly_trend,
         "by_clinician": by_clinician,
         "by_service": by_service,
     }
-
 
 # ---------------------------------------------------------------------------
 # Resubmissions
@@ -570,76 +636,36 @@ def denials_report(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    remits_q = _remits_with_claims(db, f)
-    denied_q = remits_q.filter(Remittance.denial_amount > 0)
+    claims = _cycle_rows(db, f, "claims")
+    denied = [r for r in claims if float(r["denied"]) > 0.005]
+    total_denial_amount = sum(float(r["denied"]) for r in denied)
+    # Denial rate = claims with an unpaid balance after RA / all claims (one row per claim)
+    denial_rate = round(len(denied) / len(claims) * 100, 2) if claims else 0
 
-    total_denial_amount = _money(denied_q.with_entities(func.coalesce(func.sum(Remittance.denial_amount), 0)).scalar())
+    monthly_trend = [{"month": m, "amount": _r2(g["denied"]), "count": g["n"]}
+                     for m, g in sorted(_group(denied, lambda r: r["enc_m"] or "Unknown").items())]
 
-    # Denial rate = distinct claims with any denial / total submitted claims
-    # (counting remittance rows is wrong — one claim can have multiple remittance rows)
-    denied_unique_claims = denied_q.with_entities(
-        func.count(func.distinct(Claim.claim_id))
-    ).scalar() or 0
-    total_submitted_claims = _apply_claim_filters(db.query(Claim), f).count()
-    denial_rate = round(denied_unique_claims / total_submitted_claims * 100, 2) if total_submitted_claims else 0
+    codes: dict = {}
+    for r in _cycle_rows(db, f, "lines"):
+        amt = float(r["denied"])
+        if amt <= 0.005:
+            continue
+        g = codes.setdefault(r["dcode"] or "No code", {"amount": 0.0, "count": 0, "description": None})
+        g["amount"] += amt; g["count"] += 1
+        g["description"] = g["description"] or r["ddesc"]
+    by_code = [{"code": k, "description": g["description"], "amount": _r2(g["amount"]), "count": g["count"]}
+               for k, g in sorted(codes.items(), key=lambda kv: -kv[1]["amount"])]
 
-    monthly_rows = (
-        denied_q.with_entities(
-            func.to_char(Remittance.remittance_date, "YYYY-MM").label("month"),
-            func.coalesce(func.sum(Remittance.denial_amount), 0).label("amount"),
-            func.count(Remittance.id).label("count"),
-        )
-        .group_by("month")
-        .order_by("month")
-        .all()
-    )
-    monthly_trend = [{"month": r.month, "amount": _money(r.amount), "count": r.count} for r in monthly_rows]
-
-    code_rows = (
-        denied_q.with_entities(
-            Remittance.denial_code,
-            Remittance.denial_description,
-            func.coalesce(func.sum(Remittance.denial_amount), 0).label("amount"),
-            func.count(Remittance.id).label("count"),
-        )
-        .group_by(Remittance.denial_code, Remittance.denial_description)
-        .order_by(func.sum(Remittance.denial_amount).desc())
-        .limit(10)
-        .all()
-    )
-    by_code = [
-        {"code": r.denial_code, "description": r.denial_description, "amount": _money(r.amount), "count": r.count}
-        for r in code_rows
-    ]
-
-    payer_rows = (
-        denied_q.with_entities(
-            Claim.payer_name,
-            func.coalesce(func.sum(Remittance.denial_amount), 0).label("amount"),
-        )
-        .group_by(Claim.payer_name)
-        .order_by(func.sum(Remittance.denial_amount).desc())
-        .limit(10)
-        .all()
-    )
-    by_payer = [{"payer": r.payer_name or "Unknown", "amount": _money(r.amount)} for r in payer_rows]
-
-    clinician_rows = (
-        denied_q.with_entities(
-            Claim.clinician_name,
-            func.coalesce(func.sum(Remittance.denial_amount), 0).label("amount"),
-        )
-        .group_by(Claim.clinician_name)
-        .order_by(func.sum(Remittance.denial_amount).desc())
-        .limit(10)
-        .all()
-    )
-    by_clinician = [{"clinician": r.clinician_name or "Unknown", "amount": _money(r.amount)} for r in clinician_rows]
+    by_payer = [{"payer": k or "Unknown", "amount": _r2(g["denied"])}
+                for k, g in sorted(_group(denied, lambda r: r["payer_name"]).items(), key=lambda kv: -kv[1]["denied"])]
+    by_clinician = [{"clinician": k or "Unknown", "amount": _r2(g["denied"])}
+                    for k, g in sorted(_group(denied, lambda r: r["clinician_name"]).items(),
+                                       key=lambda kv: -kv[1]["denied"])]
 
     return {
         "kpis": {
-            "total_denial_amount": total_denial_amount,
-            "denied_claims": denied_unique_claims,
+            "total_denial_amount": _r2(total_denial_amount),
+            "denied_claims": len(denied),
             "denial_rate_pct": denial_rate,
         },
         "monthly_trend": monthly_trend,
@@ -647,7 +673,6 @@ def denials_report(
         "by_payer": by_payer,
         "by_clinician": by_clinician,
     }
-
 
 # ---------------------------------------------------------------------------
 # Clinicians
@@ -659,51 +684,23 @@ def clinicians_report(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    claims_q = _apply_claim_filters(db.query(Claim), f)
-    total_claimed = _money(claims_q.with_entities(func.coalesce(func.sum(Claim.net_amount), 0)).scalar())
-
-    claim_rows = (
-        claims_q.with_entities(
-            Claim.clinician_name,
-            Claim.department,
-            func.coalesce(func.sum(Claim.net_amount), 0).label("claimed"),
-            func.count(Claim.id).label("claim_count"),
-        )
-        .group_by(Claim.clinician_name, Claim.department)
-        .all()
-    )
-
-    remits_q = _remits_with_claims(db, f)
-    remit_rows = (
-        remits_q.with_entities(
-            Claim.clinician_name,
-            func.coalesce(func.sum(Remittance.paid_amount), 0).label("paid"),
-            func.coalesce(func.sum(Remittance.denial_amount), 0).label("denied"),
-        )
-        .group_by(Claim.clinician_name)
-        .all()
-    )
-    remit_by_clinician = {r.clinician_name: r for r in remit_rows}
-
-    rows = []
-    for r in claim_rows:
-        remit = remit_by_clinician.get(r.clinician_name)
-        claimed = _money(r.claimed)
-        rows.append(
-            {
-                "clinician": r.clinician_name or "Unknown",
-                "department": r.department or "Unknown",
-                "claimed_amount": claimed,
-                "paid_amount": _money(remit.paid) if remit else 0,
-                "denied_amount": _money(remit.denied) if remit else 0,
-                "claim_count": r.claim_count,
-                "pct_of_total": round(claimed / total_claimed * 100, 2) if total_claimed else 0,
-            }
-        )
+    claims = _cycle_rows(db, f, "claims")
+    total_claimed = sum(float(r["net"]) for r in claims)
+    rows = [
+        {
+            "clinician": c or "Unknown",
+            "department": d or "Unknown",
+            "claimed_amount": _r2(g["claimed"]),
+            "paid_amount": _r2(g["paid"]),
+            "denied_amount": _r2(g["denied"]),
+            "claim_count": g["n"],
+            "pct_of_total": round(g["claimed"] / total_claimed * 100, 2) if total_claimed else 0,
+        }
+        for (c, d), g in _group(claims, lambda r: (r["clinician_name"], r["department"])).items()
+    ]
     rows.sort(key=lambda x: x["claimed_amount"], reverse=True)
-
-    return {"kpis": {"total_claimed_amount": total_claimed, "clinician_count": len(rows)}, "clinicians": rows[:25]}
-
+    # all rows (the Dashboard shows the top 25 and says "Top 25 of N"), so the columns add up to the claim cycle
+    return {"kpis": {"total_claimed_amount": _r2(total_claimed), "clinician_count": len(rows)}, "clinicians": rows}
 
 # ---------------------------------------------------------------------------
 # Operations
@@ -768,64 +765,26 @@ def insurance_report(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    claims_q = _apply_claim_filters(db.query(Claim), f)
-    total_claimed = _money(claims_q.with_entities(func.coalesce(func.sum(Claim.net_amount), 0)).scalar())
+    claims = _cycle_rows(db, f, "claims")
+    total_claimed = sum(float(r["net"]) for r in claims)
 
-    payer_rows = (
-        claims_q.with_entities(
-            Claim.payer_name,
-            func.coalesce(func.sum(Claim.net_amount), 0).label("claimed"),
-            func.count(Claim.id).label("claim_count"),
-        )
-        .group_by(Claim.payer_name)
-        .all()
-    )
-
-    remits_q = _remits_with_claims(db, f)
-    remit_rows = (
-        remits_q.with_entities(
-            Claim.payer_name,
-            func.coalesce(func.sum(Remittance.paid_amount), 0).label("paid"),
-            func.coalesce(func.sum(Remittance.denial_amount), 0).label("denied"),
-        )
-        .group_by(Claim.payer_name)
-        .all()
-    )
-    remit_by_payer = {r.payer_name: r for r in remit_rows}
-
-    by_payer = []
-    for r in payer_rows:
-        claimed = _money(r.claimed)
-        remit = remit_by_payer.get(r.payer_name)
-        by_payer.append(
+    def table(col, label):
+        out = [
             {
-                "payer": r.payer_name or "Unknown",
-                "claimed_amount": claimed,
-                "paid_amount": _money(remit.paid) if remit else 0,
-                "denied_amount": _money(remit.denied) if remit else 0,
-                "claim_count": r.claim_count,
-                "pct_of_total": round(claimed / total_claimed * 100, 2) if total_claimed else 0,
+                label: k or "Unknown",
+                "claimed_amount": _r2(g["claimed"]),
+                "paid_amount": _r2(g["paid"]),
+                "denied_amount": _r2(g["denied"]),
+                "claim_count": g["n"],
+                "pct_of_total": round(g["claimed"] / total_claimed * 100, 2) if total_claimed else 0,
             }
-        )
-    by_payer.sort(key=lambda x: x["claimed_amount"], reverse=True)
+            for k, g in _group(claims, lambda r: r[col]).items()
+        ]
+        out.sort(key=lambda x: x["claimed_amount"], reverse=True)
+        return out
 
-    receiver_rows = (
-        claims_q.with_entities(
-            Claim.receiver_name,
-            func.coalesce(func.sum(Claim.net_amount), 0).label("claimed"),
-            func.count(Claim.id).label("claim_count"),
-        )
-        .group_by(Claim.receiver_name)
-        .order_by(func.sum(Claim.net_amount).desc())
-        .all()
-    )
-    by_receiver = [
-        {"receiver": r.receiver_name or "Unknown", "claimed_amount": _money(r.claimed), "claim_count": r.claim_count}
-        for r in receiver_rows
-    ]
-
-    return {"kpis": {"total_claimed_amount": total_claimed}, "by_payer": by_payer, "by_receiver": by_receiver}
-
+    return {"kpis": {"total_claimed_amount": _r2(total_claimed)}, "by_payer": table("payer_name", "payer"),
+            "by_receiver": table("receiver_name", "receiver")}
 
 # ---------------------------------------------------------------------------
 # Department
@@ -837,59 +796,25 @@ def department_report(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    claims_q = _apply_claim_filters(db.query(Claim), f)
-    total_claimed = _money(claims_q.with_entities(func.coalesce(func.sum(Claim.net_amount), 0)).scalar())
-
-    dept_rows = (
-        claims_q.with_entities(
-            Claim.department,
-            func.coalesce(func.sum(Claim.net_amount), 0).label("claimed"),
-            func.count(Claim.id).label("claim_count"),
-        )
-        .group_by(Claim.department)
-        .all()
-    )
-
-    remits_q = _remits_with_claims(db, f)
-    remit_rows = (
-        remits_q.with_entities(
-            Claim.department,
-            func.coalesce(func.sum(Remittance.paid_amount), 0).label("paid"),
-            func.coalesce(func.sum(Remittance.denial_amount), 0).label("denied"),
-        )
-        .group_by(Claim.department)
-        .all()
-    )
-    remit_by_dept = {r.department: r for r in remit_rows}
-
-    by_department = []
-    for r in dept_rows:
-        claimed = _money(r.claimed)
-        remit = remit_by_dept.get(r.department)
-        by_department.append(
-            {
-                "department": r.department or "Unknown",
-                "claimed_amount": claimed,
-                "paid_amount": _money(remit.paid) if remit else 0,
-                "denied_amount": _money(remit.denied) if remit else 0,
-                "claim_count": r.claim_count,
-                "pct_of_total": round(claimed / total_claimed * 100, 2) if total_claimed else 0,
-            }
-        )
+    claims = _cycle_rows(db, f, "claims")
+    total_claimed = sum(float(r["net"]) for r in claims)
+    by_department = [
+        {
+            "department": k or "Unknown",
+            "claimed_amount": _r2(g["claimed"]),
+            "paid_amount": _r2(g["paid"]),
+            "denied_amount": _r2(g["denied"]),
+            "claim_count": g["n"],
+            "pct_of_total": round(g["claimed"] / total_claimed * 100, 2) if total_claimed else 0,
+        }
+        for k, g in _group(claims, lambda r: r["department"]).items()
+    ]
     by_department.sort(key=lambda x: x["claimed_amount"], reverse=True)
 
-    monthly_rows = (
-        claims_q.with_entities(
-            func.to_char(Claim.submission_date, "YYYY-MM").label("month"),
-            Claim.department,
-            func.coalesce(func.sum(Claim.net_amount), 0).label("claimed"),
-        )
-        .group_by("month", Claim.department)
-        .order_by("month")
-        .all()
-    )
     monthly_trend = [
-        {"month": r.month, "department": r.department or "Unknown", "claimed_amount": _money(r.claimed)} for r in monthly_rows
+        {"month": m, "department": d or "Unknown", "claimed_amount": _r2(g["claimed"])}
+        for (m, d), g in sorted(_group(claims, lambda r: (r["sub_m"], r["department"])).items(),
+                                key=lambda kv: (kv[0][0] or "", kv[0][1] or ""))
     ]
 
-    return {"kpis": {"total_claimed_amount": total_claimed}, "by_department": by_department, "monthly_trend": monthly_trend}
+    return {"kpis": {"total_claimed_amount": _r2(total_claimed)}, "by_department": by_department, "monthly_trend": monthly_trend}

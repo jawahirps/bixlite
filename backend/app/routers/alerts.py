@@ -357,7 +357,7 @@ def _compute(db: Session, today: date) -> dict:  # today can be set in the past 
         dx AS (
           SELECT DISTINCT ON (d.claim_id_fk) d.claim_id_fk, d.diagnosis_code FROM claim_diagnoses d
           JOIN c ON c.id = d.claim_id_fk
-          ORDER BY d.claim_id_fk, (d.diagnosis_type ILIKE 'principal') DESC, d.sequence_no NULLS LAST)
+          ORDER BY d.claim_id_fk, (d.diagnosis_type ILIKE ANY (ARRAY['principal','primary'])) DESC, d.sequence_no NULLS LAST)
     """
     # build the clinician base (90-day first-submission RAs, claims, principal Dx) once instead of in each query
     _P0 = {"s": today - timedelta(days=90), "ids": ids}
@@ -1208,7 +1208,7 @@ def _clinician_lines(db, facility_id: int, clinician: str, kind: str):
                       AND x.resubmission_key = '' ORDER BY x.id LIMIT 1) cl ON true
         LEFT JOIN claim_activities a ON a.claim_id_fk = cl.id AND a.activity_id = ad.activity_id
         LEFT JOIN LATERAL (SELECT d.diagnosis_code FROM claim_diagnoses d WHERE d.claim_id_fk = cl.id
-                           ORDER BY (d.diagnosis_type ILIKE 'principal') DESC, d.sequence_no NULLS LAST LIMIT 1) dx ON true
+                           ORDER BY (d.diagnosis_type ILIKE ANY (ARRAY['principal','primary'])) DESC, d.sequence_no NULLS LAST LIMIT 1) dx ON true
         WHERE coalesce(nullif(a.clinician_id, ''), cl.clinician_id) = :c
           AND coalesce(ad.net, 0) - coalesce(ad.paid_amount, 0) > 0.01 AND {_KIND_FILTER[kind]}
         ORDER BY amt DESC, r.remittance_date DESC
@@ -1298,7 +1298,7 @@ def _facility_denial_lines(db, facility_id: int, month: str):
               ORDER BY r.claim_id, ad.activity_id, r.remittance_date DESC, r.id DESC)
         SELECT c.claim_id, c.enc, l.activity_code act, coalesce(nullif(a.clinician_id, ''), c.clinician_id) clin,
                (SELECT d.diagnosis_code FROM claim_diagnoses d WHERE d.claim_id_fk = c.id
-                ORDER BY (d.diagnosis_type ILIKE 'principal') DESC, d.sequence_no NULLS LAST LIMIT 1) dx,
+                ORDER BY (d.diagnosis_type ILIKE ANY (ARRAY['principal','primary'])) DESC, d.sequence_no NULLS LAST LIMIT 1) dx,
                c.payer, l.denial_code code, l.amt, l.tpa_comments remark, ras.first_ra, ras.last_ra, rs.last_resub
         FROM l JOIN c USING (claim_id) JOIN ras USING (claim_id) LEFT JOIN rs USING (claim_id)
         LEFT JOIN claim_activities a ON a.claim_id_fk = c.id AND a.activity_id = l.activity_id

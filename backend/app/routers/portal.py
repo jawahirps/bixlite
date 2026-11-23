@@ -396,35 +396,54 @@ def portal_dashboard(months: int = Query(12, ge=3, le=24), facility_id: Optional
     fid = facility_id if facility_id in fids else fids[0]
     fac = db.get(Facility, fid)
     d1 = date.today()
-    d0 = (d1.replace(day=1) - timedelta(days=31 * (months - 1))).replace(day=1)
+    y, m = divmod(d1.year * 12 + d1.month - 1 - (months - 1), 12)   # exactly `months` calendar months
+    d0 = date(y, m + 1, 1)
     rows = db.execute(_text(_SQL), {"f": fid, "d0": d0, "d1": d1 + timedelta(days=1)}).mappings().all()
     ms = [{"month": r["m"], **{k: int(r[k] or 0) for k in COUNTS}, **{k: round(float(r[k] or 0), 2) for k in AMOUNTS}}
           for r in rows]
     total = {k: sum(m[k] for m in ms) for k in COUNTS + AMOUNTS}
-    # unpaid amount by denial code and payer (latest RA per activity), same encounter period
+    # Unpaid amount by denial code and payer, reconciled to the Denied card: per service line, net minus all
+    # payments across RAs (identical RA loads once), coded with the line's latest denial code; then each claim's
+    # lines are scaled so they add up to that claim's Denied amount (net - all payments, as on the card).
     agg = db.execute(_text("""
-        WITH c AS (SELECT DISTINCT ON (claim_id) claim_id, upper(coalesce(nullif(receiver_id, ''), payer_id)) payer
+        WITH c AS (SELECT DISTINCT ON (claim_id) claim_id, coalesce(net_amount, 0) net,
+                          upper(coalesce(nullif(receiver_id, ''), payer_id)) payer
                    FROM claims WHERE facility_id = :f AND encounter_start >= :d0 AND encounter_start < :d1
                    ORDER BY claim_id, submission_date DESC NULLS LAST, id DESC),
-        l AS (SELECT DISTINCT ON (r.claim_id, ad.activity_id) r.claim_id, ad.denial_code, ad.activity_code,
-                     greatest(coalesce(ad.net, 0) - coalesce(ad.paid_amount, 0), 0) amt
-              FROM remittances r JOIN c USING (claim_id) JOIN remittance_activity_details ad ON ad.remittance_id_fk = r.id
-              WHERE r.facility_id = :f
-              ORDER BY r.claim_id, ad.activity_id, r.remittance_date DESC, r.id DESC)
-        SELECT l.denial_code code, c.payer, sum(l.amt) amt, count(*) n
-        FROM l JOIN c USING (claim_id) WHERE coalesce(l.denial_code, '') <> '' AND l.amt > 0.01 GROUP BY 1, 2
+        ra AS (SELECT DISTINCT ON (r.claim_id, r.ra_file_id, r.net_amount, r.paid_amount, r.denial_amount)
+                      r.id, r.claim_id, coalesce(r.paid_amount, 0) paid, r.remittance_date
+               FROM remittances r JOIN c USING (claim_id) WHERE r.facility_id = :f),
+        cd AS (SELECT c.claim_id, c.payer, c.net - least(greatest(sum(ra.paid), 0), c.net) denied
+               FROM c JOIN ra USING (claim_id) GROUP BY c.claim_id, c.payer, c.net),
+        ln AS (SELECT ra.claim_id, ad.activity_id,
+                      max(coalesce(ad.net, 0)) net, sum(coalesce(ad.paid_amount, 0)) paid,
+                      (array_agg(nullif(ad.denial_code, '') ORDER BY ra.remittance_date DESC, ra.id DESC))[1] code
+               FROM ra JOIN remittance_activity_details ad ON ad.remittance_id_fk = ra.id
+               GROUP BY ra.claim_id, ad.activity_id),
+        lu AS (SELECT claim_id, coalesce(code, 'No code') code, greatest(net - paid, 0) amt FROM ln),
+        s AS (SELECT claim_id, sum(amt) tot FROM lu GROUP BY 1)
+        SELECT lu.code, cd.payer,
+               sum(CASE WHEN s.tot > 0.01 THEN lu.amt * cd.denied / s.tot ELSE 0 END) amt, count(*) n
+        FROM lu JOIN s USING (claim_id) JOIN cd USING (claim_id)
+        WHERE cd.denied > 0.01 AND lu.amt > 0.01 GROUP BY 1, 2
     """), {"f": fid, "d0": d0, "d1": d1 + timedelta(days=1)}).all()
-    tot = sum(float(r.amt) for r in agg) or 1
+    tot = float(total.get("denied") or 0) or 1
     by_code, by_payer = {}, {}
     for r in agg:
         by_code.setdefault(r.code, [0.0, 0]); by_code[r.code][0] += float(r.amt); by_code[r.code][1] += r.n
         by_payer.setdefault(r.payer, [0.0, 0]); by_payer[r.payer][0] += float(r.amt); by_payer[r.payer][1] += r.n
-    top = lambda d: sorted(d.items(), key=lambda kv: -kv[1][0])[:8]
+    def top(d):   # top 7 + "Other" so the rows always add up to the Denied card
+        items = sorted(d.items(), key=lambda kv: -kv[1][0])
+        head = items[:7]
+        rest = tot - sum(v[0] for _, v in head)
+        if rest >= 1 and tot > 1:
+            head.append(("Other", [rest, sum(v[1] for _, v in items[7:])]))
+        return head
     return {
         "facility": fac.facility_name if fac else "", "facilities": [
             {"id": f.id, "name": f.facility_name} for f in db.query(Facility).filter(Facility.id.in_(fids))],
         "facility_id": fid, "date_from": d0.isoformat(), "date_to": d1.isoformat(), "total": total, "months": ms,
-        "denial_reasons": [{"code": k, "description": _dd_desc(k), "lines": v[1], "amount": round(v[0], 2),
+        "denial_reasons": [{"code": k, "description": ("All other reasons" if k == "Other" else _dd_desc(k)), "lines": v[1], "amount": round(v[0], 2),
                             "share_pct": round(100 * v[0] / tot)} for k, v in top(by_code)],
         "payers": [{"payer": _pn(k) or k, "lines": v[1], "amount": round(v[0], 2), "share_pct": round(100 * v[0] / tot)}
                    for k, v in top(by_payer)],

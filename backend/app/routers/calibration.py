@@ -586,3 +586,36 @@ def get_denial_codes(
         }
         for r in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# Denial patterns — evidence-based "why" + "what to do" cards (services/denial_patterns.py)
+# ---------------------------------------------------------------------------
+def _stopped() -> set:
+    import json
+    from pathlib import Path
+    f = Path(__file__).resolve().parents[2] / "data" / "stopped_facilities.json"
+    try:
+        return {int(k) for k in json.loads(f.read_text()) if k.isdigit()}
+    except Exception:
+        return set()
+
+
+@router.get("/patterns")
+def get_denial_patterns(
+    facility_id: Optional[int] = None,
+    refresh: bool = False,
+    _: User = Depends(get_current_user),
+):
+    """Pattern cards for one facility (or all active, non-stopped facilities when facility_id is omitted).
+    Hourly cache, refreshed in the background; {"warming": true} until the first computation finishes."""
+    from ..database import SessionLocal
+    from ..services import denial_patterns as dp
+    from ..services.payer_names import payer_name
+
+    data, busy, err = dp.get_data(SessionLocal, force=refresh)
+    if data is None:
+        return {"warming": True, "error": err, "cards": []}
+    out = dp.build(data, facility_id, _stopped(), lambda p: payer_name(p) or p)
+    out["refreshing"] = busy
+    return out

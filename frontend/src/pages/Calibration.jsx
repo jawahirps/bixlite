@@ -6,10 +6,12 @@
  *  2. Denial Queue   — claims denied AND flagged by scrubber → resubmission candidates
  *  3. Top Denial Codes — most frequent RA denial codes + amounts
  */
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import apiClient from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import { readFacility, saveFacility } from "../utils/facility";
+
+const PrepareResubmission = lazy(() => import("../components/resub/PrepareResubmission"));
 
 const PRIORITY_STYLE = {
   CRITICAL:   "bg-red-100 text-red-800 font-bold",
@@ -42,7 +44,115 @@ function PrecisionBar({ pct }) {
   );
 }
 
-export default function Calibration() {
+const CHIP_TONE = {
+  denied:  "bg-denied/10 text-denied",
+  pending: "bg-pending/10 text-pending",
+  ink:     "bg-ink/5 text-ink",
+};
+const VERDICT = {
+  yes:       { label: "Worth resubmitting", cls: "bg-paid/10 text-paid" },
+  selective: { label: "Resubmit selectively", cls: "bg-pending/10 text-pending" },
+  no:        { label: "Rarely recovered", cls: "bg-denied/10 text-denied" },
+};
+const KIND_LABEL = {
+  family: "Code family", payer: "Payer behaviour", repeat: "Repeat test",
+  followup: "Follow-up visit", auth: "Prior authorization", dx: "Diagnosis–service",
+};
+
+function PrepareButton({ claim, onPrepareResubmission }) {
+  return (
+    <button
+      onClick={() => onPrepareResubmission({ facility_id: claim.facility_id, claim_id: claim.claim_id })}
+      className="whitespace-nowrap rounded border border-ghaf-600 px-2 py-0.5 text-xs font-semibold text-ghaf-700 hover:bg-ghaf-600 hover:text-white"
+    >
+      Prepare resubmission
+    </button>
+  );
+}
+
+function PatternCard({ c, onPrepareResubmission }) {
+  const [open, setOpen] = useState(false);
+  const kf = c.key_figure || {};
+  const v = c.resub && VERDICT[c.resub.verdict];
+  return (
+    <div className="gh-card flex flex-col gap-3 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{KIND_LABEL[c.kind] || c.kind}</p>
+          <h3 className="text-sm font-semibold leading-snug text-ink">{c.title}</h3>
+        </div>
+        <div className="shrink-0 text-right">
+          <p className="text-2xl font-bold leading-none text-denied">
+            {kf.unit === "%" ? `${kf.value}%` : `AED ${Number(kf.value || 0).toLocaleString("en-AE")}`}
+          </p>
+          <p className="mt-1 max-w-[12rem] text-[11px] text-slate-500">{kf.label}</p>
+        </div>
+      </div>
+
+      {c.chips?.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {c.chips.map(ch => (
+            <span key={ch.label} title={ch.title || ""} className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${CHIP_TONE[ch.tone] || CHIP_TONE.ink}`}>{ch.label}</span>
+          ))}
+        </div>
+      )}
+
+      <div className="rounded-lg bg-slate-50 px-3 py-2">
+        <p className="mb-1 text-[10px] font-bold uppercase tracking-wide text-slate-500">Facts</p>
+        <ul className="space-y-0.5 text-xs text-slate-700">
+          {c.facts.map(f => <li key={f}>• {f}</li>)}
+        </ul>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <div>
+          <p className="text-[10px] font-bold uppercase tracking-wide text-pending">Likely cause (interpretation)</p>
+          <p className="text-xs text-slate-700">{c.cause}</p>
+        </div>
+        <div>
+          <p className="text-[10px] font-bold uppercase tracking-wide text-ghaf-700">Recommended action</p>
+          <p className="text-xs text-slate-700">{c.action}</p>
+        </div>
+      </div>
+
+      <div className="mt-auto flex flex-wrap items-center gap-2 border-t border-hairline pt-2">
+        {v ? (
+          <span className={`rounded px-2 py-0.5 text-xs font-semibold ${v.cls}`}
+            title={`${c.resub.paid} of ${c.resub.n} resubmitted lines with an RA back were paid in full`}>
+            {v.label}: {c.resub.paid_pct}% paid · {c.resub.recovered_pct ?? "—"}% AED recovered
+          </span>
+        ) : <span className="text-xs text-slate-400">No resubmission history</span>}
+        {c.claims?.length > 0 && (
+          <button onClick={() => setOpen(o => !o)} className="ml-auto text-xs font-medium text-ghaf-700 hover:underline">
+            {open ? "Hide" : "Show"} {c.claims.length} recent unpaid claims
+          </button>
+        )}
+      </div>
+      {open && (
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-xs">
+            <thead className="text-slate-500">
+              <tr><th className="py-1 text-left">Claim</th><th className="text-left">Service</th><th className="text-left">Code</th><th className="text-left">First RA</th><th className="text-right">Unpaid</th><th /></tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {c.claims.map(cl => (
+                <tr key={`${cl.facility_id}-${cl.claim_id}-${cl.activity_code}`}>
+                  <td className="py-1 font-mono text-slate-800">{cl.claim_id}</td>
+                  <td className="text-slate-600">{cl.activity_code}{cl.dx ? ` · ${cl.dx}` : ""}</td>
+                  <td className="text-denied">{cl.denial_code}</td>
+                  <td className="text-slate-600">{cl.first_ra}</td>
+                  <td className="text-right font-semibold text-denied">{fmt(cl.unpaid)}</td>
+                  <td className="pl-2 text-right"><PrepareButton claim={cl} onPrepareResubmission={onPrepareResubmission} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function Calibration({ onPrepareResubmission: onPrepareProp } = {}) {
   const { user } = useAuth();
   const [facilities, setFacilities] = useState([]);
   const [facilityId, setFacilityId] = useState(() => {
@@ -50,7 +160,13 @@ export default function Calibration() {
     return saved ? Number(saved) : (user?.facility_id || 13);
   });
 
-  const [tab, setTab] = useState("files"); // files | queue | codes | rules
+  const [tab, setTab] = useState("patterns"); // patterns | files | queue | codes | rules
+  const [patterns, setPatterns] = useState(null);
+  const [patScope, setPatScope] = useState("facility"); // facility | all
+  const patTimer = useRef(null);
+  // Claim picked for the resubmission drawer: {facility_id, claim_id}
+  const [prep, setPrep] = useState(null);
+  const onPrepareResubmission = onPrepareProp || (claim => setPrep(claim));
   const [queueView, setQueueView] = useState("claims"); // claims | by_file
   const [expandedFiles, setExpandedFiles] = useState(new Set());
   const [ruleStats, setRuleStats]     = useState([]);
@@ -101,7 +217,22 @@ export default function Calibration() {
     } finally { setExportingExcel(false); }
   }
 
+  async function loadPatterns(fid, scope = patScope, refresh = false) {
+    clearTimeout(patTimer.current);
+    try {
+      const params = scope === "all" ? {} : { facility_id: fid };
+      if (refresh) params.refresh = true;
+      const r = await apiClient.get("/calibration/patterns", { params });
+      setPatterns(r.data);
+      if (r.data?.warming) patTimer.current = setTimeout(() => loadPatterns(fid, scope), 5000);
+    } catch (e) {
+      setPatterns({ error: e.response?.data?.detail || e.message, cards: [] });
+    }
+  }
+  useEffect(() => () => clearTimeout(patTimer.current), []);
+
   async function loadAll(fid) {
+    loadPatterns(fid);
     setLoading(true); setError(null);
     try {
       const [r1, r3, r4] = await Promise.all([
@@ -193,7 +324,8 @@ export default function Calibration() {
       {/* Tabs */}
       <div className="flex gap-1 overflow-x-auto border-b border-slate-200">
         {[
-              { key: "files",  label: `Resubmission Files (${fileSummary.length})` },
+              { key: "patterns", label: `Patterns (${patterns?.cards?.length ?? "…"})` },
+          { key: "files",  label: `Resubmission Files (${fileSummary.length})` },
           { key: "queue",  label: `Recall Queue (${denialQueue.length})` },
           { key: "codes",  label: `Denial Codes (${denialCodes.length})` },
           { key: "rules",  label: `Rule Precision (${ruleStats.length})` },
@@ -208,6 +340,45 @@ export default function Calibration() {
           </button>
         ))}
       </div>
+
+      {/* ── Tab: Patterns (services/denial_patterns.py) ─────────────────────── */}
+      {tab === "patterns" && (
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex overflow-hidden rounded border border-sage-line text-sm">
+              {[["facility", "This facility"], ["all", "All facilities"]].map(([v, label]) => (
+                <button key={v} onClick={() => { setPatScope(v); loadPatterns(facilityId, v); }}
+                  className={`px-3 py-1.5 font-medium ${patScope === v ? "bg-ghaf-600 text-white" : "bg-white text-slate-600 hover:bg-slate-50"}`}>
+                  {label}
+                </button>
+              ))}
+            </div>
+            {patterns?.summary && (
+              <p className="text-xs text-slate-500">
+                Last 12 months of encounters · {patterns.summary.lines.toLocaleString()} lines ·{" "}
+                <span className="font-semibold text-denied">{patterns.summary.denied_rate}% denied at first RA</span> (AED {patterns.summary.denied_amt.toLocaleString()}) ·
+                AED {patterns.summary.final_unpaid.toLocaleString()} still unpaid · resubmissions paid in full {patterns.summary.resub?.paid_pct ?? "—"}% ·
+                RA up to {patterns.as_of} · computed {patterns.computed_at}{patterns.refreshing ? " (refreshing…)" : ""}
+              </p>
+            )}
+            <button onClick={() => loadPatterns(facilityId, patScope, true)} className="ml-auto text-xs font-medium text-ghaf-700 hover:underline">Recompute</button>
+          </div>
+          {patterns?.warming && (
+            <div className="gh-card p-6 text-center text-sm text-slate-600">Analysing 12 months of claims and remittances… (about 30 s, first load only)</div>
+          )}
+          {patterns?.error && !patterns?.warming && <div className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{patterns.error}</div>}
+          {patterns && !patterns.warming && patterns.cards?.length === 0 && !patterns.error && (
+            <div className="gh-card p-6 text-center text-sm text-slate-600">No denial pattern with enough evidence for this scope.</div>
+          )}
+          <div className="grid gap-3 lg:grid-cols-2">
+            {(patterns?.cards || []).map(c => <PatternCard key={c.id} c={c} onPrepareResubmission={onPrepareResubmission} />)}
+          </div>
+          <p className="text-xs text-slate-500">
+            Facts come from RAs (latest submission per claim, RA rows de-duplicated); "denied" = denied at first RA, "still unpaid" = net minus all RA payments.
+            Resubmission % = lines resubmitted after their first RA that got an RA back and were paid in full. Cause and action are interpretation.
+          </p>
+        </div>
+      )}
 
       {/* ── Tab: Resubmission Files ────────────────────────────────────────── */}
       {tab === "files" && (
@@ -470,7 +641,12 @@ export default function Calibration() {
                               )}
                             </div>
                           </td>
-                          <td className="px-3 py-2 font-mono text-xs text-slate-800">{d.claim_id}</td>
+                          <td className="px-3 py-2 font-mono text-xs text-slate-800">
+                            {d.claim_id}
+                            {d.recall_type === "DENIED" && (
+                              <div className="mt-1"><PrepareButton claim={{ facility_id: facilityId, claim_id: d.claim_id }} onPrepareResubmission={onPrepareResubmission} /></div>
+                            )}
+                          </td>
                           <td className="px-3 py-2 text-slate-600 text-xs">
                             {d.encounter_date}<br />
                             <span className="text-slate-600">{d.encounter_type || "—"}</span>
@@ -610,7 +786,12 @@ export default function Calibration() {
                                   <td className="pl-8 pr-3 py-2">
                                     <span className={`gh-chip ${PRIORITY_STYLE[d.priority]}`}>{d.priority}</span>
                                   </td>
-                                  <td className="px-3 py-2 font-mono text-xs text-slate-800">{d.claim_id}</td>
+                                  <td className="px-3 py-2 font-mono text-xs text-slate-800">
+                                    {d.claim_id}
+                                    {d.recall_type === "DENIED" && (
+                                      <div className="mt-1"><PrepareButton claim={{ facility_id: facilityId, claim_id: d.claim_id }} onPrepareResubmission={onPrepareResubmission} /></div>
+                                    )}
+                                  </td>
                                   <td className="px-3 py-2 text-slate-600 text-xs">
                                     {d.encounter_date}<br />
                                     <span className="text-slate-600">{d.encounter_type || "—"}</span>
@@ -706,6 +887,9 @@ export default function Calibration() {
           </div>
         </div>
       )}
+
+      {/* `prep` holds {facility_id, claim_id} set by every "Prepare resubmission" button */}
+      {prep && <Suspense fallback={null}><PrepareResubmission claim={prep} onClose={() => setPrep(null)} /></Suspense>}
     </div>
   );
 }

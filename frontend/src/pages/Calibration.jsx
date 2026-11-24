@@ -263,7 +263,9 @@ export default function Calibration({ onPrepareResubmission: onPrepareProp } = {
   // Summary counts
   const upgradeSuggestions = ruleStats.filter(r => r.suggested_severity === "BLOCK").length;
   const criticalQueue      = denialQueue.filter(d => d.priority === "CRITICAL").length;
-  const totalDenied        = denialQueue.reduce((s, d) => s + d.denial_amount, 0);
+  // Files that still need work: a window is open and not every denied claim is already resubmitted (awaiting RA)
+  const openFiles          = fileSummary.filter(f => f.window_status === "open" || f.window_status === "urgent");
+  const totalDenied        = openFiles.reduce((s, f) => s + (f.total_denial_amount - (f.awaiting_amount || 0)), 0);
 
   return (
     <div className="space-y-6">
@@ -312,10 +314,10 @@ export default function Calibration({ onPrepareResubmission: onPrepareProp } = {
       {/* KPI cards */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         {[
-          { label: "Files to Resubmit",  value: fileSummary.filter(f => f.window_status !== "expired").length, color: "bg-amber-50 text-amber-700" },
+          { label: "Files to Resubmit",  value: openFiles.length, color: "bg-amber-50 text-amber-700" },
           { label: "Urgent (≤5 days)",  value: fileSummary.filter(f => f.window_status === "urgent").length,  color: fileSummary.filter(f=>f.window_status==="urgent").length > 0 ? "bg-red-50 text-red-700" : "bg-slate-50 text-slate-400" },
           { label: "Recall Queue",      value: denialQueue.length,     color: denialQueue.length > 0 ? "bg-orange-50 text-orange-700" : "bg-slate-50 text-slate-400" },
-          { label: "AED Denied",        value: fmt(totalDenied),       color: totalDenied > 0 ? "bg-rose-50 text-rose-700" : "bg-slate-50 text-slate-400" },
+          { label: "AED recoverable (open windows)", value: fmt(totalDenied),       color: totalDenied > 0 ? "bg-rose-50 text-rose-700" : "bg-slate-50 text-slate-400" },
         ].map(s => (
           <div key={s.label} className={`rounded-lg border border-hairline p-4 ${s.color}`}>
             <p className="text-2xl font-bold">{s.value}</p>

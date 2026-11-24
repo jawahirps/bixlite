@@ -37,14 +37,29 @@ from sqlalchemy.orm import Session
 from app.models import ScrubQuery, ScrubSession
 from app.services import dental_rules, doc_review, icd_excludes, resub_worklist as rw
 from app.services.claim_scrubber import dx_support
+from app.services.licence import norm_licence
 
 HISTORY_DAYS = 180
 LICENCE_DAYS = 90
 LICENCE_MIN_LINES, LICENCE_MIN_RATE = 3, 0.30
 AUTH_MIN_LINES, AUTH_MIN_RATE = 5, 0.30
 DENTAL_CODE = re.compile(r"^D\d{4}$")                 # CDT codes — always need approval
-DENTAL_DX = re.compile(r"^K0[0-8]")                    # K00–K08 teeth and gums
-ORAL_DX = re.compile(r"^K(09|1[0-4])")                 # K09–K14 mouth / tongue / lips — dental only with a dentist
+# dental diagnoses K00–K14 (teeth, gums, mouth, tongue, lips); K20+ (oesophagus, gastritis…) are not dental.
+# They need approval only when a dentist is involved (CDT code on the claim or a dental clinician).
+DENTAL_DX = re.compile(r"^K(0\d|1[0-4])")
+
+
+def _load_cdt() -> frozenset:
+    import json, os
+    p = os.path.join(os.path.dirname(__file__), "claim_scrubber", "rules", "cdt_2018_codes.json")
+    try:
+        with open(p) as f:
+            return frozenset(c.strip().upper() for c in json.load(f)["codes"])
+    except (OSError, ValueError, KeyError):
+        return frozenset()
+
+
+CDT_CODES = _load_cdt()       # CDT 2018 code list (ADA)
 ERP_DUP_MIN_CLAIMS, ERP_DUP_SHARE = 10, 0.50   # ≥ half a day's invoices fully doubled → ERP duplication
 DXAUTH_MIN_RATE = 0.20      # diagnosis categories a payer wants approved (e.g. maternity, refraction)
 # diagnosis–code fit (MNEC-003/004 "without supporting diagnoses"): query only when this payer denies the code
@@ -552,9 +567,15 @@ def generate(db: Session, session_id: int) -> int:
         billable = [a for a in A if float(a.net or 0) > 0 and not CONSULT_BASE.match(a.activity_code.split(".")[0])]
         with_auth = [a for a in billable if a.authorization_id]
         no_auth = [a for a in billable if not a.authorization_id]
-        by_dentist = any(DENTAL_CODE.match(a.activity_code) or "DENT" in (spec.get(a.clinician_id or "") or "").upper()
+        by_dentist = any(DENTAL_CODE.match(a.activity_code) or "DENT" in (spec.get(norm_licence(a.clinician_id)) or "").upper()
                          for a in A)
-        dental_dx = next((d for d in D if DENTAL_DX.match(d) or (by_dentist and ORAL_DX.match(d))), None)
+        dental_dx = next((d for d in D if by_dentist and DENTAL_DX.match(d)), None)
+        bad_cdt = sorted({a.activity_code for a in A if DENTAL_CODE.match(a.activity_code)
+                          and CDT_CODES and a.activity_code.upper() not in CDT_CODES})
+        if bad_cdt:
+            out.append(_q("CDT_UNKNOWN", "Dental billing rule (DHA)", "CODING CORRECTION", ", ".join(bad_cdt),
+                          f"{', '.join(bad_cdt)} is not a recognised CDT code (CDT 2018 code list). "
+                          f"Kindly check & correct the dental code."))
         dental = [a for a in A if float(a.net or 0) > 0 and not a.authorization_id
                   and (DENTAL_CODE.match(a.activity_code) or dental_dx)]
         if dental and dental_violations:
@@ -781,9 +802,9 @@ def generate(db: Session, session_id: int) -> int:
                               f"duplicate or wrong visit date."))
             matched = None
             for p in sorted(prev, key=lambda v: v.d, reverse=True):
-                same = dx in (p.dx3s or []) or any(rw._block(x) == rw._block(dx) for x in (p.dx3s or []) if rw._block(x))
-                same_doc = cur.doc and cur.doc == (p.doc or "").upper()
-                same_spec = spec.get((cur.doc or "").upper()) and spec.get((cur.doc or "").upper()) == spec.get((p.doc or "").upper())
+                same = rw.same_condition(dx, p.dx3s)
+                same_doc = rw.same_clinician(cur.doc, p.doc)
+                same_spec = spec.get(norm_licence(cur.doc)) and spec.get(norm_licence(cur.doc)) == spec.get(norm_licence(p.doc))
                 if same and (same_doc or same_spec):
                     matched = (p, (c["d"] - p.d).days, "same doctor" if same_doc else "same specialty")
                     break

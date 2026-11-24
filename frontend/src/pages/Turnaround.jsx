@@ -156,7 +156,11 @@ export default function Turnaround() {
             ["Claims submitted", fmtNum(t.claims)],
             ["Remitted", `${fmtNum(t.remitted)} (${t.claims ? Math.round((100 * t.remitted) / t.claims) : 0}%)`],
             ["Awaiting RA", `${fmtNum(t.outstanding_count)} · ${fmtMoney(t.outstanding_amount)}`],
-            [`Overdue > ${days} d`, `${fmtNum(t.overdue_count)} · ${fmtMoney(t.overdue_amount)}`],
+            [`Overdue > ${days} d (emergency > ${summary?.emergency_days ?? 7} d)`, `${fmtNum(t.overdue_count)} · ${fmtMoney(t.overdue_amount)}`],
+            ["RA on time (SN 3.9.1 / 3.9.4)", `${fmtPct(t.sn_on_time_pct)} · ≤45 d, emergency ≤7 d`],
+            ["Emergency claims (≤7 d)", `${fmtNum(t.emergency_claims)} · ${fmtNum(t.emergency_breached)} breached`],
+            ["Resubmission RA ≤30 d (SN 3.9.2)", `${fmtPct(t.resub_within_30_pct)} of ${fmtNum(t.resubmissions)}`],
+            ["Resubmissions no RA > 30 d", `${fmtNum(t.resub_overdue)} · avg ${t.resub_avg_days ?? "—"} d`],
           ].map(([k, v]) => (
             <div key={k} className="gh-card p-4">
               <p className="gh-eyebrow">{k}</p>
@@ -188,7 +192,7 @@ export default function Turnaround() {
                   <SortTh k="claims">Claims</SortTh>
                   <SortTh k="remitted_pct">Remitted</SortTh>
                   <SortTh k="avg_days">Avg days</SortTh>
-                  <th className="hidden px-3 py-2 text-right 2xl:table-cell" title="Share remitted within 30 / 45 / 60 days">RA within<br/>30·45·60 d</th>
+                  <th className="hidden px-3 py-2 text-right 2xl:table-cell" title="SN on time (≤45 d; emergency ≤7 d) · RA within 60 d · resubmission RA ≤30 d (SN 3.9.2)">SN on time · ≤60 d<br/>· resub ≤30 d</th>
                   <SortTh k="outstanding_amount">Awaiting RA</SortTh>
                   <SortTh k="overdue_amount">Overdue</SortTh>
                   <th className="px-3 py-2" />
@@ -220,9 +224,9 @@ export default function Turnaround() {
                       </td>
                       <td className="px-3 py-2 text-right">{fmtNum(p.claims)}</td>
                       <td className="whitespace-nowrap px-3 py-2 text-right">{fmtNum(p.remitted)} <span className="block text-xs text-slate-400">{fmtPct(p.remitted_pct)}</span></td>
-                      <td className="px-3 py-2 text-right" title={`RA within 30 / 45 / 60 days: ${fmtPct(p.within_30_pct)} / ${fmtPct(p.within_45_pct)} / ${fmtPct(p.within_60_pct)}`}><DaysChip days={p.avg_days} limit={days} /></td>
+                      <td className="px-3 py-2 text-right" title={`SN on time: ${fmtPct(p.sn_on_time_pct)} · RA within 45 / 60 days: ${fmtPct(p.within_45_pct)} / ${fmtPct(p.within_60_pct)} · resubmission RA ≤30 d: ${fmtPct(p.resub_within_30_pct)} of ${p.resubmissions}`}><DaysChip days={p.avg_days} limit={days} /></td>
                       <td className="hidden whitespace-nowrap px-3 py-2 text-right text-xs text-slate-600 2xl:table-cell">
-                        {fmtPct(p.within_30_pct)} · {fmtPct(p.within_45_pct)} · {fmtPct(p.within_60_pct)}
+                        {fmtPct(p.sn_on_time_pct)} · {fmtPct(p.within_60_pct)} · {fmtPct(p.resub_within_30_pct)}
                       </td>
                       <td className="whitespace-nowrap px-3 py-2 text-right">{fmtNum(p.outstanding_count)} <span className="block text-xs text-slate-400">{fmtMoney(p.outstanding_amount)}</span></td>
                       <td className="whitespace-nowrap px-3 py-2 text-right">
@@ -288,7 +292,7 @@ export default function Turnaround() {
                 {(overdue?.claims || []).map((c) => (
                   <tr key={`${c.facility_id}-${c.claim_id}`} className="hover:bg-slate-50">
                     {showFacility && <td className="px-3 py-2 text-slate-600">{c.facility_name}</td>}
-                    <td className="px-3 py-2 font-mono text-xs">{c.claim_id}</td>
+                    <td className="px-3 py-2 font-mono text-xs">{c.claim_id}{c.emergency && <span className="ml-1 gh-chip gh-chip-denied">ER · 7 d</span>}</td>
                     <td className="px-3 py-2">{c.receiver_name || c.receiver_id}{c.payer_id !== c.receiver_id && <span className="block text-xs text-slate-500">{c.payer_name || c.payer_id}</span>}</td>
                     <td className="px-3 py-2">{fmtDay(c.encounter_date)}</td>
                     <td className="px-3 py-2">

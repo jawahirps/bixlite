@@ -39,6 +39,8 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.models import ScrubSession, ScrubResult
+from app.services import resub_worklist as rw
+from app.services.licence import norm_licence
 
 logger = logging.getLogger(__name__)
 
@@ -154,16 +156,16 @@ class ScrubRuleEngine:
         self, row: Any, facility_id: int
     ) -> list[tuple[str, str, str, dict]]:
         """
-        FREE_FOLLOWUP (ERROR): same Emirates ID + facility, encounter_start
-        within 7 days of a prior production claim (any adjudication status).
+        FREE_FOLLOWUP — follow-up (ERROR) and repeat (WARN) tiers under one rule code
+        (scrub_results.rule_code has a DB check constraint, so the repeat tier reuses FREE_FOLLOWUP).
 
-        UAE DHA rule: a follow-up visit within 7 days of a prior outpatient
-        consultation at the same facility should not be billed as a new
-        consultation — the follow-up cost is considered included in the
-        original visit fee.  The rule applies based on encounter dates alone;
-        we do NOT require a settled RA because the prior claim may still be
-        pending adjudication when the patient returns.
-
+        Single source of truth: resub_worklist (FOLLOWUP_DAYS=7, REPEAT_DAYS=28, consultation codes 9/10/11,
+        .01 = free follow-up net 0, .02 = repeat).  Same Emirates ID + facility, prior production claim
+        (any adjudication status):
+          * 1–7 days  → FREE_FOLLOWUP unless this claim's consultation is already .01
+          * 8–28 days → WARN when this claim bills a consultation that is not .02 and the prior
+                        visit is the same doctor (licence normalised: SHAHPL… == HPL…) or same specialty,
+                        for the same condition
         Only fires when emirates_id and encounter_start are present.
         """
         emirates_id = row["emirates_id"]
@@ -171,12 +173,29 @@ class ScrubRuleEngine:
         if not emirates_id or not enc_start:
             return []
 
-        window_start = enc_start - timedelta(days=7)
+        cur_acts = self.db.execute(
+            text("""SELECT activity_code, clinician_id FROM scrub_claim_activities
+                    WHERE scrub_claim_id = :scid ORDER BY sequence_no"""),
+            {"scid": row["id"]},
+        ).mappings().all()
+        cur_cons = next((a for a in cur_acts if rw.consult_base(a["activity_code"])), None)
+        cur_code = (cur_cons["activity_code"] or "").strip() if cur_cons else None
+        cur_dx = self.db.execute(
+            text("""SELECT upper(diagnosis_code) FROM scrub_claim_diagnoses
+                    WHERE scrub_claim_id = :scid ORDER BY sequence_no LIMIT 1"""),
+            {"scid": row["id"]},
+        ).scalar()
 
         result = self.db.execute(
             text("""
-                SELECT c.claim_id, c.encounter_start::text AS enc_start,
-                       c.claim_status
+                SELECT c.claim_id, c.encounter_start::text AS enc_start, c.encounter_start AS enc_ts,
+                       c.claim_status,
+                       (SELECT a.activity_code FROM claim_activities a WHERE a.claim_id_fk = c.id
+                         AND a.activity_code ~ '^(9|10|11)(\\.[0-9]+)?$' LIMIT 1) AS cons_code,
+                       (SELECT a.clinician_id FROM claim_activities a WHERE a.claim_id_fk = c.id
+                         AND a.activity_code ~ '^(9|10|11)(\\.[0-9]+)?$' LIMIT 1) AS cons_doc,
+                       (SELECT array_agg(DISTINCT upper(left(x.diagnosis_code,3))) FROM claim_diagnoses x
+                         WHERE x.claim_id_fk = c.id) AS dx3s
                 FROM claims c
                 WHERE c.facility_id    = :fac
                   AND c.emirates_id    = :eid
@@ -184,31 +203,57 @@ class ScrubRuleEngine:
                   AND c.encounter_start <  :enc_start
                   AND c.resubmission_key = ''
                 ORDER BY c.encounter_start DESC
-                LIMIT 5
+                LIMIT 20
             """),
             {
                 "fac": facility_id,
                 "eid": emirates_id,
-                "win_start": window_start,
+                "win_start": enc_start - timedelta(days=rw.REPEAT_DAYS),
                 "enc_start": enc_start,
             },
         ).mappings().all()
-
         if not result:
             return []
 
-        matched = [
-            {"claim_id": r["claim_id"], "encounter_start": r["enc_start"], "status": r["claim_status"]}
-            for r in result
-        ]
-        return [(
-            "FREE_FOLLOWUP",
-            "ERROR",
-            f"Patient {emirates_id} has {len(matched)} prior claim(s) at this facility "
-            f"within 7 days before encounter {enc_start}. "
-            f"Billing as a new consultation may violate the UAE DHA free follow-up period rule.",
-            {"matched_claims": matched},
-        )]
+        def gap(r):
+            return (enc_start.date() - r["enc_ts"].date()).days if hasattr(enc_start, "date") else None
+
+        out: list[tuple[str, str, str, dict]] = []
+        fu = [r for r in result if rw.visit_tier(gap(r)) == "followup"]
+        if fu and not (cur_code and cur_code.endswith(rw.FOLLOWUP_SUFFIX)):
+            matched = [{"claim_id": r["claim_id"], "encounter_start": r["enc_start"], "status": r["claim_status"]}
+                       for r in fu[:5]]
+            want = f" Bill as free follow-up {rw.consult_base(cur_code)}{rw.FOLLOWUP_SUFFIX} with net 0." if cur_code else ""
+            out.append((
+                "FREE_FOLLOWUP", "ERROR",
+                f"Patient {emirates_id} has {len(matched)} prior claim(s) at this facility "
+                f"within {rw.FOLLOWUP_DAYS} days before encounter {enc_start}. "
+                f"Billing as a new consultation may violate the UAE DHA free follow-up period rule.{want}",
+                {"matched_claims": matched},
+            ))
+        elif cur_code and not cur_code.endswith(rw.REPEAT_SUFFIX) and not fu:
+            spec = rw._specialties()
+            cur_doc = cur_cons["clinician_id"]
+            for r in result:
+                if rw.visit_tier(gap(r)) != "repeat" or not r["cons_code"]:
+                    continue
+                same_doc = rw.same_clinician(cur_doc, r["cons_doc"])
+                cs = spec.get(norm_licence(cur_doc))
+                if not (same_doc or (cs and cs == spec.get(norm_licence(r["cons_doc"])))):
+                    continue
+                if not rw.same_condition(cur_dx, r["dx3s"]):
+                    continue
+                want = rw.consult_base(cur_code) + rw.REPEAT_SUFFIX
+                out.append((
+                    "FREE_FOLLOWUP", "WARN",   # repeat tier (scrub_results rule_code is DB-constrained)
+                    f"Patient {emirates_id} visited on {r['enc_start'][:10]} ({gap(r)} days before) for the same "
+                    f"condition ({'same doctor' if same_doc else 'same specialty'}). A visit within "
+                    f"{rw.FOLLOWUP_DAYS + 1}–{rw.REPEAT_DAYS} days is a repeat consultation: bill {cur_code} as {want}.",
+                    {"matched_claims": [{"claim_id": r["claim_id"], "encounter_start": r["enc_start"],
+                                         "status": r["claim_status"], "code": r["cons_code"]}]},
+                ))
+                break
+        return out
 
     def _rule_duplicate(
         self, row: Any, facility_id: int

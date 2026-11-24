@@ -22,6 +22,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ..models import ResubPlaybook, ResubTracking
+from .licence import norm_licence
 
 WINDOW_DAYS = 21
 URGENT_DAYS = 5
@@ -279,7 +280,9 @@ SELECT den.*,
        EXISTS (SELECT 1 FROM claims x WHERE x.facility_id = den.facility_id AND x.claim_id = den.claim_id
                AND x.resubmission_key <> '' AND x.submission_date::date >= den.ra_date) AS resub_after,
        EXISTS (SELECT 1 FROM claims x WHERE x.facility_id = den.facility_id AND x.claim_id = den.claim_id
-               AND x.resubmission_key <> '' AND x.submission_date::date < den.ra_date) AS resub_before
+               AND x.resubmission_key <> '' AND x.submission_date::date < den.ra_date) AS resub_before,
+       (SELECT count(*) FROM claims x WHERE x.facility_id = den.facility_id AND x.claim_id = den.claim_id
+               AND x.resubmission_key <> '' AND x.submission_date::date < den.ra_date) AS resubs_before
 FROM den
 LEFT JOIN LATERAL (SELECT * FROM claims c WHERE c.facility_id = den.facility_id AND c.claim_id = den.claim_id
                    AND c.resubmission_key = '' ORDER BY c.id LIMIT 1) c ON true
@@ -339,8 +342,51 @@ def tracking_key(claim_id, activity_id, ra_date) -> str:
 #   ≤7 days  → follow-up (free)              → close, do not resubmit
 #   8–28 days→ repeat visit (billable)        → recode 9/10/11 → 9.02/10.02/11.02 at the repeat rate
 #   otherwise→ new visit                      → resubmit; payer denial is wrong
+# Single source of truth for the follow-up / repeat rule (used by presub_queries, scrub_rules, claim_scrubber)
+CONSULT_BASES = ("9", "10", "11")
+FOLLOWUP_SUFFIX, REPEAT_SUFFIX = ".01", ".02"     # .01 = free follow-up (net 0), .02 = repeat consultation
 CONSULT_RE = re.compile(r"^(9|10|11)(\.\d+)?$")
 FOLLOWUP_DAYS, REPEAT_DAYS = 7, 28
+
+
+def consult_base(code: str) -> Optional[str]:
+    """'10.02' -> '10'; None when not a consultation code."""
+    c = (code or "").strip()
+    return c.split(".")[0] if CONSULT_RE.match(c) else None
+
+
+def visit_tier(gap_days: int) -> Optional[str]:
+    """'followup' (1–7 days), 'repeat' (8–28 days) or None (new visit / same day)."""
+    if gap_days is None or gap_days <= 0:
+        return None
+    if gap_days <= FOLLOWUP_DAYS:
+        return "followup"
+    if gap_days <= REPEAT_DAYS:
+        return "repeat"
+    return None
+
+
+def expected_code(code: str, gap_days: int) -> Optional[str]:
+    """The consultation code the tier requires, or None when the line already matches / no tier applies."""
+    base = consult_base(code)
+    tier = visit_tier(gap_days)
+    if not base or not tier:
+        return None
+    want = base + (FOLLOWUP_SUFFIX if tier == "followup" else REPEAT_SUFFIX)
+    return None if code.strip() == want else want
+
+
+def same_condition(dx: str, prev_dx3s) -> bool:
+    """Same 3-character diagnosis or the same ICD block (letter + first digit)."""
+    dx = (dx or "")[:3].upper()
+    if not dx:
+        return False
+    prev = [x.upper() for x in (prev_dx3s or []) if x]
+    return dx in prev or any(_block(x) == _block(dx) for x in prev if _block(x))
+
+
+def same_clinician(a, b) -> bool:
+    return bool(norm_licence(a)) and norm_licence(a) == norm_licence(b)
 # Apollo NAS (TPA004) / Neuron (TPA001) agreed repeat rates by claimed initial amount
 APOLLO_NETWORK = {
     "10": [((120, 135, 150), 100), ((54, 60), 40), ((40.5, 45, 48), 32), ((36,), 28)],
@@ -375,7 +421,7 @@ def _specialties() -> Dict[str, str]:
                 for r in csv.DictReader(f):
                     sp = (r.get("specialty") or "").strip()
                     if sp:
-                        _spec_cache[r["license"].strip().upper()] = sp
+                        _spec_cache[norm_licence(r["license"])] = sp
         except OSError:
             pass
     return _spec_cache
@@ -471,7 +517,7 @@ def consult_check(ctx: ConsultContext, item: dict, other_denied: List[str]) -> O
         return None
     spec = _specialties()
     dx = (cur.pdx or "")[:3]
-    my_spec = spec.get((cur.doc or "").upper())
+    my_spec = spec.get(norm_licence(cur.doc))
     base = code.split(".")[0]
     others = (" Other denied lines on this claim: " + ", ".join(other_denied) + " — review and resubmit together."
               if other_denied else "")
@@ -491,8 +537,8 @@ def consult_check(ctx: ConsultContext, item: dict, other_denied: List[str]) -> O
         related = not same_dx and any(_block(x) == _block(dx) for x in (p.dx3s or []) if _block(x))
         if not (same_dx or related):
             continue
-        same_doc = bool(cur.doc) and cur.doc == p.doc
-        p_spec = spec.get((p.doc or "").upper())
+        same_doc = same_clinician(cur.doc, p.doc)
+        p_spec = spec.get(norm_licence(p.doc))
         same_spec = bool(my_spec) and my_spec == p_spec
         if not (same_doc or same_spec):
             if not (my_spec and p_spec) and unknown_spec is None:
@@ -531,7 +577,7 @@ def consult_check(ctx: ConsultContext, item: dict, other_denied: List[str]) -> O
         p = prev[0]; gap = (cur.d - p.d).days
         same_cond = dx and (dx in (p.dx3s or []) or any(_block(x) == _block(dx) for x in (p.dx3s or []) if _block(x)))
         if same_cond:   # same condition but a different specialty → a new specialist consultation
-            sp = spec.get((p.doc or "").upper())
+            sp = spec.get(norm_licence(p.doc))
             return resub("Different specialty — not a repeat",
                          f"not a repeat: previous visit {p.claim_id} on {p.d:%d/%m/%Y} was with {sp}, this visit is with {my_spec}",
                          f"This consultation is with a different specialty ({my_spec}) from the previous visit on "
@@ -584,6 +630,9 @@ def build_worklist(db: Session, fid: int, window: int = WINDOW_DAYS, recon_histo
 
         if r.resub_after:
             bucket, status = "closed_resubmitted", "Resubmitted"
+        elif (r.resubs_before or 0) >= 2:
+            # SN 03/2019 3.8.2 / 3.8.5: two resubmissions (incl. reconciliation) already used — no further resubmission
+            bucket, status = "closed_team", "SN limit reached (2 resubmissions)"
         elif status in CLOSED_BY_TEAM:
             bucket = "closed_team"
         elif reconciliation and status == RECON_AGREED:

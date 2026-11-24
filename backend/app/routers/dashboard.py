@@ -29,7 +29,9 @@ _cache: dict = {}
 _SQL = """
 WITH c AS (
   SELECT DISTINCT ON (facility_id, claim_id) facility_id, claim_id, encounter_start, submission_date,
-         coalesce(net_amount, 0) net, coalesce(resubmission_count, 0) > 0 OR resubmission_type IS NOT NULL resub
+         coalesce(net_amount, 0) net, coalesce(resubmission_count, 0) > 0 OR resubmission_type IS NOT NULL resub,
+         -- SN 03/2019 3.9.4: emergency (encounter type with Emergency Room) RA due in 7 days, else 45 (3.9.1)
+         CASE WHEN coalesce((encounter_type IN ('2', '4', '6') OR (encounter_type ILIKE '%emergency%' AND encounter_type NOT ILIKE '%no emergency%')), false) THEN 7 ELSE 45 END sn_days
   FROM claims
   WHERE encounter_start >= :d0 AND encounter_start < :d1 AND (CAST(:f AS int) IS NULL OR facility_id = :f)
     AND facility_id NOT IN (SELECT id FROM facilities WHERE facility_code = 'GHAF-001')
@@ -42,16 +44,16 @@ p AS (SELECT facility_id, claim_id, sum(paid) paid FROM ra GROUP BY 1, 2),
 x AS (
   SELECT to_char(c.encounter_start, 'YYYY-MM') m, c.net, c.resub, p.claim_id IS NOT NULL remitted,
          least(greatest(coalesce(p.paid, 0), 0), c.net) paid,
-         CASE WHEN p.claim_id IS NULL THEN current_date - c.submission_date::date END age
+         CASE WHEN p.claim_id IS NULL THEN current_date - c.submission_date::date END age, c.sn_days
   FROM c LEFT JOIN p USING (facility_id, claim_id))
 SELECT m, count(*) n, sum(net) net, count(*) FILTER (WHERE resub) resub,
        count(*) FILTER (WHERE remitted AND paid >= net - 0.5) full_n,
        count(*) FILTER (WHERE remitted AND paid > 0.5 AND paid < net - 0.5) part_n,
        count(*) FILTER (WHERE remitted AND paid <= 0.5 AND net > 0.5) den_n,
        count(*) FILTER (WHERE NOT remitted) await_n,
-       count(*) FILTER (WHERE NOT remitted AND age > 45) overdue_n,
+       count(*) FILTER (WHERE NOT remitted AND age > sn_days) overdue_n,
        sum(paid) paid, sum(net - paid) FILTER (WHERE remitted) denied,
-       sum(net) FILTER (WHERE NOT remitted) awaiting, sum(net) FILTER (WHERE NOT remitted AND age > 45) overdue
+       sum(net) FILTER (WHERE NOT remitted) awaiting, sum(net) FILTER (WHERE NOT remitted AND age > sn_days) overdue
 FROM x GROUP BY 1 ORDER BY 1
 """
 

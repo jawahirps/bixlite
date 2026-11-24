@@ -639,6 +639,14 @@ export default function Calibration({ onPrepareResubmission: onPrepareProp } = {
                                   ⚡ PROACTIVE
                                 </span>
                               )}
+                              {d.sn_status && (
+                                <span title={`SN 03/2019 — resubmit by ${d.resubmit_by || "?"} (21 days from RA); resubmissions used ${d.resubs_used ?? 0} of 2`}
+                                  className={`gh-chip w-fit text-[11px] ${d.sn_status === "Limit reached" || d.sn_status === "21-day window closed"
+                                    ? "bg-red-100 text-red-800" : d.sn_status === "Reconciliation only" ? "bg-amber-100 text-amber-800"
+                                    : (d.days_left ?? 99) <= 5 ? "bg-amber-100 text-amber-800" : "bg-slate-100 text-slate-700"}`}>
+                                  SN: {d.sn_status}
+                                </span>
+                              )}
                             </div>
                           </td>
                           <td className="px-3 py-2 font-mono text-xs text-slate-800">

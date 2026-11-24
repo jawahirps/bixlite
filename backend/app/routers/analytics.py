@@ -105,7 +105,7 @@ def _remits_with_claims(db: Session, f: AnalyticsFilters):
     if f.receiver_id:
         query = query.filter(Claim.receiver_id == f.receiver_id)
     if f.payer_id:
-        query = query.filter(Remittance.payer_id == f.payer_id)
+        query = query.filter(Claim.payer_id == f.payer_id)  # claim-side payer, same as the claim queries
     if f.encounter_type:
         query = query.filter(Claim.encounter_type == f.encounter_type)
     if f.department:
@@ -151,9 +151,12 @@ def dashboard_summary(
         profiles_q = profiles_q.filter(ClinicalProfile.facility_id == facility_scope)
 
     total_claims = claims_q.count()
-    total_net = claims_q.with_entities(func.coalesce(func.sum(Claim.net_amount), 0)).scalar() or Decimal("0")
-    total_paid = remits_q.with_entities(func.coalesce(func.sum(Remittance.paid_amount), 0)).scalar() or Decimal("0")
-    total_denied = remits_q.with_entities(func.coalesce(func.sum(Remittance.denial_amount), 0)).scalar() or Decimal("0")
+    # Money per the claim-cycle definition: one row per claim (latest submission), de-duplicated RAs,
+    # paid capped at net, denied = net - paid only for claims with an RA.
+    cyc = _cycle_rows(db, AnalyticsFilters(facility_id=facility_scope), "claims")
+    total_net = Decimal(str(round(sum(float(r["net"]) for r in cyc), 2)))
+    total_paid = Decimal(str(round(sum(float(r["paid"]) for r in cyc), 2)))
+    total_denied = Decimal(str(round(sum(float(r["denied"]) for r in cyc), 2)))
 
     pending_raw = raw_q.filter(RawXmlStore.parse_status == "pending").count()
     quarantined_raw = raw_q.filter(RawXmlStore.parse_status == "quarantined").count()
@@ -349,6 +352,18 @@ cc AS (
 """
 
 _CLAIMS_SQL = _CYCLE_CTE + "SELECT * FROM cc"
+
+# Remittance tab: claim-cycle rows plus, per claim, the latest RA month, the discount on the de-duplicated RAs and the
+# turnaround (latest RA date - latest submission date, in days).
+_REMIT_SQL = _CYCLE_CTE + """,
+rx AS (
+  SELECT ra.facility_id, ra.claim_id, max(ra.remittance_date) last_ra, sum(coalesce(r.discount_amount, 0)) discount
+  FROM ra JOIN remittances r ON r.id = ra.id GROUP BY 1, 2)
+SELECT cc.*, rx.discount, to_char(rx.last_ra, 'YYYY-MM') ra_m,
+       (rx.last_ra::date - cl.submission_date::date) tat
+FROM cc JOIN claims cl ON cl.id = cc.id
+LEFT JOIN rx ON rx.facility_id = cc.facility_id AND rx.claim_id = cc.claim_id
+"""
 
 # Service lines of each claim's latest submission. Denied per line = line net minus that line's payments across the
 # de-duplicated RAs, coded with the line's latest denial code; then each claim's lines are scaled so they add up to
@@ -551,42 +566,30 @@ def remittance_report(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    remits_q = _remits_with_claims(db, f)
+    where, params = _cycle_where(f)
+    rows = db.execute(text(_REMIT_SQL.format(where=where)), params).mappings().all()
+    remitted = [r for r in rows if r["remitted"]]
+    total_paid = round(sum(float(r["paid"]) for r in remitted), 2)
+    total_denied = round(sum(float(r["denied"]) for r in remitted), 2)
+    total_discount = round(sum(float(r["discount"] or 0) for r in remitted), 2)
+    remitted_claims = len(remitted)
+    tat = [r["tat"] for r in remitted if r["tat"] is not None]
+    avg_turnaround_days = round(sum(tat) / len(tat), 1) if tat else 0
 
-    total_paid = _money(remits_q.with_entities(func.coalesce(func.sum(Remittance.paid_amount), 0)).scalar())
-    total_denied = _money(remits_q.with_entities(func.coalesce(func.sum(Remittance.denial_amount), 0)).scalar())
-    total_discount = _money(remits_q.with_entities(func.coalesce(func.sum(Remittance.discount_amount), 0)).scalar())
-    remitted_claims = remits_q.count()
-    avg_turnaround = remits_q.with_entities(func.avg(Remittance.remittance_date - Claim.submission_date)).scalar()
-    avg_turnaround_days = round(float(avg_turnaround), 1) if avg_turnaround is not None else 0
-
-    monthly_rows = (
-        remits_q.with_entities(
-            func.to_char(Remittance.remittance_date, "YYYY-MM").label("month"),
-            func.coalesce(func.sum(Remittance.paid_amount), 0).label("paid"),
-            func.coalesce(func.sum(Remittance.denial_amount), 0).label("denied"),
-            func.coalesce(func.sum(Remittance.discount_amount), 0).label("discount"),
-        )
-        .group_by("month")
-        .order_by("month")
-        .all()
-    )
+    months: dict = {}
+    for r in remitted:
+        m = months.setdefault(r["ra_m"] or "Unknown", {"paid": 0.0, "denied": 0.0, "discount": 0.0})
+        m["paid"] += float(r["paid"]); m["denied"] += float(r["denied"]); m["discount"] += float(r["discount"] or 0)
     monthly_trend = [
-        {
-            "month": r.month,
-            "paid_amount": _money(r.paid),
-            "denied_amount": _money(r.denied),
-            "discount_amount": _money(r.discount),
-        }
-        for r in monthly_rows
+        {"month": k, "paid_amount": round(v["paid"], 2), "denied_amount": round(v["denied"], 2),
+         "discount_amount": round(v["discount"], 2)}
+        for k, v in sorted(months.items())
     ]
 
-    turnaround_expr = Remittance.remittance_date - Claim.submission_date
-    aging_rows = remits_q.with_entities(turnaround_expr.label("days"), Remittance.paid_amount).all()
     buckets = {"0-15": 0.0, "16-30": 0.0, "31-45": 0.0, "46-60": 0.0, "60+": 0.0}
-    for days, paid in aging_rows:
-        amt = _money(paid)
-        d = days or 0
+    for r in remitted:
+        amt = float(r["paid"])
+        d = r["tat"] or 0
         if d <= 15:
             buckets["0-15"] += amt
         elif d <= 30:
@@ -599,18 +602,12 @@ def remittance_report(
             buckets["60+"] += amt
     aging_buckets = [{"bucket": k, "amount": round(v, 2)} for k, v in buckets.items()]
 
-    payer_rows = (
-        remits_q.with_entities(
-            Claim.payer_name,
-            func.coalesce(func.sum(Remittance.paid_amount), 0).label("paid"),
-            func.coalesce(func.sum(Remittance.denial_amount), 0).label("denied"),
-        )
-        .group_by(Claim.payer_name)
-        .order_by(func.sum(Remittance.paid_amount).desc())
-        .limit(10)
-        .all()
-    )
-    by_payer = [{"payer": r.payer_name or "Unknown", "paid_amount": _money(r.paid), "denied_amount": _money(r.denied)} for r in payer_rows]
+    payer_g: dict = {}
+    for r in remitted:
+        g = payer_g.setdefault(r["payer_name"] or "Unknown", [0.0, 0.0])
+        g[0] += float(r["paid"]); g[1] += float(r["denied"])
+    by_payer = [{"payer": k, "paid_amount": round(v[0], 2), "denied_amount": round(v[1], 2)}
+                for k, v in sorted(payer_g.items(), key=lambda kv: -kv[1][0])[:10]]
 
     return {
         "kpis": {

@@ -125,9 +125,72 @@ LEFT JOIN claims c ON c.facility_id = r.facility_id AND c.claim_id = r.claim_id 
 WHERE r.remittance_date >= :since
   AND r.facility_id NOT IN (SELECT id FROM facilities WHERE facility_code = 'GHAF-001')
   AND d.denial_code IS NOT NULL AND d.denial_code <> ''
+  AND r.id IN (SELECT DISTINCT ON (x.facility_id, x.claim_id, x.ra_file_id, x.net_amount, x.paid_amount, x.denial_amount) x.id
+               FROM remittances x WHERE x.remittance_date >= :since
+               ORDER BY x.facility_id, x.claim_id, x.ra_file_id, x.net_amount, x.paid_amount, x.denial_amount, x.id DESC)
   {fac} {payer} {stage}
 GROUP BY 1, 2, 4
 """
+
+# Stage "all" = FINAL denied (same definition as the Dashboard / Claim Cycle): latest submission per claim; RA rows
+# de-duplicated on (facility, claim, RA file, net, paid, denied); claim denied = net - min(max(sum paid, 0), net) for
+# claims with an RA. Each claim's denied is spread over its service lines (line net minus that line's payments across
+# the de-duplicated RAs, coded with the line's latest denial code) and scaled to add up to the claim's denied.
+# Month = the claim's latest RA month. Stages "new"/"redenied" stay per-RA FIRST-PASS denials (labelled as such).
+_FINAL_SQL = """
+WITH c AS (
+  SELECT DISTINCT ON (c.facility_id, c.claim_id) c.id, c.facility_id, c.claim_id, coalesce(c.net_amount, 0) net,
+         upper(coalesce(nullif(c.receiver_id, ''), nullif(c.payer_id, ''))) payer,
+         coalesce(nullif(c.receiver_name, ''), c.payer_name) payer_name
+  FROM claims c
+  WHERE c.facility_id NOT IN (SELECT id FROM facilities WHERE facility_code = 'GHAF-001') {cfac} {cpayer}
+  ORDER BY c.facility_id, c.claim_id, c.submission_date DESC NULLS LAST, c.id DESC),
+ra AS (
+  SELECT DISTINCT ON (r.facility_id, r.claim_id, r.ra_file_id, r.net_amount, r.paid_amount, r.denial_amount)
+         r.id, r.facility_id, r.claim_id, coalesce(r.paid_amount, 0) paid, r.remittance_date
+  FROM remittances r JOIN c USING (facility_id, claim_id)
+  ORDER BY r.facility_id, r.claim_id, r.ra_file_id, r.net_amount, r.paid_amount, r.denial_amount, r.id DESC),
+cd AS (
+  SELECT c.id cid, c.facility_id, c.claim_id, c.payer, c.payer_name, max(ra.remittance_date) last_ra,
+         c.net - least(greatest(sum(ra.paid), 0), c.net) denied
+  FROM c JOIN ra USING (facility_id, claim_id) GROUP BY 1, 2, 3, 4, 5, c.net
+  HAVING c.net - least(greatest(sum(ra.paid), 0), c.net) > 0.01),
+cdw AS (SELECT * FROM cd WHERE last_ra >= :since {cut}),
+ln AS (
+  SELECT cdw.cid, ad.activity_id, max(coalesce(ad.net, ad.gross, 0)) net, sum(coalesce(ad.paid_amount, 0)) paid,
+         (array_agg(nullif(ad.denial_code, '') ORDER BY ra.remittance_date DESC, ra.id DESC)
+            FILTER (WHERE nullif(ad.denial_code, '') IS NOT NULL))[1] code,
+         (array_agg(ad.denial_description ORDER BY ra.remittance_date DESC, ra.id DESC)
+            FILTER (WHERE nullif(ad.denial_code, '') IS NOT NULL))[1] descr
+  FROM cdw JOIN ra USING (facility_id, claim_id)
+  JOIN remittance_activity_details ad ON ad.remittance_id_fk = ra.id
+  GROUP BY 1, 2),
+lu AS (SELECT cid, code, descr, greatest(net - paid, 0) un FROM ln WHERE code IS NOT NULL),
+s AS (SELECT cid, sum(un) tot, count(*) n FROM lu GROUP BY 1)
+SELECT to_char(cdw.last_ra, 'YYYY-MM') AS month, cdw.payer, max(cdw.payer_name) payer_name, lu.code,
+       max(lu.descr) descr, count(*) lines, count(DISTINCT cdw.cid) claims,
+       sum(CASE WHEN s.tot > 0.01 THEN lu.un * cdw.denied / s.tot ELSE cdw.denied / s.n END) amount
+FROM cdw JOIN lu USING (cid) JOIN s USING (cid)
+GROUP BY 1, 2, 4
+"""
+
+
+def _agg_sql(stage: str, fid, payer, cut: bool = False) -> str:
+    if stage == "all":
+        return _FINAL_SQL.format(cfac="AND c.facility_id = :fid" if fid else "",
+                                 cpayer="AND upper(coalesce(nullif(c.receiver_id, ''), nullif(c.payer_id, ''))) = upper(:payer)" if payer else "",
+                                 cut="AND last_ra <= :cut" if cut else "")
+    sql = _AGG_SQL
+    if cut:
+        sql = sql.replace("WHERE r.remittance_date >= :since",
+                          "WHERE r.remittance_date >= :since AND r.remittance_date <= :cut")
+    return sql.format(fac="AND r.facility_id = :fid" if fid else "", stage=_stage_sql(stage),
+                      payer="AND upper(coalesce(nullif(c.receiver_id, ''), nullif(c.payer_id, ''), r.payer_id)) = upper(:payer)" if payer else "")
+
+
+AMOUNT_BASIS = {"all": "final denied (net - paid, latest submission, de-duplicated RAs)",
+                "new": "first RA (first-pass denial), per line",
+                "redenied": "re-denial of a resubmission (per RA), per line"}
 
 
 def _aggregate(db: Session, fid: Optional[int], payer: Optional[str], months: int, stage: str = "new") -> list[dict]:
@@ -135,8 +198,7 @@ def _aggregate(db: Session, fid: Optional[int], payer: Optional[str], months: in
     hit = _CACHE.get(key)
     if hit and time.time() - hit[0] < TTL:
         return hit[1]
-    sql = _AGG_SQL.format(fac="AND r.facility_id = :fid" if fid else "", stage=_stage_sql(stage),
-                          payer="AND upper(coalesce(nullif(c.receiver_id, ''), nullif(c.payer_id, ''), r.payer_id)) = upper(:payer)" if payer else "")
+    sql = _agg_sql(stage, fid, payer)
     # one extra month so the first displayed month has a "previous" to compare with
     rows = [dict(r) for r in db.execute(text(sql), {"since": _month_start(months), "fid": fid,
                                                      "payer": payer}).mappings()]
@@ -176,10 +238,7 @@ def monthly(
     if cur_m in shown and today.day > 1:
         pm_start = _month_start(1)
         pm_cut = pm_start.replace(day=min(today.day - 1, 28 if pm_start.month == 2 else 30))
-        sql = _AGG_SQL.replace("WHERE r.remittance_date >= :since",
-                               "WHERE r.remittance_date >= :since AND r.remittance_date <= :cut").format(
-            fac="AND r.facility_id = :fid" if fid else "", stage=_stage_sql(stage),
-            payer="AND upper(coalesce(nullif(c.receiver_id, ''), nullif(c.payer_id, ''), r.payer_id)) = upper(:payer)" if payer else "")
+        sql = _agg_sql(stage, fid, payer, cut=True)
         for r in db.execute(text(sql), {"since": pm_start, "cut": pm_cut, "fid": fid, "payer": payer}).mappings():
             mtd_prev[(r["payer"], r["code"])] = (int(r["lines"]), float(r["amount"] or 0))
     full = [m for m in all_months if m < cur_m][-3:]
@@ -225,7 +284,7 @@ def monthly(
             payers[r["payer"]]["lines"] += r["lines"]; payers[r["payer"]]["amount"] += r["amount"]
             payers[r["payer"]]["name"] = payers[r["payer"]]["name"] or payer_name(r["payer"], r["payer_name"])
     return {
-        "months": shown, "partial_month": date.today().strftime("%Y-%m"),
+        "months": shown, "partial_month": date.today().strftime("%Y-%m"), "amount_basis": AMOUNT_BASIS.get(stage),
         "rows": out,
         "totals": [{"month": m, "lines": totals[m]["lines"], "amount": round(totals[m]["amount"], 2)}
                    for m in shown],
@@ -363,7 +422,7 @@ def export_xlsx(
     info = wb.create_sheet("About")
     for line in ["Months are RA (remittance) months: the date the payer sent the remittance advice, "
                  "not the treatment (encounter) month.",
-                 "Denied AED = net minus paid per activity, at first RA. Descriptions: DHA eClaimLink denial code list.",
+                 "Denied AED: stage new = first RA (first-pass) net minus paid per activity; stage all = final denied (net - paid, latest submission, de-duplicated RAs). Descriptions: DHA eClaimLink denial code list.",
                  f"Facility: {facility_id or 'all'} · Payer: {payer or 'all'} · Window: {months} months · "
                  f"Generated {time.strftime('%Y-%m-%d %H:%M')}"]:
         info.append([line])
@@ -388,7 +447,7 @@ SELECT r.id rid, r.facility_id, f.facility_name, r.claim_id, r.remittance_date, 
        c.clinician_name clin_name,
        (SELECT dx.diagnosis_code || coalesce(' ' || dx.diagnosis_description, '')
           FROM claim_diagnoses dx WHERE dx.claim_id_fk = c.id
-          ORDER BY (dx.diagnosis_type ILIKE 'principal') DESC, dx.sequence_no NULLS LAST LIMIT 1) dx
+          ORDER BY (dx.diagnosis_type = 'Primary') DESC, dx.sequence_no NULLS LAST LIMIT 1) dx
 FROM remittances r
 JOIN remittance_activity_details d ON d.remittance_id_fk = r.id
 JOIN facilities f ON f.id = r.facility_id AND f.facility_code <> 'GHAF-001'
@@ -404,7 +463,7 @@ LIMIT 50000
 _RATE_SQL = """
 SELECT d.activity_code act,
        split_part((SELECT dx.diagnosis_code FROM claim_diagnoses dx WHERE dx.claim_id_fk = c.id
-                   ORDER BY (dx.diagnosis_type ILIKE 'principal') DESC, dx.sequence_no NULLS LAST LIMIT 1), ' ', 1) dx,
+                   ORDER BY (dx.diagnosis_type = 'Primary') DESC, dx.sequence_no NULLS LAST LIMIT 1), ' ', 1) dx,
        count(*) n
 FROM remittances r
 JOIN remittance_activity_details d ON d.remittance_id_fk = r.id

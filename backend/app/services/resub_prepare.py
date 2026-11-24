@@ -37,6 +37,7 @@ from sqlalchemy.orm import Session
 from ..models import Facility
 from .denial_codes import denial_description
 from .presub_queries import CONSULT_CHECKED, REPEAT_TESTS
+from .resub_worklist import RECON_AGREED, _valid_until
 
 log = logging.getLogger(__name__)
 
@@ -57,7 +58,7 @@ COMMENT_MAX = 2000         # DHA limit unknown — keep comments short
 ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024
 CONSULT_CPT = re.compile(r"^992(0[1-5]|1[1-5])$")
 DT_RE = re.compile(r"^\d{2}/\d{2}/\d{4} \d{2}:\d{2}$")
-DEC_RE = re.compile(r"^-?\d+(\.\d{1,2})?$")
+DEC_RE = re.compile(r"^-?\d+(\.\d{1,3})?$")   # accepted DHPO files carry up to 3 dp (e.g. 0.000)
 
 # Claim child order per the DHPO schema
 CLAIM_ORDER = ["ID", "IDPayer", "MemberID", "PayerID", "ProviderID", "EmiratesIDNumber",
@@ -179,7 +180,8 @@ ORDER BY remittance_date DESC NULLS LAST, id DESC LIMIT 1""")
 _RAD_SQL = text("SELECT * FROM remittance_activity_details WHERE remittance_id_fk = :id ORDER BY id")
 _HIST_SQL = text("""
 SELECT DISTINCT ON (c.claim_id) c.id, c.claim_id, c.encounter_start, c.clinician_id,
-       (SELECT x.diagnosis_code FROM claim_diagnoses x WHERE x.claim_id_fk = c.id ORDER BY x.sequence_no LIMIT 1) AS pdx
+       (SELECT x.diagnosis_code FROM claim_diagnoses x WHERE x.claim_id_fk = c.id
+        ORDER BY (lower(x.diagnosis_type) IN ('primary', 'principal')) DESC, x.sequence_no, x.id LIMIT 1) AS pdx
 FROM claims c
 WHERE c.facility_id = :f AND c.member_id = :m AND c.claim_id <> :c
   AND c.encounter_start >= :d0 AND c.encounter_start < :d1
@@ -223,6 +225,16 @@ def _original_claim_xml(db: Session, raw_xml_id: Optional[int], claim_id: str):
     return None, header
 
 
+def _is_principal(t) -> bool:
+    """DB stores the principal diagnosis as 'Primary'; eClaimLink XML uses 'Principal'. Accept either."""
+    return str(t or "").strip().lower() in ("principal", "primary")
+
+
+def _dx_type(t):
+    """Map the DB diagnosis_type to the eClaimLink Diagnosis/Type value (Primary -> Principal)."""
+    return "Principal" if _is_principal(t) else t
+
+
 def _claim_from_tables(c, acts, dxs) -> etree._Element:
     cl = etree.Element("Claim")
 
@@ -250,7 +262,7 @@ def _claim_from_tables(c, acts, dxs) -> etree._Element:
     sub(enc, "TransferSource", c.transfer_source)
     for d in dxs:
         dx = etree.SubElement(cl, "Diagnosis")
-        sub(dx, "Type", d.diagnosis_type)
+        sub(dx, "Type", _dx_type(d.diagnosis_type))
         sub(dx, "Code", d.diagnosis_code)
     enc_start = c.encounter_start.astimezone(DUBAI) if c.encounter_start else None
     for a in acts:
@@ -319,6 +331,7 @@ def _build_riayati(draft, edits, disposition, now) -> Dict[str, Any]:
     comment = (edits.get("comment") if edits.get("comment") is not None else draft["suggestion"]["comment"]).strip()
     cl["Type"] = "Resubmission"
     cl["Resubmission"] = {"Comment": comment, "Type": rtype}
+    errors.extend(sn_errors(draft, rtype))
     if edits.get("attachment_b64"):
         cl["Resubmission"]["Attachment"] = edits["attachment_b64"].split(",", 1)[-1]
     hdr = {k: v for k, v in draft["_header"].items() if not k.startswith("_")}
@@ -328,7 +341,7 @@ def _build_riayati(draft, edits, disposition, now) -> Dict[str, Any]:
         errors.append(f"Resubmission/Type must be one of {RESUB_TYPES}")
     if not comment:
         errors.append("Resubmission/Comment required")
-    if not cl.get("Diagnosis") or sum(1 for d in cl["Diagnosis"] if str(d.get("Type", "")).lower() == "principal") != 1:
+    if not cl.get("Diagnosis") or sum(1 for d in cl["Diagnosis"] if _is_principal(d.get("Type"))) != 1:
         errors.append("exactly one Principal diagnosis required")
     anet = sum((_d(a.get("Net")) for a in cl.get("Activity") or []), Decimal("0.00"))
     if abs(anet - n) > Decimal("0.05"):
@@ -366,6 +379,74 @@ def _member_history(db: Session, facility_id: int, c, pdx: str) -> List[Dict[str
 # ---------------------------------------------------------------------------
 # Draft
 # ---------------------------------------------------------------------------
+SN_MAX_RESUBMISSIONS = 2      # SN 03/2019 3.8.2 / 3.8.5 — inclusive of the reconciliation
+SN_RESUBMIT_DAYS = 21         # 3.8.1 — from the RA with denial reason (not for reconciliation, 3.10.4)
+SN_VALIDITY_MONTHS = 24       # 3.10.5 — from the first submission
+
+_SN_SQL = text("""
+SELECT count(*) FILTER (WHERE resubmission_key <> '')            AS resubs,
+       min(submission_date) FILTER (WHERE resubmission_key = '')  AS first_sub,
+       min(submission_date)                                       AS any_sub
+FROM claims WHERE facility_id = :f AND claim_id = :c
+""")
+
+
+_RECON_SQL = text("""
+SELECT EXISTS (SELECT 1 FROM resub_tracking WHERE facility_id = :f AND claim_id = :c AND status = :s)""")
+
+
+def sn_status(db: Session, facility_id: int, claim_id: str, ra_date=None) -> Dict[str, Any]:
+    """eClaimLink Standards Notice SN 03/2019 limits for this claim: resubmissions used, 21-day deadline, 24-month validity."""
+    r = db.execute(_SN_SQL, {"f": facility_id, "c": claim_id}).first()
+    used = int(r.resubs or 0) if r else 0
+    first = (r.first_sub or r.any_sub) if r else None
+    first_d = first.date() if hasattr(first, "date") else first
+    ra_d = ra_date.date() if hasattr(ra_date, "date") else ra_date
+    today = datetime.now(DUBAI).date()
+    due = ra_d + timedelta(days=SN_RESUBMIT_DAYS) if ra_d else None
+    # first ORIGINAL submission (resubmission_key = ''); fallback: earliest submission of any kind
+    valid_until = _valid_until(first_d, None) if first_d else None
+    agreed = bool(db.execute(_RECON_SQL, {"f": facility_id, "c": claim_id, "s": RECON_AGREED}).scalar())
+    notes = []
+    if used >= SN_MAX_RESUBMISSIONS:
+        notes.append(f"SN 03/2019 3.8.2: this claim has already been resubmitted {used} times — the limit is "
+                     f"{SN_MAX_RESUBMISSIONS} (including reconciliation). No further resubmission is permitted.")
+    elif used == SN_MAX_RESUBMISSIONS - 1:
+        notes.append("SN 03/2019 3.8.2 / 3.10: one resubmission already made — the next one is the last permitted and "
+                     "should be the agreed Reconciliation.")
+    if due and today > due:
+        notes.append(f"SN 03/2019 3.8.1: the 21-day resubmission window closed on {due.isoformat()} (RA {ra_d.isoformat()}). "
+                     "Only an agreed Reconciliation is outside this limit (3.10.4); late resubmission carries a 0.03%/day fee (3.8.4).")
+    if valid_until and today > valid_until:
+        notes.append(f"SN 03/2019 3.10.5: claim validity (24 months from {first_d.isoformat()}) ended {valid_until.isoformat()}.")
+    return {"resubmissions_used": used, "max_resubmissions": SN_MAX_RESUBMISSIONS,
+            "limit_reached": used >= SN_MAX_RESUBMISSIONS,
+            "first_submission": first_d.isoformat() if first_d else None,
+            "resubmit_by": due.isoformat() if due else None, "window_closed": bool(due and today > due),
+            "valid_until": valid_until.isoformat() if valid_until else None,
+            "expired": bool(valid_until and today > valid_until), "recon_agreed": agreed, "notes": notes}
+
+
+def sn_errors(draft: Dict[str, Any], rtype: str) -> List[str]:
+    """Hard SN 03/2019 stops applied when a resubmission file is generated."""
+    sn = draft.get("sn") or {}
+    errs = []
+    if sn.get("limit_reached"):
+        errs.append(f"SN 03/2019 3.8.2: resubmission limit reached ({sn['resubmissions_used']} of {sn['max_resubmissions']})")
+    if sn.get("expired"):
+        errs.append(f"SN 03/2019 3.10.5: claim validity ended {sn['valid_until']}")
+    agreed = bool(sn.get("recon_agreed"))
+    if rtype == "reconciliation" and not agreed:
+        errs.append("Reconciliation needs the facility's confirmed agreement with the payer (SN 3.10.1) — "
+                    "mark it Reconciliation agreed in the Resubmission worklist")
+    if sn.get("resubmissions_used") == SN_MAX_RESUBMISSIONS - 1 and rtype != "reconciliation":
+        errs.append("SN 03/2019 3.8.2 / 3.10: one resubmission already made — the second (last) resubmission "
+                    "must be type 'reconciliation'")
+    if sn.get("window_closed") and not (rtype == "reconciliation" and agreed):
+        errs.append(f"SN 03/2019 3.8.1: 21-day window closed {sn['resubmit_by']} — only an agreed Reconciliation may be sent")
+    return errs
+
+
 def build_draft(db: Session, facility_id: int, claim_id: str) -> Dict[str, Any]:
     c = db.execute(_CLAIM_SQL, {"f": facility_id, "c": claim_id}).first()
     if c is None:
@@ -395,6 +476,9 @@ def build_draft(db: Session, facility_id: int, claim_id: str) -> Dict[str, Any]:
     if ra and ra.remittance_date and c.submission_date and c.submission_date > ra.remittance_date:
         warnings.append("The latest submission is newer than the latest RA — a resubmission may already be pending.")
 
+    sn = sn_status(db, facility_id, claim_id, ra.remittance_date if ra else None)
+    warnings.extend(sn["notes"])
+
     # IDPayer from the RA when the claim lacks it
     if not _txt(claim_el, "IDPayer") and ra and ra.claim_id_payer:
         _set_child(claim_el, "IDPayer", ra.claim_id_payer, CLAIM_ORDER)
@@ -403,7 +487,7 @@ def build_draft(db: Session, facility_id: int, claim_id: str) -> Dict[str, Any]:
     dx_desc = {(d.diagnosis_code or "").upper(): d.diagnosis_description for d in dxs}
     for d in dx_list:
         d["description"] = dx_desc.get(d["code"].upper()) or ""
-    pdx = next((d for d in dx_list if d["type"].lower() == "principal"), dx_list[0] if dx_list else {})
+    pdx = next((d for d in dx_list if _is_principal(d["type"])), dx_list[0] if dx_list else {})
     db_act = {str(a.activity_id): a for a in acts}
     ra_act = {str(r.activity_id): r for r in rads}
 
@@ -478,6 +562,8 @@ def build_draft(db: Session, facility_id: int, claim_id: str) -> Dict[str, Any]:
 
     types = {d["suggestion"]["resubmission_type"] for d in denied}
     overall = "correction" if "correction" in types else "internal complaint"
+    if sn.get("resubmissions_used") == SN_MAX_RESUBMISSIONS - 1:
+        overall = "reconciliation"   # SN 03/2019 3.8.2 / 3.10: the 2nd resubmission is the agreed reconciliation
     comment = " | ".join(f"Act {d['activity_id']} {d['code']} ({d['facts']['denial_code']}): {d['suggestion']['justification']}"
                          for d in denied)
     if not denied:
@@ -504,6 +590,7 @@ def build_draft(db: Session, facility_id: int, claim_id: str) -> Dict[str, Any]:
         "history": history,
         "suggestion": {"resubmission_type": overall, "comment": comment[:COMMENT_MAX]},
         "warnings": warnings,
+        "sn": sn,
         "_claim_xml": etree.tostring(claim_el, encoding="unicode"),
         "_riayati_claim": rj,
         "format": "riayati_json" if rj is not None else "dhpo_xml",
@@ -643,6 +730,7 @@ def build_xml(draft: Dict[str, Any], edits: Optional[Dict[str, Any]] = None, dis
     comment = (edits.get("comment") if edits.get("comment") is not None else draft["suggestion"]["comment"]).strip()
     rs = etree.Element("Resubmission")
     etree.SubElement(rs, "Type").text = rtype
+    errors.extend(sn_errors(draft, rtype))
     etree.SubElement(rs, "Comment").text = comment
     att = (edits.get("attachment_b64") or "").strip()
     if att:
@@ -717,7 +805,7 @@ def validate_xml(xml: str) -> List[str]:
                 errs.append(p + f"{t} missing")
         for t in ("Gross", "PatientShare", "Net"):
             if _txt(cl, t) and not DEC_RE.match(_txt(cl, t)):
-                errs.append(p + f"{t} must be a decimal with ≤2 dp")
+                errs.append(p + f"{t} must be a decimal with ≤3 dp")
         g, ps, n = _d(_txt(cl, "Gross")), _d(_txt(cl, "PatientShare")), _d(_txt(cl, "Net"))
         if abs(g - ps - n) > Decimal("0.01"):
             errs.append(p + f"Net {n} ≠ Gross {g} − PatientShare {ps}")
@@ -734,7 +822,7 @@ def validate_xml(xml: str) -> List[str]:
         dxs = cl.findall("Diagnosis")
         if not dxs:
             errs.append(p + "at least one Diagnosis required")
-        if sum(1 for d in dxs if _txt(d, "Type").lower() == "principal") != 1:
+        if sum(1 for d in dxs if _is_principal(_txt(d, "Type"))) != 1:
             errs.append(p + "exactly one Principal diagnosis required")
         for d in dxs:
             if not _txt(d, "Type") or not _txt(d, "Code"):

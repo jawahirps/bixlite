@@ -56,6 +56,7 @@ export const NAV_SECTIONS = [
       { to: "/calibration", label: "Denial intelligence", icon: "denial" },
       { to: "/denial-trends", label: "Denial trends", icon: "analytics" },
       { to: "/resub-worklist", label: "Resubmission worklist", icon: "resub" },
+      { to: "/scrub-rules", label: "Scrub rules & references", icon: "docreview" },
     ],
   },
   {

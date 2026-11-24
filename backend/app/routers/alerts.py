@@ -855,10 +855,13 @@ def _compute(db: Session, today: date) -> dict:  # today can be set in the past 
                      + ([{"v": f"{open_rate:.1f}%", "l": f"{mlab(eo)[:3]} so far ({open_pend}% in progress)"}] if open_rate is not None else []),
                      "act": act})
 
-    # ---- 2. Payment rate + overdue (SN 3.9.1: RA within 45 days) ------------------------
+    # ---- 2. Payment rate + overdue (SN 3.9.1: RA within 45 days; 3.9.4: emergency within 7) --
+    # Emergency = eClaimLink encounter type with Emergency Room (codes 2/4/6 or text "... Emergency Room").
+    # Only ~2 claims in the DB carry one today, so the monthly rate is effectively the 45-day rule.
     rows = db.execute(text("""
         WITH c AS (
-          SELECT facility_id, claim_id, min(submission_date) sub, max(net_amount) net
+          SELECT facility_id, claim_id, min(submission_date) sub, max(net_amount) net,
+                 bool_or(coalesce((encounter_type IN ('2', '4', '6') OR (encounter_type ILIKE '%emergency%' AND encounter_type NOT ILIKE '%no emergency%')), false)) em
           FROM claims
           WHERE submission_date BETWEEN :s AND :e AND resubmission_type IS NULL
             AND facility_id = ANY(:ids)
@@ -868,7 +871,8 @@ def _compute(db: Session, today: date) -> dict:  # today can be set in the past 
           FROM remittances WHERE remittance_date >= :s AND facility_id = ANY(:ids)
           ORDER BY facility_id, claim_id, remittance_date, id)
         SELECT c.facility_id, to_char(c.sub, 'YYYY-MM') m, count(*) n,
-               count(*) FILTER (WHERE r.remittance_date - c.sub <= 45) ra45,
+               count(*) FILTER (WHERE r.remittance_date - c.sub <= CASE WHEN c.em THEN 7 ELSE 45 END) ra45,
+               count(*) FILTER (WHERE c.em AND (r.claim_id IS NULL OR r.remittance_date - c.sub > 7)) em_breach,
                count(*) FILTER (WHERE r.claim_id IS NULL) no_ra,
                coalesce(sum(c.net) FILTER (WHERE r.claim_id IS NULL), 0) no_ra_amt,
                sum(r.paid_amount) paid, sum(r.net_amount) FILTER (WHERE r.claim_id IS NOT NULL) rnet
@@ -893,11 +897,12 @@ def _compute(db: Session, today: date) -> dict:  # today can be set in the past 
         cur_paid = float(cur.paid or 0) / float(cur.rnet) * 100 if cur.rnet else None
         ra_thr = statistics.mean(ra) - max(8.0, 2 * _sd(ra))
         base[fid].update(ra45_baseline=round(statistics.mean(ra), 1), ra45_threshold=round(ra_thr, 1),
-                         ra45_latest=round(cur_ra, 1), ra45_latest_month=cur.m)
+                         ra45_latest=round(cur_ra, 1), ra45_latest_month=cur.m,
+                         emergency_breached_7d=int(sum(m.em_breach for m in ms[-3:])))
         if cur_ra < ra_thr:
             add(fid, "payment_rate", "medium",
                 f"Only {cur_ra:.0f}% of {cur.m} claims remitted within 45 days",
-                f"SN 03/2019 3.9.1 requires RA + payment within 45 days. Usual {statistics.mean(ra):.0f}%; "
+                f"SN 03/2019 3.9.1 requires RA + payment within 45 days (3.9.4: 7 days for emergency claims). Usual {statistics.mean(ra):.0f}%; "
                 f"alert below {ra_thr:.0f}%. Payer may owe a 0.03%/day delay fee.",
                 "/turnaround", round(cur_ra, 1), round(ra_thr, 1))
         if paid and cur_paid is not None:

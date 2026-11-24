@@ -20,7 +20,7 @@ from decimal import Decimal
 from typing import Optional, List
 
 import openpyxl
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy import and_, cast, Date, func, text as _text
 from sqlalchemy.orm import Session, aliased
@@ -37,9 +37,13 @@ router = APIRouter(prefix="/portal", tags=["portal"])
 # Token validation dependency
 # ---------------------------------------------------------------------------
 
-def _get_portal_token(token: str = Query(..., description="Portal access token"),
+def _get_portal_token(token: Optional[str] = Query(None, description="Portal access token (legacy links)"),
+                      x_portal_token: Optional[str] = Header(None, alias="X-Portal-Token"),
                       db: Session = Depends(get_db)) -> PortalToken:
-    """Validate the token and return the PortalToken record."""
+    """Validate the token (X-Portal-Token header preferred, ?token= still accepted) and return the PortalToken."""
+    token = x_portal_token or token
+    if not token:
+        raise HTTPException(status_code=401, detail="Portal token required")
     pt = db.query(PortalToken).filter(
         PortalToken.token == token,
         PortalToken.is_active == True,
@@ -177,6 +181,7 @@ def remittance_activity(
     payer_id:     Optional[str] = Query(None),
     claim_status: Optional[str] = Query(None, description="Paid/Partially Paid/Rejected"),
     search:       Optional[str] = Query(None, description="Claim ID / Member ID / RA File"),
+    date_basis:   str           = Query("ra", description="ra (RA file date) or encounter, for the KPIs"),
     page:         int           = Query(1, ge=1),
     page_size:    int           = Query(50, ge=10, le=200),
     pt: PortalToken             = Depends(_get_portal_token),
@@ -192,33 +197,39 @@ def remittance_activity(
 
     rows = q.offset((page - 1) * page_size).limit(page_size).all()
 
-    # Summary KPIs (full result set, not just current page)
-    kpi_q = (
-        db.query(
-            func.count(Remittance.id.distinct()).label("claim_count"),
-            func.coalesce(func.sum(Remittance.paid_amount), 0).label("total_paid"),
-            func.coalesce(func.sum(Remittance.denial_amount), 0).label("total_denied"),
-            func.coalesce(func.sum(Remittance.patient_share_total), 0).label("total_patient_share"),
-            func.coalesce(func.sum(Remittance.discount_amount), 0).label("total_discount"),
-        )
-        # LEFT OUTER JOIN — match _remittance_query so KPI totals include all remittances
-        .outerjoin(Claim, and_(
-            Claim.facility_id == Remittance.facility_id,
-            Claim.claim_id    == Remittance.claim_id,
-        ))
-        .outerjoin(RawXmlStore, RawXmlStore.id == Remittance.raw_xml_id)
-        .filter(Remittance.facility_id.in_(fac_ids))
-    )
-    if df:
-        kpi_q = kpi_q.filter(RawXmlStore.submission_date >= df)   # filter by RA file date (TransactionDate)
-    if dt:
-        kpi_q = kpi_q.filter(RawXmlStore.submission_date <= dt)   # filter by RA file date (TransactionDate)
-    if payer_id:
-        kpi_q = kpi_q.filter(Remittance.payer_id == payer_id)
-    if claim_status:
-        kpi_q = kpi_q.filter(Remittance.claim_status_ra == claim_status)
-
-    kpi = kpi_q.one()
+    # Summary KPIs on the claim-cycle definition used by the portal dashboard: one row per claim (latest
+    # submission), RA rows de-duplicated on (facility, claim, RA file, net, paid, denied), paid = sum of payments
+    # capped at net, denied = net - paid. The claim set is the claims with an RA in the filter window (RA file date,
+    # like the table) or, with date_basis=encounter, the claims whose encounter falls in the window (as the dashboard).
+    kpi_params = {"fids": fac_ids, "d0": df, "d1": dt, "payer": payer_id, "st": claim_status}
+    enc = date_basis == "encounter"
+    kpi = db.execute(_text(f"""
+        WITH c AS (
+          SELECT DISTINCT ON (facility_id, claim_id) facility_id, claim_id, coalesce(net_amount, 0) net
+          FROM claims WHERE facility_id = ANY(:fids)
+            AND (CAST(:payer AS text) IS NULL OR payer_id = :payer)
+            {"AND (CAST(:d0 AS date) IS NULL OR encounter_start >= :d0) AND (CAST(:d1 AS date) IS NULL OR encounter_start < CAST(:d1 AS date) + 1)" if enc else ""}
+          ORDER BY facility_id, claim_id, submission_date DESC NULLS LAST, id DESC),
+        ra AS (
+          SELECT DISTINCT ON (r.facility_id, r.claim_id, r.ra_file_id, r.net_amount, r.paid_amount, r.denial_amount)
+                 r.facility_id, r.claim_id, coalesce(r.paid_amount, 0) paid,
+                 coalesce(r.patient_share_total, 0) ps, coalesce(r.discount_amount, 0) disc,
+                 x.submission_date ra_date, r.claim_status_ra st
+          FROM remittances r JOIN c USING (facility_id, claim_id)
+          LEFT JOIN raw_xml_store x ON x.id = r.raw_xml_id
+          ORDER BY r.facility_id, r.claim_id, r.ra_file_id, r.net_amount, r.paid_amount, r.denial_amount, r.id DESC),
+        p AS (
+          SELECT facility_id, claim_id, sum(paid) paid, sum(ps) ps, sum(disc) disc,
+                 bool_or({"TRUE" if enc else "(CAST(:d0 AS date) IS NULL OR ra_date::date >= :d0) AND (CAST(:d1 AS date) IS NULL OR ra_date::date <= :d1)"}
+                         AND (CAST(:st AS text) IS NULL OR st = :st)) hit
+          FROM ra GROUP BY 1, 2)
+        SELECT count(*) claim_count,
+               coalesce(sum(least(greatest(p.paid, 0), c.net)), 0) total_paid,
+               coalesce(sum(c.net - least(greatest(p.paid, 0), c.net)), 0) total_denied,
+               coalesce(sum(p.ps), 0) total_patient_share, coalesce(sum(p.disc), 0) total_discount
+        FROM c JOIN p USING (facility_id, claim_id) WHERE p.hit
+    """), kpi_params).mappings().one()
+    kpi = type("K", (), dict(kpi))
 
     transactions = []
     for (rad, rem, claim, ra_xml) in rows:

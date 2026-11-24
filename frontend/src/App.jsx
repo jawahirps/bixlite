@@ -15,6 +15,7 @@ const Jobs = lazy(() => import("./pages/Jobs"));
 const DocReview = lazy(() => import("./pages/DocReview"));
 const Scrubber = lazy(() => import("./pages/Scrubber"));
 const Calibration = lazy(() => import("./pages/Calibration"));
+const ScrubRules = lazy(() => import("./pages/ScrubRules"));
 const ResubWorklist = lazy(() => import("./pages/ResubWorklist"));
 const ReportPacks = lazy(() => import("./pages/ReportPacks"));
 const Alerts = lazy(() => import("./pages/Alerts"));
@@ -56,6 +57,7 @@ export default function App() {
           <Route path="/scrubber" element={<Scrubber />} />
           <Route path="/doc-review" element={<DocReview />} />
           <Route path="/calibration" element={<Calibration />} />
+          <Route path="/scrub-rules" element={<ScrubRules />} />
           <Route path="/denial-trends" element={<DenialTrends />} />
           <Route path="/alerts" element={<Alerts />} />
           <Route path="/turnaround" element={<Turnaround />} />

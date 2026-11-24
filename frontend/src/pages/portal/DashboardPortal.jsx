@@ -8,6 +8,12 @@ import { useEffect, useState } from "react";
 import axios from "axios";
 
 const api = axios.create({ baseURL: "/api/portal" });
+// Access key goes in a header, not the API URL; the page link keeps ?token=.
+api.interceptors.request.use(cfg => {
+  const t = new URLSearchParams(window.location.search).get("token");
+  if (t) cfg.headers = { ...(cfg.headers || {}), "X-Portal-Token": t };
+  return cfg;
+});
 const token = () => new URLSearchParams(window.location.search).get("token") || "";
 const fmt = (v) => Number(v || 0).toLocaleString("en-GB", { maximumFractionDigits: 0 });
 const compact = (v) => (v >= 1e6 ? `${(v / 1e6).toFixed(2)}M` : v >= 1e3 ? `${(v / 1e3).toFixed(0)}K` : fmt(v));
@@ -179,7 +185,7 @@ export default function DashboardPortal() {
   useEffect(() => {
     if (!token()) { setErr("This link is missing its access key."); setLoading(false); return; }
     setLoading(true);
-    api.get("/dashboard", { params: { token: token(), months, ...(fid ? { facility_id: fid } : {}) }, timeout: 120000 })
+    api.get("/dashboard", { params: { months, ...(fid ? { facility_id: fid } : {}) }, timeout: 120000 })
       .then((r) => { setD(r.data); setErr(null); })
       .catch((e) => setErr(e.response?.status === 401 ? "This link has expired or been switched off. Please contact Ghaf." : "Could not load the dashboard."))
       .finally(() => setLoading(false));

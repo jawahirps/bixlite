@@ -28,7 +28,7 @@ from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
-from sqlalchemy import and_, func, cast, Date, case
+from sqlalchemy import and_, func, cast, Date, case, text
 from sqlalchemy.orm import Session, aliased
 
 import openpyxl
@@ -1052,10 +1052,36 @@ def export_claim_activity(
 # 3. DENIAL ANALYSIS
 # ---------------------------------------------------------------------------
 DENIAL_COLS = [
-    "Facility Name", "Payer ID", "Payer Name",
+    "Facility Name", "Receiver ID", "Payer ID", "Payer Name",
     "Denial Code", "Denial Description",
     "Claim Count", "Total Denied (AED)", "% of Total Denied",
 ]
+
+# Final-denied per claim (same definition as the Dashboard / Claim Cycle): latest submission per claim; RA rows
+# de-duplicated on (facility, claim, RA file, net, paid, denied); paid = sum capped at net; denied = net - paid for
+# claims with an RA. Each denied claim is coded with its latest non-empty RA denial code.
+_DENIAL_ANALYSIS_SQL = """
+WITH c AS (
+  SELECT DISTINCT ON (facility_id, claim_id) facility_id, claim_id, coalesce(net_amount, 0) net,
+         receiver_id, payer_id, payer_name
+  FROM claims WHERE {where}
+  ORDER BY facility_id, claim_id, submission_date DESC NULLS LAST, id DESC),
+ra AS (
+  SELECT DISTINCT ON (r.facility_id, r.claim_id, r.ra_file_id, r.net_amount, r.paid_amount, r.denial_amount)
+         r.id, r.facility_id, r.claim_id, coalesce(r.paid_amount, 0) paid, r.remittance_date,
+         nullif(r.denial_code, '') dcode, r.denial_description ddesc
+  FROM remittances r JOIN c USING (facility_id, claim_id)
+  ORDER BY r.facility_id, r.claim_id, r.ra_file_id, r.net_amount, r.paid_amount, r.denial_amount, r.id DESC),
+p AS (
+  SELECT facility_id, claim_id, sum(paid) paid, max(remittance_date) last_ra,
+         (array_agg(dcode ORDER BY remittance_date DESC, id DESC) FILTER (WHERE dcode IS NOT NULL))[1] dcode,
+         (array_agg(ddesc ORDER BY remittance_date DESC, id DESC) FILTER (WHERE dcode IS NOT NULL))[1] ddesc
+  FROM ra GROUP BY 1, 2)
+SELECT c.facility_id, c.receiver_id, c.payer_id, c.payer_name, p.dcode, p.ddesc, p.last_ra,
+       c.net - least(greatest(p.paid, 0), c.net) denied
+FROM c JOIN p USING (facility_id, claim_id)
+WHERE c.net - least(greatest(p.paid, 0), c.net) > 0.005
+"""
 
 
 def _build_denial_analysis(db, facility_id, payer_id, encounter_type,
@@ -1063,51 +1089,40 @@ def _build_denial_analysis(db, facility_id, payer_id, encounter_type,
                       facility_ids=None):
     fac_map = {f.id: f.facility_name for f in db.query(Facility).all()}
 
-    q = (
-        db.query(
-            Claim.facility_id,
-            Claim.payer_id,
-            Claim.payer_name,
-            Remittance.denial_code,
-            Remittance.denial_description,
-            func.count(Claim.id).label("claim_count"),
-            func.coalesce(func.sum(Remittance.denial_amount), 0).label("total_denied"),
-        )
-        .join(Remittance, and_(
-            Claim.facility_id == Remittance.facility_id,
-            Claim.claim_id    == Remittance.claim_id,
-        ))
-        .filter(Remittance.denial_code.isnot(None), Remittance.denial_code != "")
-    )
-    if facility_ids:
-        _fids = [int(x) for x in facility_ids.split(',') if x.strip().isdigit()]
-        if _fids:
-            q = q.filter(Claim.facility_id.in_(_fids))
+    conds, params = ["facility_id NOT IN (SELECT id FROM facilities WHERE facility_code = 'GHAF-001')"], {}
+    _fids = [int(x) for x in (facility_ids or "").split(',') if x.strip().isdigit()]
+    if _fids:
+        conds.append("facility_id = ANY(:fids)"); params["fids"] = _fids
     elif facility_id:
-        q = q.filter(Claim.facility_id == facility_id)
+        conds.append("facility_id = :fid"); params["fid"] = facility_id
     if payer_id:
-        q = q.filter(Claim.payer_id == payer_id)
+        conds.append("payer_id = :pid"); params["pid"] = payer_id
     if encounter_type:
-        q = q.filter(Claim.encounter_type == encounter_type)
-
-    # For denial analysis, date_field controls which date column
-    if date_field == "remittance_date":
+        conds.append("encounter_type = :et"); params["et"] = encounter_type
+    if date_field != "remittance_date":
         if date_from:
-            q = q.filter(Remittance.remittance_date >= date_from)
+            conds.append("encounter_start::date >= :d0"); params["d0"] = date_from
         if date_to:
-            q = q.filter(Remittance.remittance_date <= date_to)
-    else:
-        if date_from:
-            q = q.filter(cast(Claim.encounter_start, Date) >= date_from)
-        if date_to:
-            q = q.filter(cast(Claim.encounter_start, Date) <= date_to)
+            conds.append("encounter_start::date <= :d1"); params["d1"] = date_to
+    claim_rows = db.execute(text(_DENIAL_ANALYSIS_SQL.format(where=" AND ".join(conds))), params).mappings().all()
 
-    q = q.group_by(
-        Claim.facility_id, Claim.payer_id, Claim.payer_name,
-        Remittance.denial_code, Remittance.denial_description,
-    ).order_by(func.sum(Remittance.denial_amount).desc())
+    groups: dict = {}
+    for r in claim_rows:
+        if date_field == "remittance_date":   # by the claim's latest RA date
+            d = r["last_ra"].date() if hasattr(r["last_ra"], "date") else r["last_ra"]
+            if (date_from and (d is None or d < date_from)) or (date_to and (d is None or d > date_to)):
+                continue
+        key = (r["facility_id"], _derive_receiver_id(r["receiver_id"], r["payer_id"]), r["payer_id"],
+               r["dcode"] or "", )
+        g = groups.setdefault(key, {"payer_name": r["payer_name"], "ddesc": r["ddesc"], "n": 0, "denied": 0.0})
+        g["n"] += 1; g["denied"] += float(r["denied"])
 
-    rows = q.all()
+    class _R:  # row shape used by the writer below
+        def __init__(self, k, v):
+            (self.facility_id, self.receiver_id, self.payer_id, self.denial_code) = k
+            self.payer_name, self.denial_description = v["payer_name"], v["ddesc"]
+            self.claim_count, self.total_denied = v["n"], round(v["denied"], 2)
+    rows = sorted((_R(k, v) for k, v in groups.items()), key=lambda r: (r.receiver_id or "", -r.total_denied))
     grand_total = sum(float(r.total_denied or 0) for r in rows)
 
     wb = openpyxl.Workbook()
@@ -1121,6 +1136,7 @@ def _build_denial_analysis(db, facility_id, payer_id, encounter_type,
         pct = round(denied / grand_total * 100, 2) if grand_total else 0
         _write_row(ws, row_idx, [
             fac_map.get(r.facility_id, ""),
+            r.receiver_id or "",
             r.payer_id,
             r.payer_name or "",
             r.denial_code or "",

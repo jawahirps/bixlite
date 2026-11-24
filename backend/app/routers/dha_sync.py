@@ -25,7 +25,7 @@ from ..models import Facility, FetchLog, RawXmlStore, ScrubXmlFinding, User
 from ..schemas import DhaFetchRequest, DhaSyncTriggerResponse, DhaUploadResponse, FetchLogOut, RawXmlStoreOut
 from ..security import get_current_user, require_roles
 from ..services.dhpo_parser import DHPOXmlParser
-from ..services.fetch_service import DHASyncService
+from ..services.fetch_service import DHASyncService, DemoFacilityError
 from ..services.riayati_service import RiayatiSyncService, RiayatiInactiveFacilityError
 
 router = APIRouter(prefix="/api/dha-sync", tags=["dha-sync"])
@@ -118,6 +118,17 @@ async def upload_xml(
     )
 
 
+def _own_facility(user: User, facility_id: Optional[int]) -> Optional[int]:
+    """Non-admins may only act on their own facility (403 otherwise)."""
+    if user.role != "admin":
+        if user.facility_id is None:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No facility assigned to this user")
+        if facility_id is not None and facility_id != user.facility_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your facility")
+        return user.facility_id
+    return facility_id
+
+
 @router.post("/trigger", response_model=DhaSyncTriggerResponse)
 def trigger_sync(
     facility_id: Optional[int] = None,
@@ -125,7 +136,7 @@ def trigger_sync(
     current_user: User = Depends(require_roles("admin", "billing_manager")),
 ):
     """Run the DHA XML Sync pipeline over all pending raw XML records."""
-    facility_scope = facility_id or current_user.facility_id
+    facility_scope = _own_facility(current_user, facility_id)
 
     fetch_log = FetchLog(
         facility_id=facility_scope or 0,
@@ -186,10 +197,9 @@ def fetch_from_eclaimlink(
     runs the DHA XML Sync parser over everything pending. See
     app/services/fetch_service.py to wire up the real DHPO SOAP client.
     """
-    facility_scope = payload.facility_id or current_user.facility_id
+    facility_scope = _own_facility(current_user, payload.facility_id)
     if facility_scope is None:
-        # Admin with no facility_id — default to Apollo Clinics (ID 13)
-        facility_scope = 13
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="facility_id is required for eClaimLink fetch")
 
     if payload.date_to < payload.date_from:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="date_to must be on or after date_from")
@@ -202,6 +212,8 @@ def fetch_from_eclaimlink(
             date_to=payload.date_to,
         )
         return fetch_log
+    except DemoFacilityError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:

@@ -35,6 +35,27 @@ _CACHE: dict = {}
 TTL = 900   # 15 min: these read every scrub finding and RA of the facility (5–9 s each)
 
 
+# Final-denied definition (same as services/denial_patterns.py): latest submission per claim; RA rows de-duplicated
+# (the same RA can be stored twice); paid = least(greatest(sum paid, 0), net); denied = net - paid; the 21-day
+# window runs from the LATEST RA per claim.
+FINAL_CTE = """
+    fd_c AS (SELECT DISTINCT ON (facility_id, claim_id) id, facility_id, claim_id, raw_xml_id,
+                    COALESCE(net_amount, 0) AS net, gross_amount
+             FROM claims WHERE facility_id = :fid
+             ORDER BY facility_id, claim_id, submission_date DESC NULLS LAST, id DESC),
+    fd_r AS (SELECT DISTINCT ON (r.facility_id, r.claim_id, r.ra_file_id, r.net_amount, r.paid_amount, r.denial_amount)
+                    r.id, r.facility_id, r.claim_id, r.remittance_date, COALESCE(r.paid_amount, 0) AS paid
+             FROM remittances r WHERE r.facility_id = :fid
+             ORDER BY r.facility_id, r.claim_id, r.ra_file_id, r.net_amount, r.paid_amount, r.denial_amount, r.id),
+    fd_g AS (SELECT facility_id, claim_id, sum(paid) AS paid, max(remittance_date) AS last_ra, array_agg(id) AS ra_ids
+             FROM fd_r GROUP BY 1, 2),
+    fd AS (SELECT c.facility_id, c.claim_id, c.raw_xml_id, c.net, c.gross_amount, g.last_ra, g.ra_ids,
+                  CASE WHEN g.claim_id IS NOT NULL THEN LEAST(GREATEST(g.paid, 0), c.net) END         AS paid_amount,
+                  CASE WHEN g.claim_id IS NOT NULL THEN c.net - LEAST(GREATEST(g.paid, 0), c.net) END AS denial_amount
+           FROM fd_c c LEFT JOIN fd_g g ON g.facility_id = c.facility_id AND g.claim_id = c.claim_id)
+"""
+
+
 def _cached(fn):
     """Cache a facility-level read for TTL seconds, keyed on its query arguments."""
     @functools.wraps(fn)
@@ -83,7 +104,8 @@ def get_rule_stats(
     """
     rows = db.execute(
         text("""
-        WITH scrub_claims AS (
+        WITH """ + FINAL_CTE + """,
+        scrub_claims AS (
             -- One row per (rule_id, claim) — deduplicate multiple findings per claim
             SELECT DISTINCT
                 f.rule_id,
@@ -105,7 +127,7 @@ def get_rule_stats(
                 r.paid_amount,
                 r.gross_amount
             FROM scrub_claims sc
-            LEFT JOIN remittances r
+            LEFT JOIN fd r
                    ON r.claim_id    = sc.claim_id
                   AND r.facility_id = sc.facility_id
         )
@@ -202,7 +224,11 @@ def _build_recall_rows(db: Session, facility_id: int, limit: int = 500,
                 WHEN r.denial_amount > 500
                      THEN 'HIGH'
                 ELSE 'MEDIUM'
-            END                                                  AS priority
+            END                                                  AS priority,
+            (SELECT COALESCE(min(x.submission_date) FILTER (WHERE x.resubmission_key = ''), min(x.submission_date))
+               FROM claims x WHERE x.facility_id = :fid AND x.claim_id = c.claim_id) AS first_sub,
+            (SELECT count(*) FROM claims x WHERE x.facility_id = :fid AND x.claim_id = c.claim_id
+                    AND x.resubmission_key <> '')               AS resubs_used
         FROM claims c
         JOIN remittances r
              ON  r.claim_id    = c.claim_id
@@ -250,9 +276,34 @@ def _build_recall_rows(db: Session, facility_id: int, limit: int = 500,
                 any((c or "").startswith("DUPL") for c in (r["denial_codes"] or []))
             ),
             "priority":            r["priority"],
+            **_sn_fields(r["remittance_date"], r["resubs_used"], r["first_sub"]),
         }
         for r in rows
     ]
+
+
+def _sn_fields(ra_date, used, first_sub=None) -> dict:
+    """SN 03/2019: resubmit within 21 days of the RA (3.8.1); at most 2 resubmissions incl. reconciliation (3.8.2);
+    claim valid 24 months from the first original submission (3.10.5, shared helper resub_worklist._valid_until)."""
+    from datetime import date as _d, timedelta as _td
+    from ..services.resub_worklist import _valid_until
+    used = int(used or 0)
+    due = (ra_date + _td(days=21)) if ra_date else None
+    left = (due - _d.today()).days if due else None
+    fd = first_sub.date() if hasattr(first_sub, "date") else first_sub
+    valid_until = _valid_until(fd, None) if fd else None
+    if used >= 2:
+        sn = "Limit reached"
+    elif valid_until and _d.today() > valid_until:
+        sn = "Claim validity ended"
+    elif used == 1:
+        sn = "Reconciliation only"
+    elif left is not None and left < 0:
+        sn = "21-day window closed"
+    else:
+        sn = f"{left} days left" if left is not None else ""
+    return {"resubs_used": used, "resubmit_by": due.isoformat() if due else None, "days_left": left, "sn_status": sn,
+            "valid_until": valid_until.isoformat() if valid_until else None}
 
 
 def _build_proactive_recall_rows(
@@ -451,7 +502,7 @@ def get_file_denial_summary(
     Returns each file with:
       - total_claims / denied_claims
       - total_denial_amount
-      - earliest_ra_date  (start of 21-day window)
+      - earliest_ra_date  (start of 21-day window = earliest of the per-claim LATEST RA dates)
       - days_remaining    (computed server-side; negative = expired)
       - scrub_rules triggered across denied claims
       - denial_codes from RA activity details
@@ -460,44 +511,30 @@ def get_file_denial_summary(
 
     rows = db.execute(
         text("""
+        WITH """ + FINAL_CTE + """
         SELECT
             rx.id                                                  AS raw_xml_id,
             rx.source_filename,
             rx.submission_date,
-            COUNT(DISTINCT c.claim_id)                            AS total_claims,
-            COUNT(DISTINCT c.claim_id)
+            COUNT(DISTINCT r.claim_id)                            AS total_claims,
+            COUNT(DISTINCT r.claim_id)
                 FILTER (WHERE r.denial_amount > 0)                AS denied_claims,
-            COALESCE(
-                SUM(r.denial_amount) FILTER (WHERE r.denial_amount > 0), 0
-            )                                                      AS total_denial_amount,
-            COALESCE(
-                SUM(r.gross_amount)  FILTER (WHERE r.denial_amount > 0), 0
-            )                                                      AS gross_at_risk,
-            MIN(r.remittance_date)
-                FILTER (WHERE r.denial_amount > 0)                AS earliest_ra_date,
-            MAX(r.remittance_date)
-                FILTER (WHERE r.denial_amount > 0)                AS latest_ra_date,
-            array_agg(DISTINCT f.rule_id)
-                FILTER (WHERE f.rule_id != 'ALL_CLEAR'
-                          AND r.denial_amount > 0)                AS scrub_rules,
-            array_agg(DISTINCT rad.denial_code)
-                FILTER (WHERE rad.denial_code IS NOT NULL
-                          AND r.denial_amount > 0)                AS denial_codes
+            COALESCE(SUM(r.denial_amount) FILTER (WHERE r.denial_amount > 0), 0) AS total_denial_amount,
+            COALESCE(SUM(r.gross_amount)  FILTER (WHERE r.denial_amount > 0), 0) AS gross_at_risk,
+            MIN(r.last_ra) FILTER (WHERE r.denial_amount > 0)     AS earliest_ra_date,
+            MAX(r.last_ra) FILTER (WHERE r.denial_amount > 0)     AS latest_ra_date,
+            (SELECT array_agg(DISTINCT f.rule_id) FROM scrub_xml_findings f
+              WHERE f.raw_xml_id = rx.id AND f.rule_id != 'ALL_CLEAR')                AS scrub_rules,
+            (SELECT array_agg(DISTINCT rad.denial_code) FROM fd x
+               JOIN remittance_activity_details rad ON rad.remittance_id_fk = ANY(x.ra_ids)
+              WHERE x.raw_xml_id = rx.id AND x.denial_amount > 0 AND rad.denial_code IS NOT NULL) AS denial_codes
         FROM raw_xml_store rx
-        JOIN claims c
-             ON  c.raw_xml_id   = rx.id
-        JOIN scrub_xml_findings f
-             ON  f.raw_xml_id   = rx.id
-             AND f.raw_xml_id  IS NOT NULL
-        LEFT JOIN remittances r
-             ON  r.claim_id     = c.claim_id
-             AND r.facility_id  = c.facility_id
-        LEFT JOIN remittance_activity_details rad
-             ON  rad.remittance_id_fk = r.id
+        JOIN fd r ON r.raw_xml_id = rx.id      -- claims grouped under the file of their LATEST submission
         WHERE rx.facility_id   = :fid
           AND rx.xml_type      = 'ClaimSubmission'
+          AND EXISTS (SELECT 1 FROM scrub_xml_findings f WHERE f.raw_xml_id = rx.id)
         GROUP BY rx.id, rx.source_filename, rx.submission_date
-        HAVING COUNT(DISTINCT c.claim_id) FILTER (WHERE r.denial_amount > 0) > 0
+        HAVING COUNT(*) FILTER (WHERE r.denial_amount > 0) > 0
         ORDER BY earliest_ra_date DESC NULLS LAST, total_denial_amount DESC
         """),
         {"fid": facility_id},

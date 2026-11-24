@@ -149,6 +149,14 @@ export default function PrepareResubmission({ claim, onClose }) {
         <div className="flex-1 space-y-3 overflow-y-auto p-4">
           {loading && <div className="text-sm text-slate-500">Loading claim…</div>}
           {error && <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-denied">{error}</div>}
+          {draft?.sn && (
+            <div className={`rounded-lg border px-3 py-2 text-xs ${draft.sn.limit_reached || draft.sn.expired || draft.sn.window_closed ? "border-red-200 bg-red-50 text-denied" : "border-slate-200 bg-slate-50 text-slate-700"}`}>
+              <b>SN 03/2019:</b> resubmissions used {draft.sn.resubmissions_used} of {draft.sn.max_resubmissions}
+              {draft.sn.resubmit_by && <> · resubmit by {draft.sn.resubmit_by} (21 days from RA)</>}
+              {draft.sn.valid_until && <> · claim valid until {draft.sn.valid_until}</>}
+              {draft.sn.resubmissions_used >= 1 && <> · reconciliation agreement: {draft.sn.recon_agreed ? "confirmed in worklist" : "not marked in worklist"}</>}
+            </div>
+          )}
           {draft?.warnings?.map((w) => (
             <div key={w} className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-pending">{w}</div>
           ))}

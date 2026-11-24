@@ -18,6 +18,19 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
+# follow-up / repeat rule: single source of truth is resub_worklist (fallback keeps the CLI usable standalone)
+try:
+    from app.services.resub_worklist import FOLLOWUP_DAYS, REPEAT_DAYS, expected_code as _expected_consult_code
+except Exception:  # pragma: no cover - standalone CLI without the app package
+    FOLLOWUP_DAYS, REPEAT_DAYS = 7, 28
+
+    def _expected_consult_code(code, gap):
+        m = re.match(r"^(9|10|11)(\.\d+)?$", (code or "").strip())
+        if not m or not gap or gap <= 0 or gap > REPEAT_DAYS:
+            return None
+        want = m.group(1) + (".01" if gap <= FOLLOWUP_DAYS else ".02")
+        return None if code.strip() == want else want
+
 ROOT_EXPECTED = "Claim.Submission"
 DATE_FORMATS = ("%d/%m/%Y %H:%M", "%d/%m/%Y", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d")
 
@@ -48,8 +61,8 @@ PROFILE_NOTES = {
 }
 
 DEFAULT_RULES = {
-    "consultation_codes": {"9", "9.01", "9.02", "10", "10.01", "10.02", "11", "11.02"},
-    "consultation_followup_codes": {"9.01", "9.02", "10.01", "10.02", "11.02"},
+    "consultation_codes": {"9", "9.01", "9.02", "10", "10.01", "10.02", "11", "11.01", "11.02"},
+    "consultation_followup_codes": {"9.01", "9.02", "10.01", "10.02", "11.01", "11.02"},
     "administration_prefixes": ("963",),
     "injection_codes": {"96372", "96373", "96374", "96375", "96376", "96377", "96379"},
     "infusion_codes": {"96360", "96361", "96365", "96366", "96367", "96368", "96369", "96370", "96371"},
@@ -144,6 +157,8 @@ def csv_to_xml(path: Path):
             for tag, aliases in {"FacilityID": ("facility_id", "FacilityID"), "Type": ("encounter_type", "EncounterType"), "PatientID": ("patient_id", "PatientID"), "Start": ("encounter_start", "EncounterStart"), "End": ("encounter_end", "EncounterEnd"), "StartType": ("encounter_start_type",), "EndType": ("encounter_end_type",)}.items():
                 ET.SubElement(encounter, tag).text = next((row.get(a, "") for a in aliases if row.get(a)), "")
             for dcode, dtype in [(row.get("diagnosis_code", ""), row.get("diagnosis_type", "Secondary"))]:
+                if (dtype or "").strip().lower() == "primary":
+                    dtype = "Principal"
                 if dcode:
                     d = ET.SubElement(claim, "Diagnosis"); ET.SubElement(d, "Type").text = dtype; ET.SubElement(d, "Code").text = dcode
         claim = claims[cid]
@@ -340,7 +355,7 @@ def scrub(path: Path, rules=None, profile="UAE_COMMON", rule_pack=None, nas_guid
 
         diagnoses = children(claim, "Diagnosis")
         diagnosis_codes = [text(d, "Code") for d in diagnoses]
-        principal_codes = [text(d, "Code") for d in diagnoses if text(d, "Type").lower() == "principal"]
+        principal_codes = [text(d, "Code") for d in diagnoses if text(d, "Type").lower() in ("principal", "primary")]
         if not diagnoses:
             finding(findings, "BLOCK", "DIAGNOSIS_MISSING", f"{base}/Diagnosis", "At least one Diagnosis is required for the UAE profile.", cid)
         if diagnoses and not principal_codes:
@@ -379,7 +394,7 @@ def scrub(path: Path, rules=None, profile="UAE_COMMON", rule_pack=None, nas_guid
                 finding(findings, "WARN", "MODIFIER_REVIEW", f"{apath}/Code", f"CPT {code} has no Modifier/Modifiers field. Review modifier requirements before submission; this is a comparison warning, not a universal UAE rule.", cid, aid, rules["source_urls"]["pure_rcm"])
             if not diagnosis_codes and (numeric_code or text(activity, "Type") in {"3", "8"}):
                 finding(findings, "WARN", "CPT_ICD_LINK_MISSING", f"{apath}", f"Procedure activity {code} has no claim diagnosis to support CPT–ICD review.", cid, aid, "UAE profile comparison")
-            parsed_activities.append({"id": aid, "code": code, "start": ast, "start_raw": text(activity, "Start"), "clinician": text(activity, "Clinician"), "type": text(activity, "Type"), "path": apath, "modifiers": modifiers, "quantity": money(text(activity, "Quantity")) or Decimal("0")})
+            parsed_activities.append({"id": aid, "code": code, "start": ast, "start_raw": text(activity, "Start"), "clinician": text(activity, "Clinician"), "type": text(activity, "Type"), "path": apath, "modifiers": modifiers, "quantity": money(text(activity, "Quantity")) or Decimal("0"), "net": money(text(activity, "Net"))})
             if encounter is not None and ast is not None:
                 estart = parse_dt(text(encounter, "Start")); eend = parse_dt(text(encounter, "End"))
                 if estart and eend and not (estart <= ast <= eend):
@@ -487,10 +502,19 @@ def scrub(path: Path, rules=None, profile="UAE_COMMON", rule_pack=None, nas_guid
             days = (a2["start"].date() - a1["start"].date()).days
             if days == 0:
                 finding(findings, "WARN", "CONSULT_SAME_DAY_DUPLICATE", f"/Claim[{c2['id']}]/Activity[{a2['id']}]/Code", "Same member has more than one consultation on the same calendar date; review as a same-day duplicate/follow-up.", c2["id"], a2["id"], rules["source_urls"]["consultation"])
-            elif 1 <= days <= 7 and a2["code"] in {"9", "10", "11"}:
-                finding(findings, "WARN", "CONSULT_FOLLOWUP_7D", f"/Claim[{c2['id']}]/Activity[{a2['id']}]/Code", f"Initial consultation code {a2['code']} occurs {days} calendar day(s) after consultation {a1['code']} for the same member; apply the seven-day follow-up rule if applicable.", c2["id"], a2["id"], rules["source_urls"]["consultation"])
-            elif 8 <= days <= 28:
-                finding(findings, "WARN", "CONSULT_REVIEW_8_28D", f"/Claim[{c2['id']}]/Activity[{a2['id']}]/Code", f"Consultation code {a2['code']} occurs {days} calendar day(s) after the previous consultation for the same member; review the 8–28 day consultation rule.", c2["id"], a2["id"], rules["source_urls"]["consultation"])
+                continue
+            want = _expected_consult_code(a2["code"], days)
+            if not want:
+                continue   # new visit, or already billed as the right .01 / .02 code
+            if days <= FOLLOWUP_DAYS:
+                finding(findings, "WARN", "CONSULT_FOLLOWUP_7D", f"/Claim[{c2['id']}]/Activity[{a2['id']}]/Code", f"Consultation code {a2['code']} occurs {days} calendar day(s) after consultation {a1['code']} for the same member; if same doctor/specialty and same condition, bill as free follow-up {want} with net 0.", c2["id"], a2["id"], rules["source_urls"]["consultation"])
+            else:
+                finding(findings, "WARN", "CONSULT_REVIEW_8_28D", f"/Claim[{c2['id']}]/Activity[{a2['id']}]/Code", f"Consultation code {a2['code']} occurs {days} calendar day(s) after the previous consultation for the same member; if same doctor/specialty and same condition, bill as repeat consultation {want}.", c2["id"], a2["id"], rules["source_urls"]["consultation"])
+
+    for c in parsed_claims:
+        for a in c["activities"]:
+            if re.match(r"^(9|10|11)\.01$", a["code"] or "") and a.get("net") and a["net"] > 0:
+                finding(findings, "WARN", "FOLLOWUP_NET_NOT_ZERO", f"/Claim[{c['id']}]/Activity[{a['id']}]/Net", f"Follow-up {a['code']} is billed with net {a['net']}; a free follow-up (≤{FOLLOWUP_DAYS} days) must be billed with net 0.", c["id"], a["id"], rules["source_urls"]["consultation"])
 
     for c in parsed_claims:
         admin = [a for a in c["activities"] if a["code"] in rules["injection_codes"] | rules["infusion_codes"]]

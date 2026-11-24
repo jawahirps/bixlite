@@ -108,8 +108,27 @@ def validate_request(claim_keys: Iterable, remarks: Optional[str]) -> Optional[s
     return None
 
 
-def readiness(submission_found: bool, sub_ref: Optional[str], ra_ref: Optional[str], has_login: bool) -> Tuple[bool, str]:
-    fails = []
+def sn_ineligible(resubs: int, first_sub, ra_date, recon_agreed: bool, today: Optional[date] = None) -> Optional[str]:
+    """eClaimLink SN 03/2019 per claim (same rules as resub_prepare.sn_status / sn_errors).
+    first_sub = first ORIGINAL submission date (fallback: earliest submission); ra_date = latest RA date."""
+    from .resub_worklist import _valid_until
+    today = today or date.today()
+    if (resubs or 0) >= 2:
+        return "limit reached (2 resubmissions)"
+    if first_sub:
+        fd = first_sub.date() if hasattr(first_sub, "date") else first_sub
+        if today > _valid_until(fd, None):
+            return "claim validity ended (24 months)"
+    if ra_date and not recon_agreed:
+        rd = ra_date.date() if hasattr(ra_date, "date") else ra_date
+        if today > rd + timedelta(days=21):
+            return "21-day window closed"
+    return None
+
+
+def readiness(submission_found: bool, sub_ref: Optional[str], ra_ref: Optional[str], has_login: bool,
+              sn_reason: Optional[str] = None) -> Tuple[bool, str]:
+    fails = [sn_reason] if sn_reason else []
     if not submission_found:
         fails.append("source submission not found")
     if not (sub_ref or "").strip():
@@ -147,8 +166,16 @@ SELECT l.*, f.facility_name,
          ORDER BY c.submission_date DESC NULLS LAST, c.id DESC LIMIT 1)                 AS sub_ref,
        EXISTS (SELECT 1 FROM claims c WHERE c.facility_id = l.facility_id AND c.claim_id = l.claim_id) AS has_sub,
        (SELECT string_agg(t.remarks, E'\\n' ORDER BY t.updated_at) FROM resub_tracking t
-         WHERE t.facility_id = l.facility_id AND t.claim_id = l.claim_id AND t.ra_date = l.remittance_date) AS existing_remarks
+         WHERE t.facility_id = l.facility_id AND t.claim_id = l.claim_id AND t.ra_date = l.remittance_date) AS existing_remarks,
+       sn.resubs, COALESCE(sn.first_orig, sn.first_any) AS first_sub,
+       EXISTS (SELECT 1 FROM resub_tracking t WHERE t.facility_id = l.facility_id AND t.claim_id = l.claim_id
+                 AND t.status = :recon_agreed) AS recon_agreed
 FROM latest l JOIN facilities f ON f.id = l.facility_id
+LEFT JOIN LATERAL (
+    SELECT count(*) FILTER (WHERE c.resubmission_key <> '')           AS resubs,
+           min(c.submission_date) FILTER (WHERE c.resubmission_key = '') AS first_orig,
+           min(c.submission_date)                                       AS first_any
+    FROM claims c WHERE c.facility_id = l.facility_id AND c.claim_id = l.claim_id) sn ON TRUE
 WHERE l.net > l.paid {search_filter} {id_filter}
 ORDER BY l.remittance_date DESC, l.id DESC
 LIMIT :lim
@@ -159,7 +186,8 @@ def candidates(db: Session, facility_ids: List[int], search: Optional[str] = Non
                only_keys: Optional[List[Tuple[int, str]]] = None, limit: int = 250) -> List[dict]:
     if not facility_ids:
         return []
-    params = {"fids": facility_ids, "lim": limit}
+    from .resub_worklist import RECON_AGREED
+    params = {"fids": facility_ids, "lim": limit, "recon_agreed": RECON_AGREED}
     search_filter = id_filter = ""
     date_filter = "AND r.remittance_date >= CURRENT_DATE - INTERVAL '400 days'"
     if search:
@@ -175,7 +203,8 @@ def candidates(db: Session, facility_ids: List[int], search: Optional[str] = Non
     logins = _facilities_with_login(db)
     out = []
     for r in db.execute(text(sql), params).mappings():
-        ok, msg = readiness(r["has_sub"], r["sub_ref"], r["ra_ref"], r["facility_id"] in logins)
+        sn_reason = sn_ineligible(r["resubs"], r["first_sub"], r["remittance_date"], r["recon_agreed"])
+        ok, msg = readiness(r["has_sub"], r["sub_ref"], r["ra_ref"], r["facility_id"] in logins, sn_reason)
         out.append({
             "key": f"{r['facility_id']}|{r['claim_id']}", "remittance_id": r["id"],
             "facility_id": r["facility_id"], "facility_name": r["facility_name"],
@@ -184,6 +213,8 @@ def candidates(db: Session, facility_ids: List[int], search: Optional[str] = Non
             "outstanding": float(r["net"] - r["paid"]), "denial_code": r["denial_code"],
             "submission_ref": r["sub_ref"], "remittance_ref": r["ra_ref"],
             "existing_remarks": r["existing_remarks"], "eligible": ok, "readiness": msg,
+            "sn_ineligible": sn_reason, "resubmissions_used": int(r["resubs"] or 0),
+            "recon_agreed": bool(r["recon_agreed"]),
         })
     return out
 

@@ -9,6 +9,12 @@ import { toast } from "../../utils/notify";
 
 // ── Standalone API client (no auth header, no 401 redirect) ─────────────────
 const portalApi = axios.create({ baseURL: "/api/portal" });
+// Send the access key in a header, not in API URLs (keeps it out of proxy/server logs); the page link keeps ?token=.
+portalApi.interceptors.request.use(cfg => {
+  const t = new URLSearchParams(window.location.search).get("token");
+  if (t) cfg.headers = { ...(cfg.headers || {}), "X-Portal-Token": t };
+  return cfg;
+});
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 const currency = (v) =>
@@ -90,7 +96,7 @@ export default function RemittancePortal() {
   // ── Verify token on mount ────────────────────────────────────────────────
   useEffect(() => {
     if (!token) { setAuthError("No access token provided in the URL."); return; }
-    portalApi.get("/verify", { params: { token } })
+    portalApi.get("/verify")
       .then(r => setClientInfo(r.data))
       .catch(e => setAuthError(e.response?.data?.detail || "Invalid or expired access token."));
   }, [token]);
@@ -98,7 +104,7 @@ export default function RemittancePortal() {
   // ── Load payer list once ─────────────────────────────────────────────────
   useEffect(() => {
     if (!clientInfo) return;
-    portalApi.get("/remittance/payers", { params: { token } })
+    portalApi.get("/remittance/payers")
       .then(r => setPayers(r.data))
       .catch(() => {});
   }, [clientInfo, token]);
@@ -110,7 +116,6 @@ export default function RemittancePortal() {
     setError("");
     portalApi.get("/remittance", {
       params: {
-        token,
         date_from: dateFrom || undefined,
         date_to:   dateTo   || undefined,
         payer_id:  payerId  || undefined,
@@ -133,7 +138,6 @@ export default function RemittancePortal() {
     try {
       const resp = await portalApi.get("/remittance/export", {
         params: {
-          token,
           date_from: dateFrom || undefined,
           date_to:   dateTo   || undefined,
           payer_id:  payerId  || undefined,

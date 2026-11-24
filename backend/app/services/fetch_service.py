@@ -697,6 +697,19 @@ def _search_intraday(
 # ----------------------------------------------------------------------------
 # Main service
 # ----------------------------------------------------------------------------
+DEMO_FACILITY_CODE = "GHAF-001"
+
+
+class DemoFacilityError(PermissionError):
+    """Raised when a live DHPO fetch is attempted for the demo facility (GHAF-001 / demo_user)."""
+
+
+def assert_live_fetch_allowed(facility: Optional[Facility]) -> None:
+    """Central guard for every live DHPO fetch caller (router, CLI, cron)."""
+    if facility is not None and (facility.facility_code or "").strip().upper() == DEMO_FACILITY_CODE:
+        raise DemoFacilityError("Demo facility (GHAF-001) cannot be used for live eClaimLink/DHPO fetches.")
+
+
 class DHASyncService:
     """
     Can be used either:
@@ -737,6 +750,7 @@ class DHASyncService:
         facility = self.db.get(Facility, facility_id)
         if facility is None:
             raise ValueError(f"Unknown facility_id={facility_id}")
+        assert_live_fetch_allowed(facility)
 
         fetch_log = FetchLog(
             facility_id=facility_id,
@@ -859,6 +873,7 @@ class DHASyncService:
 
         Returns a list of {"xml": str, "filename": str, "submission_date": date}.
         """
+        assert_live_fetch_allowed(facility)
         self._download_failures: List[str] = []
         login = facility.eclaimlink_username
         pwd   = facility.credential_key

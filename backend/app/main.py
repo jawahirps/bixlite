@@ -186,6 +186,8 @@ app.include_router(scrub.router)                  # /api/scrub/*   — JWT-prote
 app.include_router(calibration.router)            # /api/calibration/* — JWT-protected
 from .routers import resub_prepare as resub_prepare_router  # noqa: E402
 app.include_router(resub_prepare_router.router)   # /api/resub-prepare/* — JWT-protected
+from .routers import rule_catalog as rule_catalog_router  # noqa: E402
+app.include_router(rule_catalog_router.router)    # /api/rule-catalog — admin only
 app.include_router(resub.router)                  # /api/resub/* — JWT-protected
 app.include_router(doc_review.router)             # /api/docreview/* — JWT-protected
 app.include_router(dashboard.router)              # /api/dashboard/* — JWT-protected

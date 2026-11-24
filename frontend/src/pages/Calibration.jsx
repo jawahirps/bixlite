@@ -6,7 +6,7 @@
  *  2. Denial Queue   — claims denied AND flagged by scrubber → resubmission candidates
  *  3. Top Denial Codes — most frequent RA denial codes + amounts
  */
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, Fragment } from "react";
 import apiClient from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import { readFacility, saveFacility } from "../utils/facility";
@@ -173,6 +173,8 @@ export default function Calibration({ onPrepareResubmission: onPrepareProp } = {
   const [denialQueue, setDenialQueue] = useState([]);
   const [denialCodes, setDenialCodes] = useState([]);
   const [fileSummary, setFileSummary] = useState([]);
+  const [crFiles, setCrFiles] = useState([]);
+  const [openOrig, setOpenOrig] = useState(new Set());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   // Recall queue date filter
@@ -240,6 +242,7 @@ export default function Calibration({ onPrepareResubmission: onPrepareProp } = {
         apiClient.get("/calibration/denial-codes",       { params: { facility_id: fid } }),
         apiClient.get("/calibration/file-denial-summary",{ params: { facility_id: fid } }),
       ]);
+      apiClient.get("/calibration/resubmission-files", { params: { facility_id: fid } }).then(r => setCrFiles(r.data)).catch(() => setCrFiles([]));
       setRuleStats(r1.data);
       setDenialCodes(r3.data);
       setFileSummary(r4.data);
@@ -325,7 +328,7 @@ export default function Calibration({ onPrepareResubmission: onPrepareProp } = {
       <div className="flex gap-1 overflow-x-auto border-b border-slate-200">
         {[
               { key: "patterns", label: `Patterns (${patterns?.cards?.length ?? "…"})` },
-          { key: "files",  label: `Resubmission Files (${fileSummary.length})` },
+          { key: "files",  label: `Submission Files (${fileSummary.length})` },
           { key: "queue",  label: `Recall Queue (${denialQueue.length})` },
           { key: "codes",  label: `Denial Codes (${denialCodes.length})` },
           { key: "rules",  label: `Rule Precision (${ruleStats.length})` },
@@ -385,9 +388,10 @@ export default function Calibration({ onPrepareResubmission: onPrepareProp } = {
         <div className="space-y-3">
           <div className="rounded-xl bg-amber-50 border border-amber-200 px-4 py-3">
             <p className="text-xs text-amber-900">
-              <strong>21-day resubmission window</strong> — DHA allows resubmission within 21 days of
-              the RemittanceAdvice date. Each row below is one ClaimSubmission file with denied claims.
-              Correct the flagged issues and resubmit the full file via eClaimLink before the deadline.
+              <strong>Grouped by original file</strong> — each row is the ClaimSubmission file a claim was first sent in, with
+              its billed, paid and denied totals; resubmitted claims stay under it (expand ▸ to see where they went). SN 03/2019:
+              resubmit within 21 days of each claim's latest RA, max 2 resubmissions. Claims already resubmitted and awaiting
+              an RA have no deadline. Resubmission (CR) files are listed below for tracking only.
             </p>
           </div>
 
@@ -406,9 +410,11 @@ export default function Calibration({ onPrepareResubmission: onPrepareProp } = {
                       <th className="px-3 py-2 text-left font-semibold text-slate-600">Sub. Date</th>
                       <th className="px-3 py-2 text-right font-semibold text-slate-600">Claims</th>
                       <th className="px-3 py-2 text-right font-semibold text-slate-600">Denied</th>
+                      <th className="px-3 py-2 text-right font-semibold text-slate-600">AED Net (RA)</th>
+                      <th className="px-3 py-2 text-right font-semibold text-slate-600">AED Paid</th>
                       <th className="px-3 py-2 text-right font-semibold text-slate-600">AED Denied</th>
-                      <th className="px-3 py-2 text-left font-semibold text-slate-600">RA Received</th>
-                      <th className="px-3 py-2 text-left font-semibold text-slate-600">Days Left</th>
+                      <th className="px-3 py-2 text-left font-semibold text-slate-600">Resubmitted</th>
+                      <th className="px-3 py-2 text-left font-semibold text-slate-600">Resubmit by</th>
                       <th className="px-3 py-2 text-left font-semibold text-slate-600">Denial Codes</th>
                       <th className="px-3 py-2 text-left font-semibold text-slate-600">Scrub Rules</th>
                     </tr>
@@ -421,29 +427,40 @@ export default function Calibration({ onPrepareResubmission: onPrepareProp } = {
                         f.window_status === "expired" ? "bg-slate-50"    : "";
 
                       const daysChip = (() => {
-                        if (f.days_remaining == null)  return <span className="text-slate-600 text-xs">no RA</span>;
+                        if (f.days_remaining == null)  return <span className="text-slate-600 text-xs">{f.window_status === "awaiting_ra" ? "all awaiting RA" : "no RA"}</span>;
                         if (f.days_remaining < 0)      return <span className="gh-chip gh-chip-neutral">Expired</span>;
                         if (f.days_remaining <= 5)     return <span className="gh-chip gh-chip-denied font-bold">{f.days_remaining}d left ⚠</span>;
                         return <span className="gh-chip gh-chip-paid">{f.days_remaining}d left</span>;
                       })();
 
+                      const isOpen = openOrig.has(f.raw_xml_id);
+                      const toggle = () => setOpenOrig(s => { const n = new Set(s); n.has(f.raw_xml_id) ? n.delete(f.raw_xml_id) : n.add(f.raw_xml_id); return n; });
                       return (
-                        <tr key={f.raw_xml_id} className={`hover:brightness-95 ${windowStyle}`}>
+                        <Fragment key={f.raw_xml_id}>
+                        <tr className={`hover:brightness-95 ${windowStyle}`}>
                           <td className="px-3 py-2">
                             {f.window_status === "urgent"  && <span className="gh-chip gh-chip-denied font-bold">URGENT</span>}
                             {f.window_status === "open"    && <span className="gh-chip gh-chip-pending">OPEN</span>}
                             {f.window_status === "expired" && <span className="gh-chip gh-chip-neutral">EXPIRED</span>}
                             {f.window_status === "no_ra"   && <span className="gh-chip gh-chip-brand">NO RA</span>}
+                            {f.window_status === "awaiting_ra" && <span className="gh-chip gh-chip-pending">AWAITING RA</span>}
                           </td>
                           <td className="px-3 py-2 text-slate-800 text-xs max-w-xs truncate font-medium" title={f.source_filename}>
+                            {f.resubmitted_claims > 0 && (
+                              <button type="button" onClick={toggle} className="mr-1 text-teal-700" aria-label="Show resubmitted claims">{isOpen ? "▾" : "▸"}</button>
+                            )}
                             {f.source_filename || `raw_${f.raw_xml_id}`}
                           </td>
                           <td className="px-3 py-2 text-slate-500 text-xs">{f.submission_date || "—"}</td>
                           <td className="px-3 py-2 text-right text-slate-600">{f.total_claims}</td>
                           <td className="px-3 py-2 text-right font-semibold text-red-700">{f.denied_claims}</td>
+                          <td className="px-3 py-2 text-right text-slate-600">{fmt(f.net_with_ra)}</td>
+                          <td className="px-3 py-2 text-right text-emerald-700">{fmt(f.paid_amount)}</td>
                           <td className="px-3 py-2 text-right font-bold text-red-700">{fmt(f.total_denial_amount)}</td>
-                          <td className="px-3 py-2 text-slate-600 text-xs">{f.earliest_ra_date || "—"}</td>
-                          <td className="px-3 py-2">{daysChip}</td>
+                          <td className="px-3 py-2 text-xs text-slate-600">
+                            {f.resubmitted_claims > 0 ? <>{f.resubmitted_claims} claims{f.awaiting_claims > 0 && <span className="ml-1 gh-chip gh-chip-pending">{f.awaiting_claims} awaiting RA · {fmt(f.awaiting_amount)}</span>}</> : "—"}
+                          </td>
+                          <td className="px-3 py-2 text-xs">{daysChip}{f.resubmit_by && <div className="text-slate-500">{f.resubmit_by}</div>}</td>
                           <td className="px-3 py-2">
                             <div className="flex flex-wrap gap-1">
                               {(f.denial_codes || []).slice(0, 3).map(c => (
@@ -465,6 +482,21 @@ export default function Calibration({ onPrepareResubmission: onPrepareProp } = {
                             </div>
                           </td>
                         </tr>
+                        {isOpen && (f.resubmissions || []).map(x => (
+                          <tr key={x.claim_id} className="bg-slate-50 text-xs text-slate-600">
+                            <td />
+                            <td className="px-3 py-1.5 pl-8 font-mono">{x.claim_id}</td>
+                            <td className="px-3 py-1.5">{x.resubmitted_on}</td>
+                            <td /><td />
+                            <td className="px-3 py-1.5 text-right">{fmt(x.net)}</td>
+                            <td className="px-3 py-1.5 text-right">{fmt(x.paid)}</td>
+                            <td className="px-3 py-1.5 text-right text-red-700">{fmt(x.denied)}</td>
+                            <td className="px-3 py-1.5" colSpan={4}>
+                              Resubmitted in {x.resub_file} · {x.used} of 2 used{x.awaiting ? " · awaiting RA" : ""}
+                            </td>
+                          </tr>
+                        ))}
+                        </Fragment>
                       );
                     })}
                   </tbody>
@@ -472,9 +504,37 @@ export default function Calibration({ onPrepareResubmission: onPrepareProp } = {
               </div>
               <div className="border-t border-slate-100 bg-slate-50 px-4 py-2">
                 <p className="text-xs text-slate-500">
-                  Sorted by AED denied descending. Correct scrub findings, rebuild the ClaimSubmission XML, and resubmit via eClaimLink before the window closes.
+                  Newest RA first. Amounts are counted once, under the original file: paid = all RA payments capped at the original net; denied = original net − paid.
                   Expired files may still be worth appealing directly with the payer.
                 </p>
+              </div>
+            </div>
+          )}
+
+          {crFiles.length > 0 && (
+            <div className="gh-card overflow-hidden">
+              <p className="px-4 pt-3 text-xs font-semibold text-slate-600">Resubmission (CR) files — tracking only, amounts are counted under the original file</p>
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-slate-200 text-sm">
+                  <thead className="bg-slate-50"><tr>
+                    <th className="px-3 py-2 text-left font-semibold text-slate-600">Resubmission file</th>
+                    <th className="px-3 py-2 text-left font-semibold text-slate-600">Sub. Date</th>
+                    <th className="px-3 py-2 text-right font-semibold text-slate-600">Claims</th>
+                    <th className="px-3 py-2 text-right font-semibold text-slate-600">Awaiting RA</th>
+                    <th className="px-3 py-2 text-left font-semibold text-slate-600">Claims come from</th>
+                  </tr></thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {crFiles.map(r => (
+                      <tr key={r.raw_xml_id} className="text-xs">
+                        <td className="px-3 py-2 font-medium text-slate-800">{r.source_filename}</td>
+                        <td className="px-3 py-2 text-slate-500">{r.submission_date || "—"}</td>
+                        <td className="px-3 py-2 text-right">{r.claims}</td>
+                        <td className="px-3 py-2 text-right">{r.awaiting_claims}</td>
+                        <td className="px-3 py-2 text-slate-600">{(r.original_files || []).slice(0, 2).join(", ")}{(r.original_files || []).length > 2 ? ` +${r.original_files.length - 2}` : ""}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             </div>
           )}

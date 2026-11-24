@@ -113,8 +113,9 @@ def get_rule_stats(
                 c.claim_id,
                 c.facility_id
             FROM scrub_xml_findings f
-            JOIN claims c ON c.raw_xml_id = f.raw_xml_id
+            JOIN claims c ON c.raw_xml_id = f.raw_xml_id AND c.claim_id = f.claim_id
             WHERE f.rule_id    != 'ALL_CLEAR'
+              AND NOT (f.rule_id = 'OVERLAPPING_ACTIVITY' AND f.message ~ 'in claims (\\S+) and \\1;')
               AND f.raw_xml_id IS NOT NULL
               AND c.facility_id = :fid
         ),
@@ -235,7 +236,9 @@ def _build_recall_rows(db: Session, facility_id: int, limit: int = 500,
              AND r.facility_id = c.facility_id
         JOIN scrub_xml_findings f
              ON  f.raw_xml_id  = c.raw_xml_id
+             AND f.claim_id    = c.claim_id
              AND f.raw_xml_id IS NOT NULL
+             AND NOT (f.rule_id = 'OVERLAPPING_ACTIVITY' AND f.message ~ 'in claims (\\S+) and \\1;')
              AND f.rule_id    != 'ALL_CLEAR'
         LEFT JOIN remittance_activity_details rad
              ON  rad.remittance_id_fk = r.id
@@ -349,8 +352,10 @@ def _build_proactive_recall_rows(
             array_agg(DISTINCT f.severity)
                 FILTER (WHERE f.severity != 'PASS')                AS scrub_severities
         FROM latest_claim lc
-        JOIN scrub_xml_findings f ON f.raw_xml_id = lc.raw_xml_id
+        JOIN scrub_xml_findings f ON f.raw_xml_id = lc.raw_xml_id AND f.claim_id = lc.claim_id
             AND f.rule_id IN ('OVERLAPPING_ACTIVITY')
+            -- older findings paired a claim with itself (two of the same code in one claim) — not an overlap
+            AND f.message !~ 'in claims (\\S+) and \\1;'
             AND f.severity IN ('BLOCK', 'WARN')
         LEFT JOIN raw_xml_store rx ON rx.id = lc.raw_xml_id
         WHERE lc.facility_id = :fid
@@ -489,6 +494,29 @@ def export_recall_excel(
 # ---------------------------------------------------------------------------
 # File-wise denial summary — for resubmission planning (21-day window)
 # ---------------------------------------------------------------------------
+ORIG_CTE = """
+    oc_all AS (SELECT id, claim_id, raw_xml_id, submission_date, COALESCE(net_amount, 0) AS net,
+                      COALESCE(resubmission_key, '') <> '' AS is_resub
+               FROM claims WHERE facility_id = :fid),
+    oc_o AS (SELECT DISTINCT ON (claim_id) claim_id, raw_xml_id AS orig_xml, net AS orig_net, submission_date AS first_sub
+             FROM oc_all ORDER BY claim_id, submission_date ASC NULLS LAST, id ASC),
+    oc_l AS (SELECT DISTINCT ON (claim_id) claim_id, raw_xml_id AS last_xml, submission_date AS last_sub
+             FROM oc_all ORDER BY claim_id, submission_date DESC NULLS LAST, id DESC),
+    oc_u AS (SELECT claim_id, count(*) FILTER (WHERE is_resub) AS used FROM oc_all GROUP BY 1),
+    oc_r AS (SELECT DISTINCT ON (r.claim_id, r.ra_file_id, r.net_amount, r.paid_amount, r.denial_amount)
+                    r.id, r.claim_id, r.remittance_date, COALESCE(r.paid_amount, 0) AS paid
+             FROM remittances r WHERE r.facility_id = :fid
+             ORDER BY r.claim_id, r.ra_file_id, r.net_amount, r.paid_amount, r.denial_amount, r.id),
+    oc_g AS (SELECT claim_id, sum(paid) AS paid, max(remittance_date) AS last_ra, array_agg(id) AS ra_ids
+             FROM oc_r GROUP BY 1),
+    oc AS (SELECT o.claim_id, o.orig_xml, o.orig_net, o.first_sub, l.last_xml, l.last_sub, u.used, g.last_ra, g.ra_ids,
+                  LEAST(GREATEST(g.paid, 0), o.orig_net)              AS paid,
+                  o.orig_net - LEAST(GREATEST(g.paid, 0), o.orig_net) AS denied,
+                  (l.last_xml <> o.orig_xml AND l.last_sub::date > g.last_ra::date) AS awaiting
+           FROM oc_o o JOIN oc_l l USING (claim_id) JOIN oc_u u USING (claim_id) JOIN oc_g g USING (claim_id))
+"""
+
+
 @router.get("/file-denial-summary")
 @_cached
 def get_file_denial_summary(
@@ -497,44 +525,45 @@ def get_file_denial_summary(
     _: User = Depends(get_current_user),
 ):
     """
-    Groups denied claims by their source ClaimSubmission file.
-    Resubmission to DHA must be done within 21 days of the RA date, file-by-file.
-    Returns each file with:
-      - total_claims / denied_claims
-      - total_denial_amount
-      - earliest_ra_date  (start of 21-day window = earliest of the per-claim LATEST RA dates)
-      - days_remaining    (computed server-side; negative = expired)
-      - scrub_rules triggered across denied claims
-      - denial_codes from RA activity details
+    Denied claims grouped by their ORIGINAL ClaimSubmission file, so a file keeps its billed / paid / denied
+    totals after some of its claims are resubmitted (amounts are never counted under the CR file too).
+    Per claim (SN 03/2019): paid = all RA payments capped at the original net; denied = original net - paid;
+    a claim resubmitted after its latest RA is "awaiting RA" and has no deadline of its own; otherwise
+    resubmit by = latest RA + 21 days. The file deadline is the earliest such date among its actionable claims.
     """
-    from datetime import date as date_type
+    from datetime import date as date_type, timedelta
 
     rows = db.execute(
         text("""
-        WITH """ + FINAL_CTE + """
+        WITH """ + ORIG_CTE + """
         SELECT
-            rx.id                                                  AS raw_xml_id,
-            rx.source_filename,
-            rx.submission_date,
-            COUNT(DISTINCT r.claim_id)                            AS total_claims,
-            COUNT(DISTINCT r.claim_id)
-                FILTER (WHERE r.denial_amount > 0)                AS denied_claims,
-            COALESCE(SUM(r.denial_amount) FILTER (WHERE r.denial_amount > 0), 0) AS total_denial_amount,
-            COALESCE(SUM(r.gross_amount)  FILTER (WHERE r.denial_amount > 0), 0) AS gross_at_risk,
-            MIN(r.last_ra) FILTER (WHERE r.denial_amount > 0)     AS earliest_ra_date,
-            MAX(r.last_ra) FILTER (WHERE r.denial_amount > 0)     AS latest_ra_date,
+            rx.id AS raw_xml_id, rx.source_filename, rx.submission_date,
+            (SELECT count(*) FROM oc_o WHERE orig_xml = rx.id)                      AS total_claims,
+            COUNT(*) FILTER (WHERE oc.denied > 0)                                    AS denied_claims,
+            COALESCE(SUM(oc.orig_net), 0)                                            AS net_with_ra,
+            COALESCE(SUM(oc.paid), 0)                                                AS paid_amount,
+            COALESCE(SUM(oc.denied) FILTER (WHERE oc.denied > 0), 0)                 AS total_denial_amount,
+            COALESCE(SUM(oc.denied) FILTER (WHERE oc.denied > 0 AND oc.awaiting), 0) AS awaiting_amount,
+            COUNT(*) FILTER (WHERE oc.denied > 0 AND oc.awaiting)                    AS awaiting_claims,
+            COUNT(*) FILTER (WHERE oc.used > 0)                                      AS resubmitted_claims,
+            MIN(oc.last_ra) FILTER (WHERE oc.denied > 0 AND NOT oc.awaiting)         AS earliest_ra_date,
+            MAX(oc.last_ra) FILTER (WHERE oc.denied > 0)                             AS latest_ra_date,
             (SELECT array_agg(DISTINCT f.rule_id) FROM scrub_xml_findings f
-              WHERE f.raw_xml_id = rx.id AND f.rule_id != 'ALL_CLEAR')                AS scrub_rules,
-            (SELECT array_agg(DISTINCT rad.denial_code) FROM fd x
+              WHERE f.raw_xml_id = rx.id AND f.rule_id != 'ALL_CLEAR')               AS scrub_rules,
+            (SELECT array_agg(DISTINCT rad.denial_code) FROM oc x
                JOIN remittance_activity_details rad ON rad.remittance_id_fk = ANY(x.ra_ids)
-              WHERE x.raw_xml_id = rx.id AND x.denial_amount > 0 AND rad.denial_code IS NOT NULL) AS denial_codes
+              WHERE x.orig_xml = rx.id AND x.denied > 0 AND rad.denial_code IS NOT NULL) AS denial_codes,
+            (SELECT json_agg(t ORDER BY t.resubmitted_on DESC) FROM (
+                SELECT x.claim_id, x.orig_net AS net, x.paid, x.denied, x.used, x.awaiting,
+                       x.last_sub::date AS resubmitted_on, lx.source_filename AS resub_file
+                FROM oc x JOIN raw_xml_store lx ON lx.id = x.last_xml
+                WHERE x.orig_xml = rx.id AND x.used > 0 LIMIT 100) t)                AS resubmissions
         FROM raw_xml_store rx
-        JOIN fd r ON r.raw_xml_id = rx.id      -- claims grouped under the file of their LATEST submission
-        WHERE rx.facility_id   = :fid
-          AND rx.xml_type      = 'ClaimSubmission'
-          AND EXISTS (SELECT 1 FROM scrub_xml_findings f WHERE f.raw_xml_id = rx.id)
+        JOIN oc ON oc.orig_xml = rx.id
+        WHERE rx.facility_id = :fid
+          AND rx.xml_type    = 'ClaimSubmission'
         GROUP BY rx.id, rx.source_filename, rx.submission_date
-        HAVING COUNT(*) FILTER (WHERE r.denial_amount > 0) > 0
+        HAVING COUNT(*) FILTER (WHERE oc.denied > 0) > 0
         ORDER BY earliest_ra_date DESC NULLS LAST, total_denial_amount DESC
         """),
         {"fid": facility_id},
@@ -544,38 +573,65 @@ def get_file_denial_summary(
     result = []
     for r in rows:
         earliest_ra = r["earliest_ra_date"]
-        if earliest_ra:
-            days_since_ra = (today - earliest_ra).days
-            days_remaining = 21 - days_since_ra
-        else:
-            days_remaining = None
-
-        # Window status
+        ra_d = earliest_ra.date() if hasattr(earliest_ra, "date") else earliest_ra
+        resubmit_by = (ra_d + timedelta(days=21)) if ra_d else None
+        days_remaining = (resubmit_by - today).days if resubmit_by else None
         if days_remaining is None:
-            window_status = "no_ra"
+            window_status = "awaiting_ra" if r["awaiting_claims"] else "no_ra"
         elif days_remaining < 0:
             window_status = "expired"
         elif days_remaining <= 5:
             window_status = "urgent"
         else:
             window_status = "open"
-
         result.append({
             "raw_xml_id":          r["raw_xml_id"],
             "source_filename":     r["source_filename"],
             "submission_date":     str(r["submission_date"]) if r["submission_date"] else None,
             "total_claims":        r["total_claims"],
             "denied_claims":       r["denied_claims"],
+            "net_with_ra":         float(r["net_with_ra"]),
+            "paid_amount":         float(r["paid_amount"]),
             "total_denial_amount": float(r["total_denial_amount"]),
-            "gross_at_risk":       float(r["gross_at_risk"]),
-            "earliest_ra_date":    str(earliest_ra) if earliest_ra else None,
-            "latest_ra_date":      str(r["latest_ra_date"]) if r["latest_ra_date"] else None,
+            "awaiting_amount":     float(r["awaiting_amount"]),
+            "awaiting_claims":     r["awaiting_claims"],
+            "resubmitted_claims":  r["resubmitted_claims"],
+            "earliest_ra_date":    str(ra_d) if ra_d else None,
+            "latest_ra_date":      str(r["latest_ra_date"])[:10] if r["latest_ra_date"] else None,
+            "resubmit_by":         resubmit_by.isoformat() if resubmit_by else None,
             "days_remaining":      days_remaining,
             "window_status":       window_status,
             "scrub_rules":         r["scrub_rules"] or [],
             "denial_codes":        [c for c in (r["denial_codes"] or []) if c],
+            "resubmissions":       r["resubmissions"] or [],
         })
     return result
+
+
+@router.get("/resubmission-files")
+@_cached
+def get_resubmission_files(
+    facility_id: int,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """CR files for tracking only: which original files their claims come from and how many still await an RA.
+    Amounts stay under the original file (file-denial-summary)."""
+    rows = db.execute(
+        text("""
+        WITH """ + ORIG_CTE + """
+        SELECT lx.id AS raw_xml_id, lx.source_filename, min(oc.last_sub)::date AS submission_date,
+               count(*) AS claims, count(*) FILTER (WHERE oc.awaiting) AS awaiting_claims,
+               array_agg(DISTINCT ox.source_filename) AS original_files
+        FROM oc JOIN raw_xml_store lx ON lx.id = oc.last_xml JOIN raw_xml_store ox ON ox.id = oc.orig_xml
+        WHERE oc.last_xml <> oc.orig_xml AND lx.facility_id = :fid
+        GROUP BY lx.id, lx.source_filename
+        ORDER BY submission_date DESC NULLS LAST
+        LIMIT 200
+        """),
+        {"fid": facility_id},
+    ).mappings().all()
+    return [{**dict(r), "submission_date": str(r["submission_date"]) if r["submission_date"] else None} for r in rows]
 
 
 # ---------------------------------------------------------------------------

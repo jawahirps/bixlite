@@ -487,9 +487,10 @@ def scrub(path: Path, rules=None, profile="UAE_COMMON", rule_pack=None, nas_guid
             finding(findings, "BLOCK", "DUPLICATE_CLAIM", "/Claim", f"Claims {', '.join(ids)} have the same member, encounter, and activity signature.", ids[0], source="local duplicate signature")
 
     all_activities = [(c, a) for c in parsed_claims for a in c["activities"]]
+    # Only across DIFFERENT claims: the same code twice inside one claim is a normal repeat (e.g. two fillings, different teeth).
     for i, (c1, a1) in enumerate(all_activities):
         for c2, a2 in all_activities[i+1:]:
-            if c1["member"] and c1["member"] == c2["member"] and a1["code"] and a1["code"] == a2["code"] and a1["start"] and a2["start"] and a1["start"] == a2["start"]:
+            if c1["id"] != c2["id"] and c1["member"] and c1["member"] == c2["member"] and a1["code"] and a1["code"] == a2["code"] and a1["start"] and a2["start"] and a1["start"] == a2["start"]:
                 finding(findings, "WARN", "OVERLAPPING_ACTIVITY", f"/Claim[{c2['id']}]/Activity[{a2['id']}]/Start", f"Same member has service code {a2['code']} at the same date/time in claims {c1['id']} and {c2['id']}; review for overlap or legitimate repeat service.", c2["id"], a2["id"])
 
     consultations = [(c, a) for c in parsed_claims for a in c["activities"] if a["code"] in rules["consultation_codes"] and a["start"]]

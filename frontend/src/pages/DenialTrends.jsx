@@ -147,7 +147,7 @@ export default function DenialTrends() {
   const [month, setMonth] = useState(() => params.get("month") || "");
   const [exporting, setExporting] = useState(false);
   const [drill, setDrill] = useState(null);
-  const [stage, setStage] = useState("new");
+  const [stage, setStage] = useState("all");
   const [view, setView] = useState("trends");
   const exportXlsx = async () => {
     const q = new URLSearchParams({ months: String(months), stage });

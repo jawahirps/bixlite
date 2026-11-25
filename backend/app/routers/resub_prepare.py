@@ -145,7 +145,10 @@ sf AS (
   WHERE f.claim_id IN (SELECT claim_id FROM ra) GROUP BY 1)
 SELECT ra.ra_file_id, rx.source_filename AS ra_file, ra.remittance_date, ra.claim_id, ra.paid, ra.denied,
        cl.used, cl.last_sub, cl.payer_id, cl.encounter_start::date AS encounter_date, cl.net,
-       (sf.claim_id IS NOT NULL) AS scrubbed, COALESCE(sf.rules, '{}') AS scrub_rules
+       -- scrubbed = a file holding this claim went through the scrubber (a clean claim has no finding row of its own)
+       (sf.claim_id IS NOT NULL OR EXISTS (SELECT 1 FROM claims c2 JOIN scrub_xml_findings f2 ON f2.raw_xml_id = c2.raw_xml_id
+                                           WHERE c2.facility_id = :fid AND c2.claim_id = ra.claim_id)) AS scrubbed,
+       COALESCE(sf.rules, '{}') AS scrub_rules
 FROM ra LEFT JOIN cl USING (claim_id) LEFT JOIN sf USING (claim_id)
 LEFT JOIN raw_xml_store rx ON rx.id = ra.raw_xml_id
 ORDER BY ra.remittance_date DESC, ra.ra_file_id, ra.claim_id

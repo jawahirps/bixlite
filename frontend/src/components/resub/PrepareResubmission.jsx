@@ -71,7 +71,9 @@ export default function PrepareResubmission({ claim, onClose }) {
 
   // combined comment follows the per-line justifications until edited by hand
   const autoComment = useMemo(
-    () => (draft ? draft.denied.map((d) => `Act ${d.activity_id} ${d.code} (${d.facts.denial_code}): ${just[d.activity_id] || ""}`).join(" | ") : ""),
+    // MNEC lines use the server's grouped evidence comment; other lines follow their per-line justification
+    () => (draft ? [draft.mnec?.comment || "", ...draft.denied.filter((d) => !(d.mnec && draft.mnec?.comment))
+      .map((d) => `Act ${d.activity_id} ${d.code} (${d.facts.denial_code}): ${just[d.activity_id] || ""}`)].filter(Boolean).join(" | ") : ""),
     [draft, just]
   );
   useEffect(() => {
@@ -179,7 +181,7 @@ export default function PrepareResubmission({ claim, onClose }) {
                 </div>
               </Section>
 
-              <Section title={`Denied lines (${draft.denied.length})`}>
+              <Section title={`Denied activities ${draft.denied.length}/${(f.activities || []).length}`}>
                 <div className="space-y-3">
                   {draft.denied.map((d) => (
                     <div key={d.activity_id} className="rounded-lg border border-sage-line p-3">
@@ -193,6 +195,10 @@ export default function PrepareResubmission({ claim, onClose }) {
                         <span className="rounded bg-red-50 px-1.5 py-0.5 font-semibold text-denied">{d.facts.denial_code}</span>{" "}
                         <span className="text-slate-600">{d.facts.denial_description}</span>
                       </div>
+                      {d.mnec && (d.mnec.weak
+                        ? <div className="mt-1 rounded bg-red-50 px-1.5 py-1 text-[11px] text-red-800">Weak: {d.mnec.why}</div>
+                        : <div className="mt-1 text-[11px] text-teal-800">Supported: {d.mnec.indication} ({d.mnec.dx}) — {d.mnec.guideline}</div>)}
+                      {d.mnec?.needs_reason && <div className="mt-1 text-[11px] text-amber-800">State {d.mnec.needs_reason}.</div>}
                       <div className="mt-2 grid grid-cols-3 gap-2">
                         {[["code", "Code", d.code], ["quantity", "Qty", ""], ["prior_authorization_id", "Approval no.", d.facts.prior_auth]].map(([k, l, ph]) => (
                           <label key={k} className="text-[11px] text-slate-400">

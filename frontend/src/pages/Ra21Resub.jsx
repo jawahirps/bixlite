@@ -21,12 +21,16 @@ function ClaimPanel({ facilityId, c, isAdmin, onFullEditor }) {
   const [gen, setGen] = useState(null);
   const [busy, setBusy] = useState("");
   const [up, setUp] = useState(null);
+  const [auths, setAuths] = useState({});   // activity_id -> prior approval number (AUTH denials)
 
   useEffect(() => {
     apiClient.get("/resub-prepare/draft", { params: { facility_id: facilityId, claim_id: c.claim_id } })
       .then((r) => {
         setDraft(r.data);
         const s = r.data.suggestion || {};
+        const a = {};
+        (r.data.denied || []).forEach((d) => { if (/^AUTH/i.test(d.facts?.denial_code || "")) a[d.activity_id] = d.facts?.prior_auth || ""; });
+        setAuths(a);
         setRtype(c.stage === "reconciliation" ? "reconciliation" : (s.resubmission_type === "correction" ? "correction" : "internal complaint"));
         setComment(c.scrubbed ? (s.comment || "") : "");
       })
@@ -36,7 +40,17 @@ function ClaimPanel({ facilityId, c, isAdmin, onFullEditor }) {
   async function build() {
     setBusy("build"); setGen(null); setUp(null);
     try {
-      const edits = { resubmission_type: rtype, comment, scope: rtype === "internal complaint" ? "denied_only" : "whole" };
+      const activities = {};
+      let text = comment.trim();
+      Object.entries(auths).forEach(([aid, no]) => {
+        const v = (no || "").trim();
+        if (!v) return;
+        activities[aid] = { prior_authorization_id: v };
+        const d = (draft.denied || []).find((x) => x.activity_id === aid);
+        if (!text.includes(v)) text += ` Prior approval ${v} for ${d?.code || "activity " + aid}.`;
+      });
+      setComment(text);
+      const edits = { resubmission_type: rtype, comment: text, activities, scope: rtype === "internal complaint" ? "denied_only" : "whole" };
       const r = await apiClient.post("/resub-prepare/xml", { facility_id: facilityId, claim_id: c.claim_id, disposition: "TEST", edits });
       setGen(r.data);
     } catch (e) { setGen({ errors: [e?.response?.data?.detail || "Build failed"] }); }
@@ -54,13 +68,38 @@ function ClaimPanel({ facilityId, c, isAdmin, onFullEditor }) {
   if (err) return <div className="p-3 text-xs text-red-700">{err}</div>;
   if (!draft) return <div className="p-3 text-xs text-slate-500">Preparing…</div>;
   const s = draft.suggestion || {};
+  const total = draft.facts?.activities?.length || 0;
+  const nDenied = (draft.denied || []).length;
+  const authMissing = Object.values(auths).some((v) => !(v || "").trim());
   return (
     <div className="space-y-3 bg-slate-50 p-4 text-sm">
+      <p className="text-xs font-semibold text-slate-700">Denied activities: {nDenied}/{total}
+        <span className="ml-2 font-normal text-slate-500">({total - nDenied} paid)</span></p>
+      {draft.mnec && (draft.mnec.weak > 0 || draft.mnec.findings?.length > 0 || draft.mnec.results?.length > 0 || draft.denied?.some((d) => d.mnec)) && (
+        <div className="rounded border border-slate-200 bg-white p-2 text-xs text-slate-700">
+          <b>MNEC evidence</b> · case sheet {draft.mnec.case_sheet ? "found" : "not available"}
+          {draft.mnec.findings?.length > 0 && <> · findings: {draft.mnec.findings.join(", ")}</>}
+          {draft.mnec.results?.length > 0 && <> · results: {draft.mnec.results.join(", ")}</>}
+          {draft.mnec.weak > 0 && <span className="ml-1 text-red-700">· {draft.mnec.weak} weak line{draft.mnec.weak > 1 ? "s" : ""}</span>}
+        </div>
+      )}
       <div className="grid gap-2 text-xs text-slate-600 md:grid-cols-2">
         {(draft.denied || []).map((d) => (
           <div key={d.activity_id} className="rounded border border-slate-200 bg-white p-2">
             <span className="font-mono">{d.code}</span> · {d.facts?.denial_code} — {d.facts?.denial_description || ""}
             <span className="float-right text-red-700">{fmt((Number(d.facts?.net) || 0) - (Number(d.facts?.paid) || 0))}</span>
+            {d.mnec && (d.mnec.weak
+              ? <div className="mt-1 rounded bg-red-50 px-1.5 py-1 text-[11px] text-red-800">Weak: {d.mnec.why}</div>
+              : <div className="mt-1 text-[11px] text-teal-800">Supported: {d.mnec.indication} ({d.mnec.dx}) — {d.mnec.guideline}</div>)}
+            {d.mnec?.needs_reason && <div className="mt-1 text-[11px] text-amber-800">State {d.mnec.needs_reason}.</div>}
+            {d.activity_id in auths && (
+              <label className="mt-2 block text-xs text-slate-700">Prior approval number (required for {d.facts?.denial_code})
+                <input value={auths[d.activity_id]} onChange={(e) => setAuths((a) => ({ ...a, [d.activity_id]: e.target.value }))}
+                  placeholder="Approval / e-auth number"
+                  className={`mt-1 w-full rounded border px-2 py-1 font-mono text-xs ${auths[d.activity_id]?.trim() ? "border-slate-300" : "border-red-400"}`} />
+                {d.facts?.prior_auth && <span className="text-slate-500">On the original claim: {d.facts.prior_auth}</span>}
+              </label>
+            )}
           </div>
         ))}
       </div>
@@ -89,7 +128,7 @@ function ClaimPanel({ facilityId, c, isAdmin, onFullEditor }) {
       {rtype === "correction" && <p className="text-xs text-amber-700">For a correction, change the codes in the full editor first.</p>}
       <div className="flex flex-wrap gap-2">
         <button type="button" className="gh-btn-secondary gh-btn-sm" onClick={onFullEditor}>Open full editor (codes, approval, attachment)</button>
-        <button type="button" className="gh-btn-primary gh-btn-sm" disabled={busy || !comment.trim()} onClick={build}>
+        <button type="button" className="gh-btn-primary gh-btn-sm" disabled={busy || !comment.trim() || authMissing} onClick={build}>
           {busy === "build" ? "Building…" : "Build TEST file"}</button>
         {gen?.id && !gen.errors?.length && isAdmin && (
           <button type="button" className="gh-btn-secondary gh-btn-sm" disabled={!!busy} onClick={upload}>

@@ -564,8 +564,17 @@ def build_draft(db: Session, facility_id: int, claim_id: str) -> Dict[str, Any]:
     overall = "correction" if "correction" in types else "internal complaint"
     if sn.get("resubmissions_used") == SN_MAX_RESUBMISSIONS - 1:
         overall = "reconciliation"   # SN 03/2019 3.8.2 / 3.10: the 2nd resubmission is the agreed reconciliation
-    comment = " | ".join(f"Act {d['activity_id']} {d['code']} ({d['facts']['denial_code']}): {d['suggestion']['justification']}"
-                         for d in denied)
+    # MNEC: rule-based evidence (guideline table + case sheet findings + abnormal results), grouped by indication
+    from . import mnec_evidence
+    case_sheet = db.execute(text("SELECT case_sheet FROM scrub_claims WHERE facility_id = :f AND claim_id = :c "
+                                 "AND COALESCE(case_sheet, '') <> '' ORDER BY id DESC LIMIT 1"),
+                            {"f": facility_id, "c": claim_id}).scalar()
+    mnec = mnec_evidence.evidence(denied, dx_list, case_sheet, claim_el, pdx, dos)
+    mnec["case_sheet"] = bool(case_sheet)
+    others = [d for d in denied if "mnec" not in d]
+    comment = " | ".join([mnec["comment"]] * bool(mnec["comment"]) +
+                         [f"Act {d['activity_id']} {d['code']} ({d['facts']['denial_code']}): {d['suggestion']['justification']}"
+                          for d in others])
     if not denied:
         warnings.append("No denied activity on the latest RA." if ra else "No remittance found for this claim.")
 
@@ -589,6 +598,7 @@ def build_draft(db: Session, facility_id: int, claim_id: str) -> Dict[str, Any]:
         "denied": denied,
         "history": history,
         "suggestion": {"resubmission_type": overall, "comment": comment[:COMMENT_MAX]},
+        "mnec": mnec,
         "warnings": warnings,
         "sn": sn,
         "_claim_xml": etree.tostring(claim_el, encoding="unicode"),
@@ -732,6 +742,17 @@ def build_xml(draft: Dict[str, Any], edits: Optional[Dict[str, Any]] = None, dis
         errors.append("A correction must resubmit all activities (paid and denied) — use the whole claim")
     if not comment:
         errors.append("Resubmission comment is required")
+    # AUTH denials: the approval number must be on the activity and quoted in the comment
+    if rtype != "reconciliation":
+        for d in draft.get("denied", []):
+            if not str((d.get("facts") or {}).get("denial_code") or "").upper().startswith("AUTH"):
+                continue
+            a = by_id.get(d["activity_id"])
+            auth = _txt(a, "PriorAuthorizationID") if a is not None else ""
+            if not auth:
+                errors.append(f"Activity {d['activity_id']} ({d['code']}) was denied for authorisation — enter the prior approval number")
+            elif auth not in comment:
+                errors.append(f"Mention approval {auth} for {d['code']} in the resubmission comment")
     rs = etree.Element("Resubmission")
     etree.SubElement(rs, "Type").text = rtype
     errors.extend(sn_errors(draft, rtype))

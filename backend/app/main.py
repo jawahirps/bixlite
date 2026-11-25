@@ -71,6 +71,42 @@ def on_startup() -> None:
     from .services import scrub_inbox
     scrub_inbox.start()                        # ~/Downloads/*to Scrub* → Claim scrubber sessions
     threading.Thread(target=_warm_caches, daemon=True).start()
+    threading.Thread(target=_nightly_scrub_catchup, daemon=True).start()
+
+
+def _nightly_scrub_catchup() -> None:
+    """Safety net: once a day (03:00 Dubai) scrub any ClaimSubmission file from the last 2 months, or holding a claim
+    with an RA in the last 21 days, that has no scrub findings — whichever way the file arrived."""
+    import time
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    from sqlalchemy import text
+    from .services.scrub_xml_service import ScrubXmlService
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("scrub_catchup", Path(__file__).parent.parent / "scripts" / "scrub_catchup.py")
+    while True:
+        now = datetime.now(ZoneInfo("Asia/Dubai"))
+        nxt = now.replace(hour=3, minute=0, second=0, microsecond=0)
+        if nxt <= now:
+            nxt += timedelta(days=1)
+        time.sleep((nxt - now).total_seconds())
+        db = SessionLocal()
+        try:
+            mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+            rows = db.execute(text(mod.SQL), {"m": 2}).all()
+            svc, ok = ScrubXmlService(db), 0
+            for rid, fid in rows:
+                try:
+                    xml = db.execute(text("SELECT xml_content FROM raw_xml_store WHERE id = :i"), {"i": rid}).scalar() or ""
+                    svc.run_for_raw(raw_xml_id=rid, xml_bytes=xml.encode("utf-8"), facility_id=fid)
+                    db.commit(); ok += 1
+                except Exception:
+                    db.rollback()
+            print(f"[nightly scrub] {ok}/{len(rows)} unscrubbed files scrubbed")
+        except Exception as e:   # never take the app down
+            print(f"nightly scrub failed: {e}")
+        finally:
+            db.close()
 
 
 def _warm_caches() -> None:

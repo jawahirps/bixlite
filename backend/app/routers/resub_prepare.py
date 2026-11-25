@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from ..database import engine, get_db
 from ..models import User
-from ..security import get_current_user
+from ..security import resolve_facility, check_facility, allowed_facility_ids, is_clinic_user, get_current_user
 from ..services import resub_prepare as rp
 
 router = APIRouter(prefix="/api/resub-prepare", tags=["resubmission"])
@@ -35,8 +35,7 @@ def _ready():
 
 
 def _check_facility(user: User, facility_id: int) -> None:
-    if user.role != "admin" and user.facility_id is not None and user.facility_id != facility_id:
-        raise HTTPException(status_code=403, detail="Not allowed for this facility")
+    check_facility(None, user, facility_id)
 
 
 def _draft(db: Session, facility_id: int, claim_id: str) -> Dict[str, Any]:

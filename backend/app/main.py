@@ -7,7 +7,8 @@ Run with:
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
+from .security import facility_guard
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -210,27 +211,28 @@ def health_check():
 
 app.add_middleware(GZipMiddleware, minimum_size=50_000)  # large worklist / report payloads
 
+_GUARD = [Depends(facility_guard)]   # RBAC: facility scope + viewer read-only on every data router
 app.include_router(auth.router)
-app.include_router(clinical_profiles.router)
-app.include_router(dha_sync.router)
-app.include_router(analytics.router)
-app.include_router(facilities.router)
-app.include_router(reports.router)
+app.include_router(clinical_profiles.router, dependencies=_GUARD)
+app.include_router(dha_sync.router, dependencies=_GUARD)
+app.include_router(analytics.router, dependencies=_GUARD)
+app.include_router(facilities.router, dependencies=_GUARD)
+app.include_router(reports.router, dependencies=_GUARD)
 app.include_router(portal.router, prefix="/api")  # /api/portal/* — no auth middleware
-app.include_router(receipts.router)               # /api/receipts/* — JWT-protected
-app.include_router(scrub.router)                  # /api/scrub/*   — JWT-protected
-app.include_router(calibration.router)            # /api/calibration/* — JWT-protected
+app.include_router(receipts.router, dependencies=_GUARD)               # /api/receipts/* — JWT-protected
+app.include_router(scrub.router, dependencies=_GUARD)                  # /api/scrub/*   — JWT-protected
+app.include_router(calibration.router, dependencies=_GUARD)            # /api/calibration/* — JWT-protected
 from .routers import resub_prepare as resub_prepare_router  # noqa: E402
-app.include_router(resub_prepare_router.router)   # /api/resub-prepare/* — JWT-protected
+app.include_router(resub_prepare_router.router, dependencies=_GUARD)   # /api/resub-prepare/* — JWT-protected
 from .routers import rule_catalog as rule_catalog_router  # noqa: E402
-app.include_router(rule_catalog_router.router)    # /api/rule-catalog — admin only
-app.include_router(resub.router)                  # /api/resub/* — JWT-protected
-app.include_router(doc_review.router)             # /api/docreview/* — JWT-protected
-app.include_router(dashboard.router)              # /api/dashboard/* — JWT-protected
-app.include_router(bulk_resub.router)             # /api/resub/bulk/* — JWT-protected
-app.include_router(turnaround.router)             # /api/turnaround/* — JWT-protected
-app.include_router(denial_trends.router)          # /api/denial-trends/* — JWT-protected
-app.include_router(alerts.router)                 # /api/alerts — JWT-protected
+app.include_router(rule_catalog_router.router, dependencies=_GUARD)    # /api/rule-catalog — admin only
+app.include_router(resub.router, dependencies=_GUARD)                  # /api/resub/* — JWT-protected
+app.include_router(doc_review.router, dependencies=_GUARD)             # /api/docreview/* — JWT-protected
+app.include_router(dashboard.router, dependencies=_GUARD)              # /api/dashboard/* — JWT-protected
+app.include_router(bulk_resub.router, dependencies=_GUARD)             # /api/resub/bulk/* — JWT-protected
+app.include_router(turnaround.router, dependencies=_GUARD)             # /api/turnaround/* — JWT-protected
+app.include_router(denial_trends.router, dependencies=_GUARD)          # /api/denial-trends/* — JWT-protected
+app.include_router(alerts.router, dependencies=_GUARD)                 # /api/alerts — JWT-protected
 
 
 @app.on_event("startup")
@@ -239,7 +241,7 @@ def _warm_alerts():
     from .routers import dashboard as _dash
     _dash.warm()
 
-app.include_router(packs.router)                  # /api/packs/* — JWT-protected
+app.include_router(packs.router, dependencies=_GUARD)                  # /api/packs/* — JWT-protected
 
 # ── Serve React frontend (built with `npm run build`) ────────────────────────
 # Routes are always registered so they survive uvicorn --reload cycles where

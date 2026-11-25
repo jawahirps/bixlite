@@ -30,7 +30,7 @@ from ..services.payer_names import payer_name
 from ..services.denial_codes import denial_description
 from ..database import get_db
 from ..models import User
-from ..security import get_current_user
+from ..security import resolve_facility, check_facility, allowed_facility_ids, is_clinic_user, get_current_user
 
 router = APIRouter(prefix="/api/denial-trends", tags=["denial-trends"])
 
@@ -82,11 +82,7 @@ def _rules_for(code: str) -> list[dict]:
 
 
 def _scope(user: User, facility_id: Optional[int]) -> Optional[int]:
-    if user.role == "admin":
-        return facility_id
-    if not user.facility_id:
-        raise HTTPException(403, "No facility assigned")
-    return user.facility_id
+    return resolve_facility(None, user, facility_id)
 
 
 def _month_start(months_back: int) -> date:

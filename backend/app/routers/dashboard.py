@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import User
-from ..security import get_current_user
+from ..security import resolve_facility, check_facility, allowed_facility_ids, is_clinic_user, get_current_user
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 TTL = 3600
@@ -64,10 +64,7 @@ AMOUNTS = ("net", "paid", "denied", "awaiting", "overdue")
 @router.get("/cycle")
 def claim_cycle(facility_id: Optional[int] = None, date_from: Optional[date] = None, date_to: Optional[date] = None,
                 db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    if user.role != "admin" and user.facility_id is not None:
-        if facility_id not in (None, user.facility_id):
-            raise HTTPException(403, "Not your facility")
-        facility_id = user.facility_id
+    facility_id = resolve_facility(db, user, facility_id)
     d1 = date_to or date.today()
     d0 = date_from or (d1.replace(day=1) - timedelta(days=335)).replace(day=1)
     if d0 > d1:

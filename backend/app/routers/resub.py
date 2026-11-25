@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import Facility, ResubPlaybook, User
-from ..security import get_current_user
+from ..security import resolve_facility, check_facility, allowed_facility_ids, is_clinic_user, get_current_user
 from ..services import resub_ra_workbook as rawb
 from ..services import resub_worklist as rw
 
@@ -38,12 +38,11 @@ TEXT_FIELDS = ["action", "facility_request", "documents", "draft_comment", "reco
 
 
 def _is_facility_user(user: User) -> bool:
-    return user.role != "admin" and user.facility_id is not None
+    return is_clinic_user(user)   # clinic-side login sees the facility view
 
 
 def _check_facility(user: User, facility_id: int) -> None:
-    if _is_facility_user(user) and user.facility_id != facility_id:
-        raise HTTPException(status_code=403, detail="Not allowed for this facility")
+    check_facility(None, user, facility_id)
 
 
 @router.get("/worklist")

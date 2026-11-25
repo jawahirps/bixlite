@@ -10,6 +10,7 @@ import apiClient from "../api/client";
 import DenialDrill from "./DenialDrill";
 import { useAuth } from "../context/AuthContext";
 import { readFacility, saveFacility } from "../utils/facility";
+import useFacilityDefault from "../hooks/useFacilityDefault";
 
 const TrendChart = lazy(() =>
   import("recharts").then(({ BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer }) => ({
@@ -142,6 +143,7 @@ export default function DenialTrends() {
   const [params] = useSearchParams();
   // a link (e.g. from Facility alerts) can name the facility: ?facility_id=7; otherwise the last one used
   const [facilityId, setFacilityId] = useState(() => (isAdmin ? (params.get("facility_id") ?? readFacility("")) : String(user?.facility_id || "")));
+  const isSuperAdmin = useFacilityDefault(facilities, facilityId, setFacilityId);
   const [payer, setPayer] = useState(() => params.get("payer") || "");
   const [months, setMonths] = useState(6);
   const [month, setMonth] = useState(() => params.get("month") || "");
@@ -253,7 +255,7 @@ export default function DenialTrends() {
               <span className="gh-label mb-1 block">Facility</span>
               <select className="gh-input w-full" value={facilityId}
                 onChange={e => { setFacilityId(e.target.value); saveFacility(e.target.value); setPayer(""); }}>
-                <option value="">All facilities</option>
+                {isSuperAdmin && <option value="">All facilities</option>}
                 {facilities.map(f => <option key={f.id} value={f.id}>{f.facility_name}</option>)}
               </select>
             </label>

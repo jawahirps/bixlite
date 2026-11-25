@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import apiClient from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import { readFacility, saveFacility } from "../utils/facility";
+import useFacilityDefault from "../hooks/useFacilityDefault";
 
 const fmtMoney = (n) => (n == null ? "—" : Number(n).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
 const fmtNum = (n) => (n == null ? "—" : Number(n).toLocaleString("en-GB"));
@@ -38,6 +39,7 @@ export default function Turnaround() {
   const [params] = useSearchParams();
   // a link (e.g. from Facility alerts) can name the facility: ?facility_id=7; otherwise the last one used
   const [facilityId, setFacilityId] = useState(() => (isAdmin ? (params.get("facility_id") ?? readFacility("")) : String(user?.facility_id || "")));
+  const isSuperAdmin = useFacilityDefault(facilities, facilityId, setFacilityId);
   const [months, setMonths] = useState(6);
   const [days, setDays] = useState(45);
   const [daysInput, setDaysInput] = useState("45");
@@ -129,7 +131,7 @@ export default function Turnaround() {
           <label className="flex flex-col gap-1 text-xs text-slate-600">
             Facility
             <select className="gh-input min-w-[240px]" value={facilityId} onChange={(e) => { setFacilityId(e.target.value); setPayer(""); }}>
-              <option value="">All facilities</option>
+              {isSuperAdmin && <option value="">All facilities</option>}
               {facilities.map((f) => <option key={f.id} value={f.id}>{f.facility_name}</option>)}
             </select>
           </label>

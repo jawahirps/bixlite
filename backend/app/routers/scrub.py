@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import ExclusionCode, ScrubClaim, ScrubResult, ScrubSession, ScrubXmlFinding, User
-from ..security import get_current_user
+from ..security import get_current_user, allowed_facility_ids, require_roles
 from ..services import presub_queries
 from ..services.scrub_extractor import ScrubExcelExtractor, ScrubXmlExtractor
 from ..services.scrub_rules import ScrubRuleEngine
@@ -286,8 +286,11 @@ def list_sessions(
 ):
     """List scrub sessions, newest first.  Optionally filter by facility."""
     q = db.query(ScrubSession).order_by(ScrubSession.uploaded_at.desc())
+    allowed = allowed_facility_ids(db, current_user)
     if facility_id is not None:
         q = q.filter(ScrubSession.facility_id == facility_id)
+    elif allowed is not None:
+        q = q.filter(ScrubSession.facility_id.in_(allowed or [-1]))
     return q.limit(limit).all()
 
 
@@ -699,7 +702,7 @@ def list_exclusions(
 def add_exclusion(
     body: ExclusionIn,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_roles("admin")),
 ):
     if body.exclusion_type not in (1, 2):
         raise HTTPException(status_code=400, detail="exclusion_type must be 1 or 2.")
@@ -740,7 +743,7 @@ def add_exclusion(
 def delete_exclusion(
     code_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_roles("admin")),
 ):
     ec = db.get(ExclusionCode, code_id)
     if ec is None:

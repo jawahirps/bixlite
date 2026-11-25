@@ -33,7 +33,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import Facility, User
-from ..security import get_current_user
+from ..security import get_current_user, allowed_facility_ids
 from ..services import bulk_resub as br
 from ..services import recon_resub
 
@@ -42,8 +42,9 @@ ACTIVE_STATES = ("Queued", "Fetching", "Matching")
 
 
 def _allowed(db: Session, user: User) -> List[int]:
-    if user.role != "admin" and user.facility_id is not None:
-        return [user.facility_id]
+    allowed = allowed_facility_ids(db, user)
+    if allowed is not None:
+        return sorted(allowed)
     return [f.id for f in db.query(Facility).filter(Facility.is_active.is_(True)).all() if f.facility_code != "GHAF-001"]
 
 

@@ -13,6 +13,7 @@ import BulkResub from "./BulkResub";
 import Ra21Resub from "./Ra21Resub";
 import { useAuth } from "../context/AuthContext";
 import { readFacility, saveFacility } from "../utils/facility";
+import useFacilityDefault from "../hooks/useFacilityDefault";
 
 const PRIORITY_STYLE = {
   P1: "bg-orange-100 text-orange-800 font-bold",
@@ -126,6 +127,7 @@ export default function ResubWorklist() {
     const saved = readFacility();
     return user?.facility_id || (saved ? Number(saved) : 13);
   });
+  const isSuperAdmin = useFacilityDefault(facilities, facilityId, setFacilityId);
   const [data, setData] = useState(null);
   const [playbook, setPlaybook] = useState([]);
   const [tab, setTab] = useState("action");

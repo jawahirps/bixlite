@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import Claim, ClaimActivity, ClinicalProfile, Facility, LoginLog, RawXmlStore, Remittance, User
 from ..schemas import DashboardSummary, MetabaseEmbedResponse
-from ..security import get_current_user
+from ..security import resolve_facility, check_facility, allowed_facility_ids, is_clinic_user, get_current_user
 from ..services.metabase import build_embed_url, list_dashboard_keys
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
@@ -53,7 +53,16 @@ def get_analytics_filters(
     department: Optional[str] = None,
     date_from: Optional[date] = None,
     date_to: Optional[date] = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ) -> AnalyticsFilters:
+    allowed = allowed_facility_ids(db, user)
+    if allowed is not None:   # RBAC: never "all of BIX Lite" for non-admins
+        ids = [int(x) for x in (facility_ids or "").split(",") if x.strip().isdigit()]
+        for fid in ids + ([facility_id] if facility_id else []):
+            check_facility(db, user, fid)
+        if not facility_id and not ids:
+            facility_ids = ",".join(str(x) for x in sorted(allowed)) or "-1"
     return AnalyticsFilters(
         facility_id=facility_id,
         facility_ids=facility_ids,
@@ -134,10 +143,7 @@ def dashboard_summary(
 ):
     # Admins see all facilities unless they explicitly pass facility_id.
     # Non-admin users are always scoped to their own facility.
-    if current_user.role == "admin":
-        facility_scope = facility_id  # None = no filter = all facilities
-    else:
-        facility_scope = facility_id or current_user.facility_id
+    facility_scope = resolve_facility(db, current_user, facility_id)  # Super Admin: None = all facilities
 
     claims_q = db.query(Claim)
     remits_q = db.query(Remittance)
@@ -202,7 +208,7 @@ def embed_url(
     parameter named `facility_id`, which should be wired to a SQL filter
     on the underlying questions.
     """
-    facility_scope = facility_id if (facility_id and current_user.role == "admin") else current_user.facility_id
+    facility_scope = resolve_facility(None, current_user, facility_id)
 
     params = {}
     if facility_scope is not None:
@@ -251,6 +257,7 @@ def analytics_filter_options(
     facilities = [
         {"id": fac.id, "code": fac.facility_code, "name": fac.facility_name}
         for fac in db.query(Facility).filter(Facility.is_active.is_(True)).order_by(Facility.facility_name).all()
+        if allowed_facility_ids(db, _) is None or fac.id in allowed_facility_ids(db, _)
     ]
     # receiver/payer/encounter type/department lists scan every claim (~11 s) and only change with the nightly
     # fetch, so they are cached for an hour; facilities stay live

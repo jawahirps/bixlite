@@ -38,7 +38,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import User
-from ..security import get_current_user
+from ..security import resolve_facility, check_facility, allowed_facility_ids, is_clinic_user, get_current_user
 
 router = APIRouter(prefix="/api/alerts", tags=["alerts"])
 
@@ -1090,12 +1090,11 @@ def list_alerts(
     hit = _get(db, refresh)
     data = hit[1]
     items, baselines = data["items"], data["baselines"]
-    if user.role != "admin":
-        if user.facility_id is None:
-            raise HTTPException(403, "No facility assigned")
-        items = [a for a in items if a["facility_id"] == user.facility_id
-                 or (a["facility_id"] is None and user.facility_id in a.get("facilities", []))]
-        baselines = [b for b in baselines if b["facility_id"] == user.facility_id]
+    allowed = allowed_facility_ids(db, user)
+    if allowed is not None:
+        items = [a for a in items if a["facility_id"] in allowed
+                 or (a["facility_id"] is None and allowed & set(a.get("facilities", [])))]
+        baselines = [b for b in baselines if b["facility_id"] in allowed]
     return {"generated_at": datetime.fromtimestamp(hit[0]).astimezone(), "count": len(items),
             "high": sum(1 for a in items if a["severity"] == "high"),
             "items": items, "baselines": baselines,
@@ -1112,8 +1111,7 @@ def alert_lines_xlsx(
     from fastapi.responses import StreamingResponse
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill
-    if user.role != "admin" and user.facility_id is not None:
-        facility_id = user.facility_id
+    facility_id = resolve_facility(db, user, facility_id)
     today = date.today()
     if days < 30:
         days = 30
@@ -1221,9 +1219,7 @@ def _clinician_lines(db, facility_id: int, clinician: str, kind: str):
 
 
 def _clin_scope(user, facility_id):
-    if user.role != "admin":
-        if user.facility_id is None or user.facility_id != facility_id:
-            raise HTTPException(403, "Not your facility")
+    resolve_facility(None, user, facility_id)
 
 
 @router.get("/clinician-lines")

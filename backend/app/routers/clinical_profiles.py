@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import ClinicalProfile, User
 from ..schemas import ClinicalProfileCreate, ClinicalProfileOut, ClinicalProfileUpdate
-from ..security import get_current_user, require_roles
+from ..security import resolve_facility, check_facility, allowed_facility_ids, is_clinic_user, get_current_user, require_roles
 
 router = APIRouter(prefix="/api/clinical-profiles", tags=["clinical-profiles"])
 
@@ -32,7 +32,7 @@ def list_clinical_profiles(
 ):
     query = db.query(ClinicalProfile)
 
-    facility_scope = facility_id or current_user.facility_id
+    facility_scope = resolve_facility(db, current_user, facility_id)
     if facility_scope is not None:
         query = query.filter(ClinicalProfile.facility_id == facility_scope)
 

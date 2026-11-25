@@ -46,6 +46,7 @@ class Facility(Base):
     riayati_username : Mapped[Optional[str]] = mapped_column(String(100))
     riayati_password : Mapped[Optional[str]] = mapped_column(String(100))
     is_active        : Mapped[bool]          = mapped_column(Boolean, nullable=False, default=True)
+    group_id         : Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("facility_groups.id", ondelete="SET NULL"))
     created_at       : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now())
     updated_at       : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now(), onupdate=func.now())
 
@@ -135,6 +136,7 @@ class User(Base):
     last_login_at    : Mapped[Optional[datetime]] = mapped_column(TIMESTAMPTZ)
     totp_secret      : Mapped[Optional[str]] = mapped_column(String(64))   # authenticator-app secret, set during setup
     totp_enabled     : Mapped[bool]          = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    expires_at       : Mapped[Optional[date]]= mapped_column(Date)   # access ends after this day (Dubai date); NULL = no limit
     created_at      : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now())
     updated_at       : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now(), onupdate=func.now())
 
@@ -143,13 +145,39 @@ class User(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "role IN ('admin','billing_manager','clinician','staff')",
+            "role IN ('admin','group_admin','facility_admin','staff','viewer','billing_manager','clinician')",
             name="ck_user_role",
         ),
     )
 
     def __repr__(self) -> str:
         return f"<User {self.email} ({self.role})>"
+
+
+# ---------------------------------------------------------------------------
+# Facility access (RBAC): groups of facilities and which facilities/groups a user may see
+# ---------------------------------------------------------------------------
+class FacilityGroup(Base):
+    __tablename__ = "facility_groups"
+
+    id               : Mapped[int]           = mapped_column(Integer, primary_key=True)
+    name             : Mapped[str]           = mapped_column(String(100), nullable=False, unique=True)
+    created_at       : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now())
+
+
+class UserFacilityAccess(Base):
+    """One row per facility or per group a user may see (exactly one of the two is set)."""
+    __tablename__ = "user_facility_access"
+
+    id               : Mapped[int]           = mapped_column(Integer, primary_key=True)
+    user_id          : Mapped[int]           = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    facility_id      : Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("facilities.id", ondelete="CASCADE"))
+    group_id         : Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("facility_groups.id", ondelete="CASCADE"))
+    created_at       : Mapped[datetime]      = mapped_column(TIMESTAMPTZ, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("(facility_id IS NULL) <> (group_id IS NULL)", name="ck_ufa_one"),
+    )
 
 
 # ---------------------------------------------------------------------------

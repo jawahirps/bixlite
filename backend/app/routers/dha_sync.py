@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db, SessionLocal
 from ..models import Facility, FetchLog, RawXmlStore, ScrubXmlFinding, User
 from ..schemas import DhaFetchRequest, DhaSyncTriggerResponse, DhaUploadResponse, FetchLogOut, RawXmlStoreOut
-from ..security import get_current_user, require_roles
+from ..security import resolve_facility, check_facility, allowed_facility_ids, is_clinic_user, get_current_user, require_roles
 from ..services.dhpo_parser import DHPOXmlParser
 from ..services.fetch_service import DHASyncService, DemoFacilityError
 from ..services.riayati_service import RiayatiSyncService, RiayatiInactiveFacilityError
@@ -118,15 +118,9 @@ async def upload_xml(
     )
 
 
-def _own_facility(user: User, facility_id: Optional[int]) -> Optional[int]:
+def _own_facility(db: Session, user: User, facility_id: Optional[int]) -> Optional[int]:
     """Non-admins may only act on their own facility (403 otherwise)."""
-    if user.role != "admin":
-        if user.facility_id is None:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No facility assigned to this user")
-        if facility_id is not None and facility_id != user.facility_id:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your facility")
-        return user.facility_id
-    return facility_id
+    return resolve_facility(db, user, facility_id)
 
 
 @router.post("/trigger", response_model=DhaSyncTriggerResponse)
@@ -136,7 +130,7 @@ def trigger_sync(
     current_user: User = Depends(require_roles("admin", "billing_manager")),
 ):
     """Run the DHA XML Sync pipeline over all pending raw XML records."""
-    facility_scope = _own_facility(current_user, facility_id)
+    facility_scope = _own_facility(db, current_user, facility_id)
 
     fetch_log = FetchLog(
         facility_id=facility_scope or 0,
@@ -197,7 +191,7 @@ def fetch_from_eclaimlink(
     runs the DHA XML Sync parser over everything pending. See
     app/services/fetch_service.py to wire up the real DHPO SOAP client.
     """
-    facility_scope = _own_facility(current_user, payload.facility_id)
+    facility_scope = _own_facility(db, current_user, payload.facility_id)
     if facility_scope is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="facility_id is required for eClaimLink fetch")
 
@@ -230,7 +224,7 @@ def reparse_all(
     """Reset parsed/quarantined records back to pending so they are re-parsed on next trigger."""
     from ..models import RawXmlStore as RXS
     query = db.query(RXS).filter(RXS.parse_status.in_(["parsed", "quarantined"]))
-    facility_scope = facility_id or current_user.facility_id
+    facility_scope = resolve_facility(db, current_user, facility_id)
     if facility_scope is not None:
         query = query.filter(RXS.facility_id == facility_scope)
     if xml_type:
@@ -262,7 +256,7 @@ def reparse_and_trigger(
     """
     sa_text = text  # alias for readability within this function
 
-    facility_scope = facility_id or current_user.facility_id
+    facility_scope = resolve_facility(db, current_user, facility_id)
 
     # ── 1. Determine which raw_xml_store IDs to target ───────────────────────
     target_ids: Optional[list] = None  # None = all (no date filter)
@@ -387,7 +381,7 @@ def list_raw_xml(
 ):
     query = db.query(RawXmlStore)
 
-    facility_scope = facility_id or current_user.facility_id
+    facility_scope = resolve_facility(db, current_user, facility_id)
     if facility_scope is not None:
         query = query.filter(RawXmlStore.facility_id == facility_scope)
     if parse_status:
@@ -420,7 +414,7 @@ def fetch_from_riayati(
     On success, returns the FetchLog row (same schema as /fetch).
     On inactive facility, returns HTTP 422 with an actionable message.
     """
-    facility_scope = payload.facility_id or current_user.facility_id
+    facility_scope = resolve_facility(db, current_user, payload.facility_id)
     if facility_scope is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -471,12 +465,13 @@ def peek_raw_xml(
     record_id: int,
     chars: int = 800,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    user_: User = Depends(get_current_user),
 ):
     """Return the first N characters of a staged XML record — for debugging parser issues."""
     record = db.get(RawXmlStore, record_id)
     if not record:
         raise HTTPException(status_code=404, detail="Record not found")
+    check_facility(db, user_, record.facility_id)
     return {"id": record.id, "xml_type": record.xml_type,
             "source_filename": record.source_filename,
             "preview": (record.xml_content or "")[:chars]}
@@ -492,11 +487,12 @@ def list_fetch_logs(
     query = db.query(FetchLog)
 
     # Admins with no explicit facility_id see all jobs; non-admins always see only their facility
+    allowed = allowed_facility_ids(db, current_user)
     if facility_id is not None:
+        check_facility(db, current_user, facility_id)
         query = query.filter(FetchLog.facility_id == facility_id)
-    elif current_user.role != "admin":
-        if current_user.facility_id is not None:
-            query = query.filter(FetchLog.facility_id == current_user.facility_id)
+    elif allowed is not None:
+        query = query.filter(FetchLog.facility_id.in_(allowed or [-1]))
 
     return query.order_by(FetchLog.started_at.desc()).limit(min(limit, 200)).all()
 
@@ -514,9 +510,10 @@ def fetch_health(
     """
     params = {"stale": stale_hours}
     fac_filter = ""
-    if current_user.role != "admin" and current_user.facility_id is not None:
-        fac_filter = "AND f.facility_id = :fid"
-        params["fid"] = current_user.facility_id
+    allowed = allowed_facility_ids(db, current_user)
+    if allowed is not None:
+        fac_filter = "AND f.facility_id = ANY(:fids)"
+        params["fids"] = sorted(allowed) or [-1]
     rows = db.execute(text(f"""
         WITH f AS (
             SELECT facility_id,
@@ -668,12 +665,13 @@ def get_raw_xml_findings(
     record_id: int,
     severity: Optional[str] = None,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    user_: User = Depends(get_current_user),
 ):
     """Return XML scrub findings for a raw_xml_store ClaimSubmission record (Layer 2)."""
     record = db.get(RawXmlStore, record_id)
     if not record:
         raise HTTPException(status_code=404, detail="Record not found")
+    check_facility(db, user_, record.facility_id)
 
     q = db.query(ScrubXmlFinding).filter(ScrubXmlFinding.raw_xml_id == record_id)
     if severity:
@@ -697,12 +695,13 @@ def get_raw_xml_findings(
 def get_raw_xml_scrub_summary(
     record_id: int,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    user_: User = Depends(get_current_user),
 ):
     """Return a one-line scrub summary for a raw_xml_store ClaimSubmission record."""
     record = db.get(RawXmlStore, record_id)
     if not record:
         raise HTTPException(status_code=404, detail="Record not found")
+    check_facility(db, user_, record.facility_id)
 
     # First finding row has session-level risk fields
     first = (
@@ -881,7 +880,7 @@ def _encounter_dates_for_raw(db: Session, raw_xml_id: int) -> dict:
 def export_single_excel(
     record_id: int,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    user_: User = Depends(get_current_user),
 ):
     """Download scrub findings for one ClaimSubmission file as an Excel workbook."""
     import io
@@ -890,6 +889,7 @@ def export_single_excel(
     record = db.get(RawXmlStore, record_id)
     if not record:
         raise HTTPException(status_code=404, detail="Record not found")
+    check_facility(db, user_, record.facility_id)
 
     findings = (
         db.query(ScrubXmlFinding)
@@ -927,7 +927,7 @@ class BulkExportRequest(BaseModel):
 def export_bulk_excel(
     payload: BulkExportRequest,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    user_: User = Depends(get_current_user),
 ):
     """Download scrub findings for multiple ClaimSubmission files as one Excel workbook."""
     import io
@@ -944,6 +944,8 @@ def export_bulk_excel(
         .order_by(RawXmlStore.id)
         .all()
     )
+    for r in records:
+        check_facility(db, user_, r.facility_id)
     rec_map = {r.id: r for r in records}
 
     rows_by_file = []

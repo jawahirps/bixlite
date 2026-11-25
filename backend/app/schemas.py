@@ -30,6 +30,10 @@ class UserOut(BaseModel):
     is_active: bool
     last_login_at: Optional[datetime] = None
     totp_enabled: bool = False
+    expires_at: Optional[date] = None
+    facility_ids: List[int] = []
+    group_ids: List[int] = []
+    pages: Optional[List[str]] = None
 
 
 class TotpSetupOut(BaseModel):
@@ -43,11 +47,34 @@ class TotpCode(BaseModel):
 
 
 class UserCreate(BaseModel):
-    email: EmailStr
+    email: str = Field(min_length=3, max_length=255)   # email address, or a plain username (e.g. sanlucas.viewer)
     full_name: str
     password: str = Field(min_length=8)
     role: str = "staff"
     facility_id: Optional[int] = None
+    expires_at: Optional[date] = None
+
+
+class UserUpdate(BaseModel):
+    expires_at: Optional[date] = None
+    full_name: Optional[str] = None
+    role: Optional[str] = None
+    is_active: Optional[bool] = None
+    facility_id: Optional[int] = None
+
+
+class UserAccess(BaseModel):
+    facility_ids: List[int] = []
+    group_ids: List[int] = []
+
+
+class FacilityGroupIn(BaseModel):
+    name: str = Field(min_length=2, max_length=100)
+    facility_ids: List[int] = []
+
+
+class PasswordReset(BaseModel):
+    password: str = Field(min_length=8)
 
 
 class LoginLogOut(BaseModel):

@@ -11,6 +11,7 @@ import { useState, useEffect, useCallback } from "react";
 import api from "../api/client";
 import { readFacility, saveFacility } from "../utils/facility";
 import { toast, confirmDialog } from "../utils/notify";
+import useFacilityDefault from "../hooks/useFacilityDefault";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -108,6 +109,7 @@ function UploadPanel({ onUploaded }) {
   const [facilityId, setFacilityIdState] = useState(() => readFacility());
   const setFacilityId = (id) => { setFacilityIdState(id); saveFacility(id); };
   const [facilities, setFacilities] = useState([]);
+  const isSuperAdmin = useFacilityDefault(facilities, facilityId, setFacilityId);
   const [files, setFiles] = useState([]);
   const [progress, setProgress] = useState("");
   const [busy, setBusy] = useState(false);

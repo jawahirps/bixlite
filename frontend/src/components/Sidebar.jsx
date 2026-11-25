@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
 import apiClient from "../api/client";
 import BixLogo from "./BixLogo";
+import { useAuth } from "../context/AuthContext";
 
 // 16px outline icons, 1.5px stroke, currentColor
 const Icon = ({ d }) => (
@@ -36,8 +37,12 @@ const ICONS = {
   jobs: ["M21 12a9 9 0 1 1-3-6.7", "M21 4v5h-5", "M12 8v4l3 2"],
   settings: ["M4 21v-7", "M4 10V3", "M12 21v-9", "M12 8V3", "M20 21v-5", "M20 12V3", "M2 14h4", "M10 8h4", "M18 16h4"],
   shield: ["M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z", "M9 12l2 2 4-4"],
+  users: ["M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z", "M2 21a7 7 0 0 1 14 0", "M16 3.1a4 4 0 0 1 0 7.8", "M18 14a6 6 0 0 1 4 7"],
   login: ["M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4", "M10 17l5-5-5-5", "M15 12H3"],
 };
+
+// RBAC: who sees which page. Viewer = reports and dashboards only (see the facility access spec).
+const WORK = ["admin", "billing_manager", "staff", "group_admin", "facility_admin"];
 
 export const NAV_SECTIONS = [
   {
@@ -50,13 +55,13 @@ export const NAV_SECTIONS = [
   {
     label: "Claim scrubbing & analysis",
     items: [
-      { to: "/scrubber", label: "Claim scrubber", icon: "scrubber" },
-      { to: "/doc-review", label: "Documentation review", icon: "docreview" },
-      { to: "/dha-sync", label: "XML scrub monitor", icon: "monitor" },
-      { to: "/calibration", label: "Denial intelligence", icon: "denial" },
-      { to: "/denial-trends", label: "Denial trends", icon: "analytics" },
-      { to: "/resub-worklist", label: "Resubmission worklist", icon: "resub" },
-      { to: "/scrub-rules", label: "Scrub rules & references", icon: "docreview" },
+      { to: "/scrubber", label: "Claim scrubber", icon: "scrubber", roles: WORK },
+      { to: "/doc-review", label: "Documentation review", icon: "docreview", roles: WORK },
+      { to: "/dha-sync", label: "XML scrub monitor", icon: "monitor", roles: WORK },
+      { to: "/calibration", label: "Denial intelligence", icon: "denial", roles: WORK },
+      { to: "/denial-trends", label: "Denial trends", icon: "analytics", roles: WORK },
+      { to: "/resub-worklist", label: "Resubmission worklist", icon: "resub", roles: WORK },
+      { to: "/scrub-rules", label: "Scrub rules & references", icon: "docreview", roles: ["admin"] },
     ],
   },
   {
@@ -65,19 +70,37 @@ export const NAV_SECTIONS = [
       { to: "/analytics", label: "Analytics & reports", icon: "analytics" },
       { to: "/turnaround", label: "Payer turnaround", icon: "jobs" },
       { to: "/report-packs", label: "Client report packs", icon: "packs" },
-      { to: "/clinical-profiles", label: "Clinical profiles", icon: "profiles" },
+      { to: "/clinical-profiles", label: "Clinical profiles", icon: "profiles", roles: WORK },
     ],
   },
   {
     label: "Data & administration",
     items: [
-      { to: "/jobs", label: "Data sync & jobs", icon: "jobs" },
-      { to: "/facility-settings", label: "Facility settings", icon: "settings" },
-      { to: "/login-activity", label: "Login activity", icon: "login" },
-      { to: "/account-security", label: "Authenticator app", icon: "shield" },
+      { to: "/jobs", label: "Data sync & jobs", icon: "jobs", roles: ["admin", "billing_manager"] },
+      { to: "/facility-settings", label: "Facility settings", icon: "settings", roles: ["admin"] },
+      { to: "/users", label: "Users", icon: "users", roles: ["admin"] },
+      { to: "/login-activity", label: "Login activity", icon: "login", roles: ["admin", "billing_manager"] },
+      { to: "/account-security", label: "Authenticator app", icon: "shield", roles: WORK },
     ],
   },
 ];
+
+// May this user open this path? (pages not in the menu are open to everyone signed in)
+// user.pages (from /auth/me) is the Super Admin's menu-by-role setting; null = everything (Super Admin).
+// Admin-only items (roles: ["admin"...]) keep their fixed roles.
+export function itemAllowed(item, user) {
+  if (!user) return false;
+  if (user.role === "admin") return true;
+  const adminOnly = item.roles && !item.roles.includes("staff") && !item.roles.includes("viewer");
+  if (adminOnly) return item.roles.includes(user.role);
+  if (Array.isArray(user.pages)) return user.pages.includes(item.to);
+  return !item.roles || item.roles.includes(user.role);
+}
+
+export function canOpen(pathname, user) {
+  const hit = findNavItem(pathname);
+  return !hit || itemAllowed(hit.item, user);
+}
 
 // Section + item for a pathname (exact match for "/", prefix match otherwise)
 export function findNavItem(pathname) {
@@ -98,6 +121,8 @@ const linkClasses = ({ isActive }) =>
   }`;
 
 export default function Sidebar({ open = false, onClose }) {
+  const { user } = useAuth();
+  const allowed = (item) => itemAllowed(item, user);
   const [alertCount, setAlertCount] = useState(0);
   useEffect(() => {
     let alive = true;
@@ -131,7 +156,7 @@ export default function Sidebar({ open = false, onClose }) {
                 {section.label}
               </p>
               <div className="flex flex-col gap-0.5">
-                {section.items.map((item) => (
+                {section.items.filter(allowed).map((item) => (
                   <NavLink
                     key={item.to}
                     to={item.to}

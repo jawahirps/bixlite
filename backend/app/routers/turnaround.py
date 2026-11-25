@@ -31,7 +31,7 @@ from sqlalchemy.orm import Session
 from ..services.payer_names import payer_name
 from ..database import get_db
 from ..models import User
-from ..security import get_current_user
+from ..security import resolve_facility, check_facility, allowed_facility_ids, is_clinic_user, get_current_user
 
 router = APIRouter(prefix="/api/turnaround", tags=["turnaround"])
 TTL = 3600
@@ -128,11 +128,7 @@ _EM_KEYS = ("em_n", "em_tat_n", "em_w7", "em_breach")
 
 
 def _scope(user: User, facility_id: Optional[int]) -> Optional[int]:
-    if user.role != "admin" and user.facility_id is not None:
-        if facility_id not in (None, user.facility_id):
-            raise HTTPException(403, "Not your facility")
-        return user.facility_id
-    return facility_id
+    return resolve_facility(None, user, facility_id)
 
 
 def _cached(key, fn):

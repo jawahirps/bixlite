@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import apiClient from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import { readFacility, saveFacility } from "../utils/facility";
+import useFacilityDefault from "../hooks/useFacilityDefault";
 
 const statusColors = {
   pending: "gh-chip-pending",
@@ -97,6 +98,7 @@ export default function DhaSync() {
     const saved = readFacility();
     return saved ? Number(saved) : (user?.facility_id || 13);
   });
+  const isSuperAdmin = useFacilityDefault(facilities, selectedFacilityId, setSelectedFacilityId);
   const [facilitiesError, setFacilitiesError] = useState(null);
 
   const activeFacilityId = selectedFacilityId || user?.facility_id;

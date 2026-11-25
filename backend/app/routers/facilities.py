@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import Facility, FacilityRiayatiAccount, SettingsChange, User
-from ..security import get_current_user
+from ..security import get_current_user, require_roles, allowed_facility_ids
 
 router = APIRouter(prefix="/api/facilities", tags=["facilities"])
 
@@ -147,8 +147,13 @@ def list_facilities(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _require_admin(current_user)
     q = db.query(Facility)
+    if current_user.role != "admin":
+        # RBAC: other roles get only their own facilities, names only (no usernames, no Riayati accounts)
+        allowed = allowed_facility_ids(db, current_user) or set()
+        rows = q.filter(Facility.is_active.is_(True), Facility.id.in_(allowed or [-1])).order_by(Facility.facility_name).all()
+        return [FacilityOut(id=f.id, facility_code=f.facility_code, facility_name=f.facility_name,
+                            license_id=f.license_id, is_active=f.is_active) for f in rows]
     if not include_inactive:  # merged / switched-off facilities only show on Facility settings
         q = q.filter(Facility.is_active.is_(True))
     facilities = q.order_by(Facility.facility_name).all()
@@ -159,7 +164,7 @@ def list_facilities(
 def create_facility(
     payload: FacilityCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_roles("admin")),
 ):
     _require_admin(current_user)
     existing = db.query(Facility).filter(Facility.facility_code == payload.facility_code).first()
@@ -191,7 +196,7 @@ def update_facility(
     payload: FacilityUpdate,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_roles("admin")),
 ):
     _require_admin(current_user)
     fac = db.get(Facility, facility_id)
@@ -248,7 +253,7 @@ def add_riayati_account(
     payload: RiayatiAccountIn,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_roles("admin")),
 ):
     _require_admin(current_user)
     _facility_or_404(db, facility_id)
@@ -274,7 +279,7 @@ def update_riayati_account(
     payload: RiayatiAccountIn,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_roles("admin")),
 ):
     _require_admin(current_user)
     acc = _account_or_404(db, facility_id, account_id)
@@ -299,7 +304,7 @@ def delete_riayati_account(
     account_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_roles("admin")),
 ):
     _require_admin(current_user)
     acc = _account_or_404(db, facility_id, account_id)
@@ -380,7 +385,7 @@ def test_connection(
     facility_id: int,
     payload: ConnectionTestIn,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_roles("admin")),
 ):
     _require_admin(current_user)
     fac = _facility_or_404(db, facility_id)

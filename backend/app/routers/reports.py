@@ -40,7 +40,7 @@ from ..models import (
     Claim, ClaimActivity, ClaimDiagnosis, Facility, Remittance,
     RemittanceActivityDetail, ReportJob, RawXmlStore,
 )
-from ..security import get_current_user
+from ..security import check_facility, allowed_facility_ids, get_current_user
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
@@ -885,6 +885,21 @@ def _build_claim_summary(db, facility_id, payer_id, encounter_type,
     return wb, f"ClaimSummary_{ts}.xlsx", len(rows)
 
 
+
+def _scope_report(db, user, facility_id, facility_ids):
+    """RBAC: non-admins only get their facilities; 'no facility' means all of theirs, never all of BIX Lite."""
+    allowed = allowed_facility_ids(db, user)
+    if allowed is None:
+        return facility_id, facility_ids
+    if facility_id is not None:
+        check_facility(db, user, facility_id)
+        return facility_id, facility_ids
+    ids = [int(x) for x in (facility_ids or "").split(",") if x.strip().isdigit()]
+    for f in ids:
+        check_facility(db, user, f)
+    return None, ",".join(str(x) for x in (ids or sorted(allowed) or [-1]))
+
+
 @router.get("/claim-summary")
 def export_claim_summary(
     facility_id:    Optional[int]  = None,
@@ -896,8 +911,9 @@ def export_claim_summary(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
+    facility_id, _fx = _scope_report(db, current_user, facility_id, None)
     wb, filename, _ = _build_claim_summary(
-        db, facility_id, payer_id, encounter_type, date_from, date_to, date_field)
+        db, facility_id, payer_id, encounter_type, date_from, date_to, date_field, facility_ids=_fx)
     return _excel_response(wb, filename)
 
 
@@ -1043,8 +1059,9 @@ def export_claim_activity(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
+    facility_id, _fx = _scope_report(db, current_user, facility_id, None)
     wb, filename, _ = _build_claim_activity(
-        db, facility_id, payer_id, encounter_type, date_from, date_to, date_field)
+        db, facility_id, payer_id, encounter_type, date_from, date_to, date_field, facility_ids=_fx)
     return _excel_response(wb, filename)
 
 
@@ -1161,8 +1178,9 @@ def export_denial_analysis(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
+    facility_id, _fx = _scope_report(db, current_user, facility_id, None)
     wb, filename, _ = _build_denial_analysis(
-        db, facility_id, payer_id, encounter_type, date_from, date_to, date_field)
+        db, facility_id, payer_id, encounter_type, date_from, date_to, date_field, facility_ids=_fx)
     return _excel_response(wb, filename)
 
 
@@ -1262,9 +1280,10 @@ def export_resubmission_aging(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
+    facility_id, _fx = _scope_report(db, current_user, facility_id, None)
     wb, filename, _ = _build_resubmission_aging(
         db, facility_id, payer_id, encounter_type, date_from, date_to, date_field,
-        unsettled_only)
+        unsettled_only, facility_ids=_fx)
     return _excel_response(wb, filename)
 
 
@@ -1562,8 +1581,9 @@ def export_remittance_activity(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
+    facility_id, _fx = _scope_report(db, current_user, facility_id, None)
     wb, filename, _ = _build_remittance_activity(
-        db, facility_id, payer_id, encounter_type, date_from, date_to, date_field)
+        db, facility_id, payer_id, encounter_type, date_from, date_to, date_field, facility_ids=_fx)
     return _excel_response(wb, filename)
 
 
@@ -1678,8 +1698,9 @@ def export_denial_query(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
+    facility_id, _fx = _scope_report(db, current_user, facility_id, None)
     wb, filename, _ = _build_denial_query(
-        db, facility_id, payer_id, encounter_type, date_from, date_to, date_field)
+        db, facility_id, payer_id, encounter_type, date_from, date_to, date_field, facility_ids=_fx)
     return _excel_response(wb, filename)
 
 
@@ -1810,6 +1831,7 @@ def generate_report_job(
     builder = REPORT_BUILDERS.get(report_type)
     if not builder:
         raise HTTPException(status_code=404, detail=f"Unknown report type: {report_type}")
+    facility_id, facility_ids = _scope_report(db, current_user, facility_id, facility_ids)
 
     filters_dict = {
         "facility_id":    facility_id,
@@ -1880,9 +1902,9 @@ def list_report_jobs(
                 "status, filename, row_count, error_message, "
                 "created_at, completed_at, "
                 "(file_data IS NOT NULL) AS has_file "
-                "FROM report_jobs ORDER BY created_at DESC LIMIT :lim"
+                "FROM report_jobs WHERE (:all OR user_id = :uid) ORDER BY created_at DESC LIMIT :lim"
             ),
-            {"lim": limit},
+            {"lim": limit, "all": current_user.role == "admin", "uid": current_user.id},
         ).mappings().all()
 
         result = []
@@ -1931,8 +1953,8 @@ def cancel_report_job(
     """Cancel a pending or running report job."""
     from sqlalchemy import text as _text
     row = db.execute(
-        _text("SELECT id, status FROM report_jobs WHERE id = :id"),
-        {"id": job_id},
+        _text("SELECT id, status FROM report_jobs WHERE id = :id AND (:all OR user_id = :uid)"),
+        {"id": job_id, "all": current_user.role == "admin", "uid": current_user.id},
     ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Report job not found")
@@ -1971,8 +1993,8 @@ def download_report_job(
     try:
         from sqlalchemy import text as _text
         row = db.execute(
-            _text("SELECT file_data, filename, status FROM report_jobs WHERE id = :id"),
-            {"id": job_id},
+            _text("SELECT file_data, filename, status FROM report_jobs WHERE id = :id AND (:all OR user_id = :uid)"),
+            {"id": job_id, "all": current_user.role == "admin", "uid": current_user.id},
         ).fetchone()
 
         if not row:
@@ -2581,8 +2603,9 @@ def export_claim_summary_v2(
 ):
     """Claim Summary V2 — enhanced with Emirates ID, financials, variance,
     TPA comments, resubmission comment, activity counts."""
+    facility_id, _fx = _scope_report(db, current_user, facility_id, None)
     wb, filename, _ = _build_claim_summary_v2(
-        db, facility_id, payer_id, encounter_type, date_from, date_to, date_field)
+        db, facility_id, payer_id, encounter_type, date_from, date_to, date_field, facility_ids=_fx)
     return _excel_response(wb, filename)
 
 
@@ -2757,8 +2780,9 @@ def export_claim_activity_v2(
 ):
     """Claim Activity V2 — enhanced with submitted net, allowed amount,
     patient share, payment amount, activity variance/status, TPA comments."""
+    facility_id, _fx = _scope_report(db, current_user, facility_id, None)
     wb, filename, _ = _build_claim_activity_v2(
-        db, facility_id, payer_id, encounter_type, date_from, date_to, date_field)
+        db, facility_id, payer_id, encounter_type, date_from, date_to, date_field, facility_ids=_fx)
     return _excel_response(wb, filename)
 
 
@@ -3402,8 +3426,9 @@ def export_claim_cycle_v2(
 ):
     """Claim Cycle V2 — one row per claim_id, showing current Sub Rank, RA Rank
     and plain-language Claim Cycle Status across the full DHA eClaimLink lifecycle."""
+    facility_id, _fx = _scope_report(db, current_user, facility_id, None)
     wb, filename, _ = _build_claim_cycle_v2(
-        db, facility_id, payer_id, encounter_type, date_from, date_to, date_field)
+        db, facility_id, payer_id, encounter_type, date_from, date_to, date_field, facility_ids=_fx)
     return _excel_response(wb, filename)
 
 
@@ -3735,8 +3760,9 @@ def export_remittance_activity_v2(
     """Remittance Activity V2 — enhanced with TPA comments, days to settlement,
     submitted net per activity, activity variance. Default date_field=remittance_date
     (RA file TransactionDate — matches DHPO Remittances tab)."""
+    facility_id, _fx = _scope_report(db, current_user, facility_id, None)
     wb, filename, _ = _build_remittance_activity_v2(
-        db, facility_id, payer_id, encounter_type, date_from, date_to, date_field)
+        db, facility_id, payer_id, encounter_type, date_from, date_to, date_field, facility_ids=_fx)
     return _excel_response(wb, filename)
 
 
@@ -5226,8 +5252,9 @@ def export_denial_scrub_action(
     current_user=Depends(get_current_user),
 ):
     """Denial Scrub Action Report — all activities for denied claims + scrub + action + reappeal."""
+    facility_id, _fx = _scope_report(db, current_user, facility_id, None)
     wb, filename, _ = _build_denial_scrub_report(
-        db, facility_id, payer_id, encounter_type, date_from, date_to, date_field)
+        db, facility_id, payer_id, encounter_type, date_from, date_to, date_field, facility_ids=_fx)
     return _excel_response(wb, filename)
 
 

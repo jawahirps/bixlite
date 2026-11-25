@@ -10,6 +10,7 @@ import { lazy, Suspense, useEffect, useRef, useState, Fragment } from "react";
 import apiClient from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import { readFacility, saveFacility } from "../utils/facility";
+import useFacilityDefault from "../hooks/useFacilityDefault";
 
 const PrepareResubmission = lazy(() => import("../components/resub/PrepareResubmission"));
 
@@ -159,6 +160,7 @@ export default function Calibration({ onPrepareResubmission: onPrepareProp } = {
     const saved = readFacility();
     return saved ? Number(saved) : (user?.facility_id || 13);
   });
+  const isSuperAdmin = useFacilityDefault(facilities, facilityId, setFacilityId);
 
   const [tab, setTab] = useState("patterns"); // patterns | files | queue | codes | rules
   const [patterns, setPatterns] = useState(null);
@@ -351,7 +353,7 @@ export default function Calibration({ onPrepareResubmission: onPrepareProp } = {
         <div className="space-y-3">
           <div className="flex flex-wrap items-center gap-2">
             <div className="flex overflow-hidden rounded border border-sage-line text-sm">
-              {[["facility", "This facility"], ["all", "All facilities"]].map(([v, label]) => (
+              {[["facility", "This facility"], ...(isSuperAdmin ? [["all", "All facilities"]] : [])].map(([v, label]) => (
                 <button key={v} onClick={() => { setPatScope(v); loadPatterns(facilityId, v); }}
                   className={`px-3 py-1.5 font-medium ${patScope === v ? "bg-ghaf-600 text-white" : "bg-white text-slate-600 hover:bg-slate-50"}`}>
                   {label}

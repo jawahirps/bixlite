@@ -22,6 +22,7 @@ const Alerts = lazy(() => import("./pages/Alerts"));
 const Turnaround = lazy(() => import("./pages/Turnaround"));
 const DenialTrends = lazy(() => import("./pages/DenialTrends"));
 const AccountSecurity = lazy(() => import("./pages/AccountSecurity"));
+const Users = lazy(() => import("./pages/Users"));
 
 // Pages load on demand, so the first screen downloads only what it needs.
 function PageLoading() {
@@ -51,6 +52,7 @@ export default function App() {
           <Route path="/analytics" element={<Analytics />} />
           <Route path="/report-packs" element={<ReportPacks />} />
           <Route path="/login-activity" element={<LoginActivity />} />
+          <Route path="/users" element={<Users />} />
           <Route path="/account-security" element={<AccountSecurity />} />
           <Route path="/facility-settings" element={<FacilitySettings />} />
           <Route path="/jobs" element={<Jobs />} />

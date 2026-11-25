@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import apiClient from "../api/client";
 import DashboardTables, { TABLE_TABS } from "./DashboardTables";
+import useFacilityDefault from "../hooks/useFacilityDefault";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const AED = (v) => "AED " + Math.round(Number(v || 0)).toLocaleString("en-AE");
@@ -226,6 +227,7 @@ export default function Dashboard() {
   const [facilityId, setFacilityId] = useState(() => {
     try { return localStorage.getItem("ghaf_dash_facility_id") || ""; } catch { return ""; }
   });
+  const isSuperAdmin = useFacilityDefault(facilities, facilityId, setFacilityId);
   const [range, setRange] = useState({ from: P[2].from, to: P[2].to });
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -241,6 +243,7 @@ export default function Dashboard() {
   useEffect(() => {
     try { localStorage.setItem("ghaf_dash_facility_id", facilityId); } catch { /* private window */ }
     if (!range.from || !range.to || range.from > range.to) return;
+    if (!isSuperAdmin && !facilityId) return;   // wait until their own facility is picked
     setLoading(true); setError(null);
     const q = new URLSearchParams({ date_from: range.from, date_to: range.to });
     if (facilityId) q.set("facility_id", facilityId);
@@ -248,7 +251,7 @@ export default function Dashboard() {
       .then((r) => setData(r.data))
       .catch((err) => setError(err.response?.data?.detail || "Couldn't load the claim cycle."))
       .finally(() => setLoading(false));
-  }, [facilityId, range]);
+  }, [facilityId, range, isSuperAdmin]);
 
   const t = data?.total;
   const months = data?.months || [];
@@ -296,7 +299,7 @@ export default function Dashboard() {
                  onChange={(e) => setRange((r) => ({ ...r, to: e.target.value }))} />
           <select className={`${field} w-full min-w-0 sm:w-auto sm:min-w-[240px]`} value={facilityId} aria-label="Facility"
                   onChange={(e) => setFacilityId(e.target.value)}>
-            <option value="" className="text-ink">All facilities</option>
+            {isSuperAdmin && <option value="" className="text-ink">All facilities</option>}
             {facilities.map((f) => <option key={f.id} value={f.id} className="text-ink">{f.facility_name}</option>)}
           </select>
         </div>

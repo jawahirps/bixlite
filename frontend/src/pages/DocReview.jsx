@@ -13,6 +13,7 @@ import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import apiClient from "../api/client";
 import { readFacility, saveFacility } from "../utils/facility";
+import useFacilityDefault from "../hooks/useFacilityDefault";
 
 const TIERS = {
   A: { label: "Tier A · Claim query", chip: "gh-chip gh-chip-denied", note: "Fix before submission" },
@@ -285,6 +286,7 @@ export default function DocReview() {
   const [facilities, setFacilities] = useState([]);
   const [facilityId, setFacilityIdState] = useState(() => params.get("facility_id") || readFacility());
   const setFacilityId = (id) => { setFacilityIdState(id); saveFacility(id); };
+  const isSuperAdmin = useFacilityDefault(facilities, facilityId, setFacilityId);
   const [month, setMonth] = useState(() => params.get("month") || lastMonth);
   const [runs, setRuns] = useState([]);
   const [dash, setDash] = useState(null);

@@ -10,6 +10,8 @@
 import { useEffect, useMemo, useState } from "react";
 import apiClient from "../api/client";
 import { readFacility, saveFacility } from "../utils/facility";
+import useFacilityDefault from "../hooks/useFacilityDefault";
+import { useAuth } from "../context/AuthContext";
 
 const SECTIONS = [
   { key: "performance", title: "1. Performance reports (PDF)", note: "Client-ready reports for a period." },
@@ -161,6 +163,7 @@ export default function ReportPacks() {
   const [facilities, setFacilities] = useState([]);
   const [facilityId, setFacilityIdState] = useState(() => readFacility());
   const setFacilityId = (id) => { setFacilityIdState(id); saveFacility(id); };
+  const isSuperAdmin = useFacilityDefault(facilities, facilityId, setFacilityId);
   const [jobs, setJobs] = useState([]);
   const [filterFac, setFilterFac] = useState("");
   const [filterKind, setFilterKind] = useState("");
@@ -182,6 +185,8 @@ export default function ReportPacks() {
     return () => clearInterval(t);
   }, [active]);
 
+  const { user } = useAuth();
+  const canRun = user?.role !== "viewer";   // Viewers download finished packs; they can't start new ones
   const facName = useMemo(() => Object.fromEntries(facilities.map((f) => [f.id, f.facility_name])), [facilities]);
   const shown = jobs.filter((j) => (!filterFac || String(j.facility_id) === filterFac) && (!filterKind || j.kind === filterKind));
 
@@ -191,20 +196,20 @@ export default function ReportPacks() {
         <p className="gh-eyebrow">Reports &amp; analytics</p>
         <h1 className="gh-h1">Client Report Packs</h1>
         <p className="text-sm text-slate-500">
-          Generate client packs for one facility. Jobs run one at a time in the background; files appear under
-          Generated files. Nothing is emailed from here.
+          {canRun ? <>Generate client packs for one facility. Jobs run one at a time in the background; files appear under
+          Generated files. Nothing is emailed from here.</> : <>Download the report packs Ghaf has prepared for your facility.</>}
         </p>
       </div>
 
-      <div className="gh-card flex flex-wrap items-center gap-3 p-4">
+      {canRun && <div className="gh-card flex flex-wrap items-center gap-3 p-4">
         <label className="text-sm font-medium text-slate-700">Facility</label>
         <select className="gh-input w-full sm:w-auto sm:min-w-[320px]" value={facilityId} onChange={(e) => setFacilityId(e.target.value)}>
           <option value="">Choose a facility…</option>
           {facilities.map((f) => <option key={f.id} value={f.id}>{f.facility_name} (#{f.id})</option>)}
         </select>
-      </div>
+      </div>}
 
-      {SECTIONS.map((s) => (
+      {canRun && SECTIONS.map((s) => (
         <section key={s.key} className="space-y-3">
           <div>
             <h2 className="text-lg font-semibold text-slate-900">{s.title}</h2>

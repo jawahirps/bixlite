@@ -34,7 +34,7 @@ from sqlalchemy.orm import Mapped, Session, mapped_column, object_session
 
 from ..database import SessionLocal, get_db
 from ..models import Base, Facility, User
-from ..security import get_current_user
+from ..security import get_current_user, allowed_facility_ids
 
 router = APIRouter(prefix="/api/packs", tags=["packs"])
 
@@ -284,8 +284,11 @@ def run_pack(body: RunIn, db: Session = Depends(get_db), current_user: User = De
 def list_jobs(facility_id: Optional[int] = None, limit: int = 50,
               db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     q = db.query(PackJob)
+    allowed = allowed_facility_ids(db, current_user)
     if facility_id:
         q = q.filter(PackJob.facility_id == facility_id)
+    elif allowed is not None:
+        q = q.filter(PackJob.facility_id.in_(allowed or [-1]))
     return [_out(j) for j in q.order_by(PackJob.id.desc()).limit(min(limit, 200)).all()]
 
 

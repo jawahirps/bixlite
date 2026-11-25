@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import Facility, User
-from ..security import get_current_user
+from ..security import resolve_facility, check_facility, allowed_facility_ids, is_clinic_user, get_current_user
 from ..services import doc_review as dr
 from ..services import resub_worklist as rw
 
@@ -37,8 +37,7 @@ PAGE = 100
 
 
 def _check_facility(db: Session, user: User, facility_id: int) -> Facility:
-    if user.role != "admin" and user.facility_id is not None and user.facility_id != facility_id:
-        raise HTTPException(403, "Not your facility")
+    check_facility(db, user, facility_id)
     fac = db.get(Facility, facility_id)
     if not fac or not fac.is_active or fac.facility_code == "GHAF-001":
         raise HTTPException(404, "Facility not found")

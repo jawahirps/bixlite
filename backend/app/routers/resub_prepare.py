@@ -117,3 +117,72 @@ def get_history(facility_id: int, claim_id: str, db: Session = Depends(get_db),
     _check_facility(user, facility_id)
     _ready()
     return rp.history(db, facility_id, claim_id.strip())
+
+
+# ---------------------------------------------------------------------------
+# RA last 21 days — every denied claim from RAs received in the SN 03/2019 21-day window, grouped by RA file.
+# Stage: candidate (initial claim, first RA with a denial) · reconciliation (1st resubmission done) ·
+#        limit (2 used) · awaiting_ra (resubmitted after this RA).
+# ---------------------------------------------------------------------------
+RA21_SQL = """
+WITH ra AS (
+  SELECT DISTINCT ON (r.claim_id, r.ra_file_id, r.net_amount, r.paid_amount, r.denial_amount)
+         r.claim_id, r.ra_file_id, r.remittance_date, r.raw_xml_id, COALESCE(r.paid_amount,0) paid, COALESCE(r.denial_amount,0) denied
+  FROM remittances r
+  WHERE r.facility_id = :fid AND r.denial_amount > 0 AND r.remittance_date >= current_date - 21
+  ORDER BY r.claim_id, r.ra_file_id, r.net_amount, r.paid_amount, r.denial_amount, r.id),
+cl AS (
+  SELECT c.claim_id, count(*) FILTER (WHERE COALESCE(c.resubmission_key,'') <> '') AS used,
+         max(c.submission_date) AS last_sub,
+         (array_agg(c.payer_id ORDER BY c.submission_date DESC NULLS LAST, c.id DESC))[1] AS payer_id,
+         (array_agg(c.encounter_start ORDER BY c.submission_date DESC NULLS LAST, c.id DESC))[1] AS encounter_start,
+         (array_agg(c.net_amount ORDER BY c.submission_date DESC NULLS LAST, c.id DESC))[1] AS net
+  FROM claims c WHERE c.facility_id = :fid AND c.claim_id IN (SELECT claim_id FROM ra) GROUP BY 1),
+sf AS (
+  SELECT f.claim_id, array_agg(DISTINCT f.rule_id) FILTER (WHERE f.rule_id <> 'ALL_CLEAR'
+           AND NOT (f.rule_id = 'OVERLAPPING_ACTIVITY' AND f.message ~ 'in claims (\\S+) and \\1;')) AS rules
+  FROM scrub_xml_findings f JOIN claims c ON c.raw_xml_id = f.raw_xml_id AND c.claim_id = f.claim_id AND c.facility_id = :fid
+  WHERE f.claim_id IN (SELECT claim_id FROM ra) GROUP BY 1)
+SELECT ra.ra_file_id, rx.source_filename AS ra_file, ra.remittance_date, ra.claim_id, ra.paid, ra.denied,
+       cl.used, cl.last_sub, cl.payer_id, cl.encounter_start::date AS encounter_date, cl.net,
+       (sf.claim_id IS NOT NULL) AS scrubbed, COALESCE(sf.rules, '{}') AS scrub_rules
+FROM ra LEFT JOIN cl USING (claim_id) LEFT JOIN sf USING (claim_id)
+LEFT JOIN raw_xml_store rx ON rx.id = ra.raw_xml_id
+ORDER BY ra.remittance_date DESC, ra.ra_file_id, ra.claim_id
+"""
+
+
+@router.get("/ra21")
+def get_ra21(facility_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from datetime import date, timedelta
+    from sqlalchemy import text
+    _check_facility(user, facility_id)
+    today = date.today()
+    files: Dict[str, Dict[str, Any]] = {}
+    for r in db.execute(text(RA21_SQL), {"fid": facility_id}).mappings():
+        ra_d = r["remittance_date"].date() if hasattr(r["remittance_date"], "date") else r["remittance_date"]
+        used = int(r["used"] or 0)
+        last_sub = r["last_sub"].date() if hasattr(r["last_sub"], "date") else r["last_sub"]
+        if last_sub and ra_d and last_sub > ra_d:
+            stage = "awaiting_ra"
+        elif used >= rp.SN_MAX_RESUBMISSIONS:
+            stage = "limit"
+        elif used == 1:
+            stage = "reconciliation"
+        else:
+            stage = "candidate"
+        due = ra_d + timedelta(days=rp.SN_RESUBMIT_DAYS)
+        key = r["ra_file"] or r["ra_file_id"] or "?"   # ra_file_id is per claim; group by the RA XML file
+        f = files.setdefault(key, {"ra_file_id": r["ra_file_id"], "ra_file": r["ra_file"] or r["ra_file_id"],
+                                   "remittance_date": str(ra_d), "resubmit_by": due.isoformat(),
+                                   "days_left": (due - today).days, "claims": [], "denied": 0.0})
+        f["denied"] += float(r["denied"] or 0)
+        f["claims"].append({
+            "claim_id": r["claim_id"], "payer_id": r["payer_id"], "encounter_date": str(r["encounter_date"] or ""),
+            "net": float(r["net"] or 0), "paid": float(r["paid"] or 0), "denied": float(r["denied"] or 0),
+            "resubs_used": used, "stage": stage, "scrubbed": bool(r["scrubbed"]), "scrub_rules": list(r["scrub_rules"] or []),
+        })
+    out = sorted(files.values(), key=lambda f: (f["remittance_date"], f["ra_file"] or ""), reverse=True)
+    for f in out:
+        f["denied"] = round(f["denied"], 2)
+    return {"files": out, "window_days": rp.SN_RESUBMIT_DAYS}

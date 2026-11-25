@@ -10,6 +10,7 @@
 import { useEffect, useMemo, useState } from "react";
 import apiClient from "../api/client";
 import BulkResub from "./BulkResub";
+import Ra21Resub from "./Ra21Resub";
 import { useAuth } from "../context/AuthContext";
 import { readFacility, saveFacility } from "../utils/facility";
 
@@ -269,6 +270,7 @@ export default function ResubWorklist() {
     ? [{ key: "facility", label: `Needs Your Input (${lists.facility.length})` },
        { key: "reconciliation", label: `Reconciliation (${lists.reconciliation.length})` }]
     : [
+        { key: "ra21", label: "RA last 21 days" },
         { key: "new", label: `New Today (${lists.new.length})` },
         { key: "action", label: `Action List (${lists.action.length})` },
         { key: "facility", label: `Needs Facility (${lists.facility.length})` },
@@ -388,7 +390,9 @@ export default function ResubWorklist() {
         ))}
       </div>
 
-      {tab === "bulk" ? (
+      {tab === "ra21" ? (
+        <Ra21Resub facilityId={facilityId} />
+      ) : tab === "bulk" ? (
         <BulkResub facilityId={facilityId} facilities={facilities.filter(f => f.facility_code !== "GHAF-001")} />
       ) : tab === "playbook" ? (
         <Playbook rows={playbook} setRows={setPlaybook} canEdit={canEditPlaybook} setError={setError} />

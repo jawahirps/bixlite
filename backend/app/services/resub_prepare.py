@@ -728,6 +728,10 @@ def build_xml(draft: Dict[str, Any], edits: Optional[Dict[str, Any]] = None, dis
 
     rtype = (edits.get("resubmission_type") or draft["suggestion"]["resubmission_type"]).strip().lower()
     comment = (edits.get("comment") if edits.get("comment") is not None else draft["suggestion"]["comment"]).strip()
+    if rtype == "correction" and edits.get("scope") == "denied_only":
+        errors.append("A correction must resubmit all activities (paid and denied) — use the whole claim")
+    if not comment:
+        errors.append("Resubmission comment is required")
     rs = etree.Element("Resubmission")
     etree.SubElement(rs, "Type").text = rtype
     errors.extend(sn_errors(draft, rtype))

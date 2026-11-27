@@ -28,8 +28,10 @@ The harness runs inline JS with a light mocked DOM, no requests, no browser, no 
 - Do not mark data sync healthy, regulatory rules validated, or production deployed based on synthetic prototype.
 
 ## Theme checks
-- Use the top-navigation colour control to switch Aurora, Oceanic, Amethyst, Solar, including mobile and keyboard focus. All figures, filter scope, selected claim and capability gates remain unchanged. Reload with the same local profile and verify the chosen theme restores. Inspect text contrast, small stack segments and touch on narrow viewports.
+- Use Account > Appearance to switch Pearl, Aurora, Oceanic, Amethyst, Solar, including mobile and keyboard focus. All figures, filter scope, selected claim and capability gates remain unchanged. Reload with the same local profile and verify the chosen theme restores. Inspect text contrast, small stack segments and touch on narrow viewports.
 
 ## Production gate (outside prototype)
 Server-side verified identity, tenant and per-resource facility authorization, plan/feature entitlements, audited PHI access, safe export, secure draft lifecycle and separate authorized sending, real source manifests and deduped ERA/RA lineage, independent KPI and performance verification. Client-side mock guards are not an access control.
 
+
+- Verify the top bar search shows only magnifying glass and Cmd-K, opens the command dialog with Cmd/Ctrl-K, and can locate all 17 authorized destinations. Open overview/prepare/recover/report/data groups and verify active group, Account links, and mobile sidebar.

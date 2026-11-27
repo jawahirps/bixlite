@@ -50,6 +50,13 @@ check('calendar/filter scope retained during grouped chart and metric drill',()=
  run("draftScope.dims.f=dims.find(d=>d.key==='f').values.slice();apply()");
  assert.equal(run("dims.find(d=>d.key==='f').values.length"),permitted.length);
 });
+check('compact scope disclosure opens and closes without changing filters',()=>{
+ const scope=run("JSON.stringify(appliedScope)");const toggle=get('filterToggle'),panel=get('filterPanel');
+ assert.equal(toggle.getAttribute('aria-expanded'),'false');
+ toggle.click();assert.equal(toggle.getAttribute('aria-expanded'),'true');assert.ok(panel.classList.contains('expanded'));
+ toggle.click();assert.equal(toggle.getAttribute('aria-expanded'),'false');assert.ok(!panel.classList.contains('expanded'));
+ assert.equal(run("JSON.stringify(appliedScope)"),scope);
+});
 check('all financial chart series implemented as accessible actions',()=>{
  for(const k of ['net','paid','denied','resubmitted','awaiting']){const es=select('[data-lc-series="'+k+'"]');assert.ok(es.length>0,'missing series '+k);assert.ok(es.every(e=>e.getAttribute('aria-label')&&typeof e.onclick==='function'))}
  assert.ok(select('[data-lc-month-label]').length>0);

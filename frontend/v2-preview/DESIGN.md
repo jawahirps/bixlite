@@ -1,0 +1,12 @@
+# BIX Lite V2.0 — Glacier
+Product: RCM revenue intelligence for clinical operations, finance and management. Prioritize the story from claimed to paid, denied, resubmitted, awaiting RA and claim evidence. Avoid extra persona or subscription controls in normal use.
+
+- **Direction:** restrained translucent surfaces, dark ink navigation, teal primary action, high-contrast status semantics, a single dark total card. No decorative trend lines or gratuitous visual effects.
+- **Hierarchy:** overview headline, reporting scope disclosure, claimed amount, four mutually exclusive balance allocations, nested monthly comparison, claim worklist, evidence. The user may long-press to enter layout editing and drag/resize widgets; normal mode does not show layout controls.
+- **Typography:** interface-native sans, tabular numeric finance values, weight hierarchy and consistent 12px data labels. Avoid novelty fonts that make figures harder to scan.
+- **Colors:** canvas #eaf0f3; darkest sidebar #172f3e; ink #1b3443; primary #087f83. Paid teal #087f83; denied muted red #b65863; outstanding RS blue #4386a8; awaiting gray blue #71839a hatched; claimed frame #253f53. Representative text/background pairs measured 4.80–10.64:1.
+- **Interactions:** scope collapses on desktop and mobile without resetting; selected scope remains visible. Focus rings, compact action hierarchy, horizontally scrollable chart, no animations with reduced-motion. Each bar remains a distinct amount on one shared axis. The outer outline is total, not an additive series.
+- **Design sources:** BestSaaSWebDesigns MCP returned analytics marketing references Clarisights (teal, light minimal, Inter), DataVendor (restrained neutral palette, Geist), Fathom (light minimal). Used their catalog metadata as palette/hierarchy inspiration, not a clone of their app UI. Impeccable official guidance applied manually: [polish](https://impeccable.style/docs/polish/), [typeset](https://impeccable.style/docs/typeset/), [distill](https://impeccable.style/docs/distill/). No third-party package installation.
+- **Test:** 10 regression groups plus gesture mock. No verified browser on this computer; physical visual/touch acceptance remains pending before deployment. Synthetic only; no security claims or live API connection.
+
+`frontend/public/v2/index.html` includes the final CSS inline; `polish.css` is the extracted design pass for review.

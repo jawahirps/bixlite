@@ -12,7 +12,7 @@ The harness runs inline JS with a light mocked DOM, no requests, no browser, no 
 |---|---|
 | Monetary partition | Each unique synthetic facility + claim: claimed net = paid + denied not resubmitted + resubmission outstanding + awaiting initial RA. Nonnegative amounts, allocated exactly once. Historical submission events not additional balance. |
 | First view | Claimed and four allocated balances shown; no decorative sparklines; demo marker and non-overlap definition visible. |
-| Grouped comparison | Monthly, side-by-side five amounts; all series and month labels native accessible actions; amount breakdown on hover/focus; click drills exact month and metric; clear crossfilter retains applied global scope. |
+| Grouped comparison | One stacked column per month; claimed total is height and clickable label, four non-overlapping allocations Paid, Denied, Resubmitted, Awaiting RA. All segments and month labels are accessible actions; hover/focus and drill retain applied scope. Non-color separation and patterns reinforce segments. |
 | Scope | Facility and other category filters, date enable/disable, clear/select all, no implicit widening when drilling; applied state restored on reload for the assigned profile. |
 | Claim evidence | Original claim → initial rejection → first RS / RA → second RS / RA → decision; pending RA stops pathway until evidence exists; sample report and XML marked not for submission; worklist supports pagination. |
 | Draft guard | No reconciliation draft for paid, initial awaiting, or pending repeated RA. Second/repeated rejection or reconciliation-review only, human review required. No recipients, sending, submission or payer connectivity; local-only status. |
@@ -27,5 +27,9 @@ The harness runs inline JS with a light mocked DOM, no requests, no browser, no 
 - Performance: UI loads from local fixture without network; resize preferences persist; no stale scope appears after any filter change. Check console errors and no outgoing requests.
 - Do not mark data sync healthy, regulatory rules validated, or production deployed based on synthetic prototype.
 
+## Theme checks
+- Use the top-navigation colour control to switch Aurora, Oceanic, Amethyst, Solar, including mobile and keyboard focus. All figures, filter scope, selected claim and capability gates remain unchanged. Reload with the same local profile and verify the chosen theme restores. Inspect text contrast, small stack segments and touch on narrow viewports.
+
 ## Production gate (outside prototype)
 Server-side verified identity, tenant and per-resource facility authorization, plan/feature entitlements, audited PHI access, safe export, secure draft lifecycle and separate authorized sending, real source manifests and deduped ERA/RA lineage, independent KPI and performance verification. Client-side mock guards are not an access control.
+

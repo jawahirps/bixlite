@@ -1,4 +1,4 @@
-# BIX Lite V2.0 — Aurora
+# BIX Lite V2.0 — selectable themes
 Product: RCM revenue intelligence for clinical operations, finance and management. Prioritize the story from claimed to paid, denied, resubmitted, awaiting RA and claim evidence. Avoid extra persona or subscription controls in normal use.
 
 - **Direction:** restrained translucent surfaces, dark ink navigation, teal primary action, high-contrast status semantics, a single dark total card. No decorative trend lines or gratuitous visual effects.
@@ -7,6 +7,10 @@ Product: RCM revenue intelligence for clinical operations, finance and managemen
 - **Colors:** canvas #edf2fc; sidebar sapphire-to-teal gradient; ink #152e4a; primary #007e91. Paid turquoise #0094a5; denied coral #e14e72; outstanding RS violet #7457e6; awaiting amber #efa631 hatched; claimed label #253f53. Text remains dark on tinted cards and white on a dark hero/nav; status colors are reinforced by labels and legend.
 - **Interactions:** scope collapses on desktop and mobile without resetting; selected scope remains visible. Focus rings, compact action hierarchy, horizontally scrollable chart, no animations with reduced-motion. Each month shows one stacked column on a shared AED scale; the height represents claimed net with a directly clickable total label above the column. Paid is the base and Awaiting RA the top. Denied and outstanding RS remain separate. Each segment drills into its own worklist; hiding a series leaves a gap without recalculating other heights.
 - **Design sources:** BestSaaSWebDesigns MCP returned analytics marketing references Clarisights (teal, light minimal, Inter), DataVendor (restrained neutral palette, Geist), Fathom (light minimal). Used their catalog metadata as palette/hierarchy inspiration, not a clone of their app UI. Impeccable official guidance applied manually: [polish](https://impeccable.style/docs/polish/), [typeset](https://impeccable.style/docs/typeset/), [distill](https://impeccable.style/docs/distill/). No third-party package installation.
-- **Test:** 10 regression groups plus gesture mock. No verified browser on this computer; physical visual/touch acceptance remains pending before deployment. Synthetic only; no security claims or live API connection.
+- **Test:** 11 regression groups plus gesture mock. No verified browser on this computer; physical visual/touch acceptance remains pending before deployment. Synthetic only; no security claims or live API connection.
 
 `frontend/public/v2/index.html` includes the final CSS inline; `polish.css` is the extracted design pass for review.
+
+
+## Theme selector
+Four choices, in the global navigation: Aurora (default), Oceanic, Amethyst, Solar. All palettes update background, navigation, headline, chart, legend and KPI accents; financial data and filtering are not changed. Stored as an enum in localStorage per synthetic tenant/persona. Actual cross-device/user-account preference sync is a separate production integration. Stacked segments use contrasted separators and patterns; the labels and drill-downs do not depend on color alone.

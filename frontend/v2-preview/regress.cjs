@@ -71,6 +71,23 @@ check('one monthly stacked column reconciles exactly to claimed net',()=>{
  groups.forEach((g,i)=>{const m=ms[i],whole=g[1],stack=whole.match(/class="allocation-stack single-stack" style="height:([0-9.e+-]+)%"/);assert.ok(stack);assert.ok(Math.abs(Number(stack[1])-100*m.net/scale)<1e-8);assert.match(whole,/class="stack-total"[^>]*data-lc-series="net"/);assert.doesNotMatch(whole,/dual-claimed/);const bars=[...whole.matchAll(/data-lc-series="(paid|denied|resubmitted|awaiting)"[^>]* style="height:([0-9.e+-]+)%/g)];assert.equal(bars.length,4);assert.deepEqual(bars.map(b=>b[1]),['awaiting','resubmitted','denied','paid']);let sum=0;for(const b of bars){const pct=Number(b[2]);sum+=pct;assert.ok(Math.abs(pct-(m.net?100*m[b[1]]/m.net:0))<1e-8)}assert.ok(Math.abs(sum-(m.net?100:0))<1e-8)});
  run("visible.awaiting=false;renderChart()");assert.match(get('plot').innerHTML,/stack-segment hidden-series/);run("visible.awaiting=true;renderChart()");
 });
+check('four user themes preserve metrics, permissions and filter scope; remember selection',()=>{
+ const expected={aurora:['#0094a5','#e14e72','#7457e6','#efa631'],oceanic:['#008e9b','#d34a5d','#4285e6','#f1b642'],amethyst:['#06a6bb','#e76c80','#9565d9','#f5bd7b'],solar:['#00aa96','#d74670','#4988c9','#f28b30']};
+ const initial=run("JSON.stringify({scope:appliedScope,net:totals(scopeRows()).net,profile:assignedProfile,activeMonth,activeStatus})");
+ get('appTheme').click();assert.equal(get('themeDialog').open,true);
+ for(const name of Object.keys(expected)){
+  const b=select('[data-select-theme="'+name+'"]')[0];assert.ok(b);b.click();
+  assert.equal(get('bixThemeRoot').getAttribute('data-theme'),name);assert.equal(run('savedBixTheme()'),name);
+  assert.equal(run("JSON.stringify([colors.paid,colors.denied,colors.resubmitted,colors.awaiting])"),JSON.stringify(expected[name]));
+  assert.match(get('plot').innerHTML,new RegExp(expected[name][0]));assert.match(get('kpis').innerHTML,new RegExp(expected[name][0]));
+  assert.equal(run("JSON.stringify({scope:appliedScope,net:totals(scopeRows()).net,profile:assignedProfile,activeMonth,activeStatus})"),initial);
+ }
+ assert.equal(run("applyBixTheme('__proto__')"),false);
+ run("localStorage.setItem(BIX_THEME_KEY,'not-a-theme')");assert.equal(run('savedBixTheme()'),'aurora');
+ run("applyBixTheme('oceanic')");assert.equal(run('savedBixTheme()'),'oceanic');
+ get('themeDone').click();assert.equal(get('themeDialog').open,false);
+ run("applyBixTheme('aurora')");
+});
 check('nested rejection and distinct RA evidence stages',()=>{
  assert.ok(run("all.some(r=>r.lifecycle==='first-ra-pending')&&all.some(r=>r.lifecycle==='first-ra-rejected')&&all.some(r=>r.lifecycle==='second-ra-pending')&&all.some(r=>r.lifecycle==='second-ra-rejected')&&all.some(r=>r.lifecycle==='reconciliation-review')"));
  assert.deepEqual(Array.from(run("lcSteps(all.find(r=>r.lifecycle==='second-ra-rejected')).map(s=>s[0])")),['Original claim','Initial rejection','First resubmission','First resubmission RA','Second resubmission','Second resubmission RA','Decision']);
@@ -132,3 +149,4 @@ if(html.includes('widget-order-v1')){
 }
 console.log(failures?'\n'+failures+' failing acceptance test(s).':'\nAll synthetic acceptance checks passed.');
 process.exitCode=failures?1:0;
+

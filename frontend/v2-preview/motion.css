@@ -1,0 +1,49 @@
+/* Pearl motion system — fast feedback, state continuity, no artificial delays. */
+#bixThemeRoot{
+ --motion-press:90ms;--motion-feedback:140ms;--motion-pop:180ms;--motion-panel:240ms;--motion-exit:140ms;
+ --motion-ease:cubic-bezier(.2,.75,.25,1);--motion-exit-ease:cubic-bezier(.4,0,1,1);
+}
+.btn,.command-btn,.account-chip,.theme-option,.xbtn,.preset,.flat,.navlink,.tab,.navgroup summary,.legend button,.multi-summary,.calendar-open{transition:background-color var(--motion-feedback) ease,color var(--motion-feedback) ease,border-color var(--motion-feedback) ease,box-shadow var(--motion-feedback) ease,transform var(--motion-press) var(--motion-ease)}
+.btn:not(:disabled):not([aria-disabled=true]):active,.command-btn:not(:disabled):active,.account-chip:not(:disabled):active,.xbtn:not(:disabled):active,.theme-option:not(:disabled):active,.preset:not(:disabled):active,.calendar-open:not(:disabled):active{transform:scale(.98)}
+.navlink:not(:disabled):active,.tab:not(:disabled):active,.legend button:not(:disabled):active{transform:translateY(1px)}
+#export>span{display:inline-block;transition:transform var(--motion-feedback) var(--motion-ease)}
+@media(hover:hover){#export:not(:disabled):hover>span{transform:translateY(2px)}}
+.navgroup summary span,.app-health summary span:last-child,.app-display-menu>summary span{transition:transform var(--motion-pop) var(--motion-ease)}
+.navgroup[open] summary span,.app-health[open] summary span:last-child,.app-display-menu[open]>summary span{transform:rotate(180deg)}
+@keyframes bix-window-in{from{opacity:0;transform:translateY(6px) scale(.985)}to{opacity:1;transform:translateY(0) scale(1)}}
+@keyframes bix-drawer-in{from{opacity:0;transform:translateX(18px)}to{opacity:1;transform:translateX(0)}}
+@keyframes bix-menu-in{from{opacity:0;transform:translateY(-5px)}to{opacity:1;transform:translateY(0)}}
+@keyframes bix-view-in{from{opacity:.35;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+@keyframes bix-sidebar-in{from{opacity:0;transform:translateX(-14px)}to{opacity:1;transform:translateX(0)}}
+@keyframes bix-overlay-in{from{opacity:0}to{opacity:1}}
+dialog.modal[open]{animation:bix-window-in var(--motion-pop) var(--motion-ease) both}
+dialog.drawer[open]{animation:bix-drawer-in var(--motion-panel) var(--motion-ease) both}
+dialog[open]::backdrop{animation:bix-overlay-in var(--motion-pop) ease both}
+@supports (transition-behavior:allow-discrete){
+ dialog.modal,dialog.drawer{opacity:0;transition-property:opacity,transform,display,overlay;transition-duration:var(--motion-exit);transition-timing-function:var(--motion-exit-ease);transition-behavior:allow-discrete}
+ dialog.modal{transform:translateY(6px) scale(.985)}
+ dialog.drawer{transform:translateX(18px)}
+ dialog.modal[open],dialog.drawer[open]{animation:none;opacity:1;transform:none;transition-duration:var(--motion-pop);transition-timing-function:var(--motion-ease)}
+ dialog.drawer[open]{transition-duration:var(--motion-panel)}
+ dialog::backdrop{opacity:0;transition:opacity var(--motion-exit) ease,display var(--motion-exit) allow-discrete,overlay var(--motion-exit) allow-discrete}
+ dialog[open]::backdrop{animation:none;opacity:1;transition-duration:var(--motion-pop)}
+ @starting-style{
+  dialog.modal[open]{opacity:0;transform:translateY(6px) scale(.985)}
+  dialog.drawer[open]{opacity:0;transform:translateX(18px)}
+  dialog[open]::backdrop{opacity:0}
+ }
+}
+.app-display-menu[open] .display-pop,.app-health[open] .health-pop,.navgroup[open] .navpop,.filter-choice{animation:bix-menu-in var(--motion-pop) var(--motion-ease) both;transform-origin:top center}
+#filterPanel.expanded{animation:bix-menu-in var(--motion-pop) var(--motion-ease) both;transform-origin:top}
+#dashboard:not(.hidden)> .masthead,#module:not(.hidden){animation:bix-view-in var(--motion-pop) var(--motion-ease) both}
+#layoutEditDock{animation:bix-menu-in var(--motion-pop) var(--motion-ease) both}
+.crossfilter:not(.hidden){animation:bix-menu-in var(--motion-feedback) var(--motion-ease) both}
+@media(max-width:1050px){.nav#sidebar.open{animation:bix-sidebar-in var(--motion-panel) var(--motion-ease) both}.overlay.open{animation:bix-overlay-in var(--motion-pop) ease both}}
+/* Keep focus and meaning visible even when motion is disabled. */
+#lifecyclePanel:focus-visible,#widget-evidence:focus-visible{outline:2px solid var(--theme-primary)!important;outline-offset:4px}
+#lifecyclePanel,#widget-evidence{scroll-margin-top:calc(var(--app-top) + 16px)}
+@media(prefers-reduced-motion:reduce){
+ *,*::before,*::after{scroll-behavior:auto!important;animation:none!important;transition:none!important}
+ dialog.modal[open],dialog.drawer[open]{opacity:1!important;transform:none!important}
+ .btn:active,.navlink:active,.tab:active,.legend button:active,.command-btn:active,.account-chip:active,.xbtn:active,.theme-option:active{transform:none!important}
+}

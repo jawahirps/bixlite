@@ -101,6 +101,17 @@ check('workflow grouping, account consolidation, and compact command search',()=
  document.dispatchEvent({type:'keydown',metaKey:true,ctrlKey:false,key:'k',preventDefault(){}});assert.equal(get('command').open,true);
  get('search').value='authenticator';get('search').oninput();assert.match(get('results').innerHTML,/account-security/);get('closeCommand').click();
 });
+check('motion offers immediate focus, interruption-safe feedback and reduced-motion fallback',()=>{
+ const target=get('lifecyclePanel');let focused=0,scrolls=[],started=0,cancelled=0;
+ target.focus=()=>focused++;target.scrollIntoView=o=>scrolls.push(o.behavior);target.animate=()=>{started++;return{cancel(){cancelled++}}};
+ run("window.matchMedia=()=>({matches:false})");run("bixReveal('lifecyclePanel');bixReveal('lifecyclePanel')");
+ assert.equal(focused,2);assert.equal(started,2);assert.equal(cancelled,1);assert.deepEqual(scrolls,['smooth','smooth']);
+ run("window.matchMedia=()=>({matches:true});bixReveal('lifecyclePanel')");
+ assert.equal(focused,3);assert.equal(scrolls.at(-1),'auto');assert.equal(started,2);assert.equal(cancelled,2);
+ const scope=run("JSON.stringify(appliedScope)");run("bixReveal('lifecyclePanel')");assert.equal(run("JSON.stringify(appliedScope)"),scope);
+ assert.match(html,/prefers-reduced-motion:reduce/);assert.match(html,/transition-behavior:allow-discrete/);
+ run("delete window.matchMedia");delete target.animate;
+});
 check('nested rejection and distinct RA evidence stages',()=>{
  assert.ok(run("all.some(r=>r.lifecycle==='first-ra-pending')&&all.some(r=>r.lifecycle==='first-ra-rejected')&&all.some(r=>r.lifecycle==='second-ra-pending')&&all.some(r=>r.lifecycle==='second-ra-rejected')&&all.some(r=>r.lifecycle==='reconciliation-review')"));
  assert.deepEqual(Array.from(run("lcSteps(all.find(r=>r.lifecycle==='second-ra-rejected')).map(s=>s[0])")),['Original claim','Initial rejection','First resubmission','First resubmission RA','Second resubmission','Second resubmission RA','Decision']);

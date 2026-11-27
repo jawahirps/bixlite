@@ -35,3 +35,7 @@ Server-side verified identity, tenant and per-resource facility authorization, p
 
 
 - Verify the top bar search shows only magnifying glass and Cmd-K, opens the command dialog with Cmd/Ctrl-K, and can locate all 17 authorized destinations. Open overview/prepare/recover/report/data groups and verify active group, Account links, and mobile sidebar.
+
+## Motion QA
+- Rapidly open/close dialogs (click, keyboard Escape, Done), change chart selection, close the mobile rail and repeatedly switch modules. No delayed click or hidden focus. Verify modal/drawer entry and exit on Chrome, Edge and Safari, with native instant-exit fallback.
+- Turn OS Reduce Motion on: no transforms, animated scrolling or panel highlight; focus/selection feedback remains. Confirm chart drill immediately applies the same cohort and reuses local filters. Real browser visual QA still pending.

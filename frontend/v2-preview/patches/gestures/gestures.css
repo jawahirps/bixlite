@@ -1,0 +1,16 @@
+#dashboard .gesture-control{display:none}
+#dashboard[data-custom=true] .gesture-control{display:inline-flex;align-items:center;justify-content:center;border:1px solid #bfd4df;border-radius:8px;min-width:34px;min-height:34px;padding:4px 9px;background:#fff;color:#17677a;font-weight:650;touch-action:none}
+#dashboard[data-custom=true] .gesture-control[data-g-action=drag]{cursor:grab}
+#dashboard[data-custom=true] .gesture-control[data-g-action=resize]{cursor:nwse-resize}
+#dashboard[data-custom=true] [data-gesture-widget]{outline:1px dashed #79aebb;outline-offset:2px;position:relative}
+#dashboard[data-custom=true] [data-gesture-widget].gesture-active{outline:2px solid #087f91;z-index:2;box-shadow:0 4px 18px #0b536129}
+#dashboard [data-gesture-widget]{-webkit-touch-callout:none}
+#dashboard .widget-toolbar .gesture-control{font-size:12px}
+#dashboard .widget-toolbar .size,#dashboard .widget-toolbar .sizeLabel{display:none!important}
+#dashboard[data-custom=true] .widget-toolbar{flex-wrap:wrap;white-space:normal}
+#dashboard[data-custom=false] #resetLayout,#dashboard[data-custom=false] #cancelWidgetLayout,#dashboard[data-custom=false] #gestureGuide{display:none!important}
+#gestureGuide{font-size:12px;color:var(--muted);max-width:55ch;margin:0}
+#dashboard[data-custom=true] .viewbar{position:sticky;top:70px;z-index:15;backdrop-filter:blur(15px)}
+#dashboard .viewbar{justify-content:flex-end}
+#dashboard[data-custom=true] .widget-heading{display:flex}
+@media(max-width:560px){#dashboard[data-custom=true] .gesture-control{min-width:42px;min-height:42px}#dashboard[data-custom=true] .viewbar{top:65px}#dashboard .viewbar #resetLayout{grid-column:auto}}

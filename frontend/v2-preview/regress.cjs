@@ -62,13 +62,13 @@ check('all financial chart series implemented as accessible actions',()=>{
  assert.ok(select('[data-lc-month-label]').length>0);
  assert.match(markup,/<button[^>]*id="heroNet"[^>]*data-lc-metric="net"/);
 });
-check('dual bar claimed and allocation stack share the same scale and reconcile',()=>{
+check('one monthly stacked column reconciles exactly to claimed net',()=>{
  const ms=Array.from(run("monthly.map(m=>({key:m.key,...totals(filtered.filter(r=>r.month===m.key&&matchStatus(r)))}))"));
  const output=get('plot').innerHTML;
- const groups=[...output.matchAll(/<div class="groupbars dual-month">([\s\S]*?)<\/div><button class="month"/g)];
+ const groups=[...output.matchAll(/<div class="groupbars single-month">([\s\S]*?)<\/div><button class="month"/g)];
  assert.equal(groups.length,ms.length);
- const max=Math.max(1,...ms.map(m=>m.net)),scale=Math.max(1,Math.ceil(max/40000)*10000)*4;
- groups.forEach((g,i)=>{const m=ms[i],whole=g[1],net=whole.match(/class="dual-claimed[^"]*"[^>]*style="height:([0-9.e+-]+)%"/),stack=whole.match(/class="allocation-stack" style="height:([0-9.e+-]+)%"/);assert.ok(net&&stack);assert.ok(Math.abs(Number(net[1])-100*m.net/scale)<1e-8);assert.equal(Number(net[1]),Number(stack[1]));const bars=[...whole.matchAll(/data-lc-series="(paid|denied|resubmitted|awaiting)"[^>]* style="height:([0-9.e+-]+)%/g)];assert.equal(bars.length,4);assert.deepEqual(bars.map(b=>b[1]),['awaiting','resubmitted','denied','paid']);let sum=0;for(const b of bars){const pct=Number(b[2]);sum+=pct;assert.ok(Math.abs(pct-(m.net?100*m[b[1]]/m.net:0))<1e-8)}assert.ok(Math.abs(sum-(m.net?100:0))<1e-8)});
+ const max=Math.max(1,...ms.map(m=>m.net)),scale=Math.max(1,Math.ceil(max*1.12/40000)*10000)*4;
+ groups.forEach((g,i)=>{const m=ms[i],whole=g[1],stack=whole.match(/class="allocation-stack single-stack" style="height:([0-9.e+-]+)%"/);assert.ok(stack);assert.ok(Math.abs(Number(stack[1])-100*m.net/scale)<1e-8);assert.match(whole,/class="stack-total"[^>]*data-lc-series="net"/);assert.doesNotMatch(whole,/dual-claimed/);const bars=[...whole.matchAll(/data-lc-series="(paid|denied|resubmitted|awaiting)"[^>]* style="height:([0-9.e+-]+)%/g)];assert.equal(bars.length,4);assert.deepEqual(bars.map(b=>b[1]),['awaiting','resubmitted','denied','paid']);let sum=0;for(const b of bars){const pct=Number(b[2]);sum+=pct;assert.ok(Math.abs(pct-(m.net?100*m[b[1]]/m.net:0))<1e-8)}assert.ok(Math.abs(sum-(m.net?100:0))<1e-8)});
  run("visible.awaiting=false;renderChart()");assert.match(get('plot').innerHTML,/stack-segment hidden-series/);run("visible.awaiting=true;renderChart()");
 });
 check('nested rejection and distinct RA evidence stages',()=>{

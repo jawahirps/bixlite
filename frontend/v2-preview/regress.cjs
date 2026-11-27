@@ -55,6 +55,14 @@ check('all financial chart series implemented as accessible actions',()=>{
  assert.ok(select('[data-lc-month-label]').length>0);
  assert.match(markup,/<button[^>]*id="heroNet"[^>]*data-lc-metric="net"/);
 });
+check('monthly claimed envelope contains proportional non-overlapping component series',()=>{
+ const ms=Array.from(run("monthly.map(m=>({key:m.key,...totals(filtered.filter(r=>r.month===m.key&&matchStatus(r)))}))"));
+ const output=get('plot').innerHTML;
+ const groups=[...output.matchAll(/<div class="claim-frame" style="height:([0-9.e+-]+)%">([\s\S]*?)<\/div><\/div><\/div><button class="month"/g)];
+ assert.equal(groups.length,ms.length);
+ const max=Math.max(1,...ms.map(m=>m.net)),scale=Math.max(1,Math.ceil(max/40000)*10000)*4;
+ groups.forEach((g,i)=>{const m=ms[i],height=Number(g[1]);assert.ok(Math.abs(height-100*m.net/scale)<1e-8);assert.match(g[2],/class="claimed-outline/);const bars=[...g[2].matchAll(/data-lc-series="(paid|denied|resubmitted|awaiting)"[^>]* style="height:([0-9.e+-]+)%/g)];assert.equal(bars.length,4);let sum=0;for(const b of bars){const pct=Number(b[2]);sum+=pct;assert.ok(Math.abs(pct-(m.net?100*m[b[1]]/m.net:0))<1e-8)}assert.ok(Math.abs(sum-(m.net?100:0))<1e-8)});
+});
 check('nested rejection and distinct RA evidence stages',()=>{
  assert.ok(run("all.some(r=>r.lifecycle==='first-ra-pending')&&all.some(r=>r.lifecycle==='first-ra-rejected')&&all.some(r=>r.lifecycle==='second-ra-pending')&&all.some(r=>r.lifecycle==='second-ra-rejected')&&all.some(r=>r.lifecycle==='reconciliation-review')"));
  assert.deepEqual(Array.from(run("lcSteps(all.find(r=>r.lifecycle==='second-ra-rejected')).map(s=>s[0])")),['Original claim','Initial rejection','First resubmission','First resubmission RA','Second resubmission','Second resubmission RA','Decision']);
